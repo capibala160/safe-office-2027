@@ -8,12 +8,26 @@ const crypto = require('node:crypto');
 // ---------- 策略矩阵：角色 × 动作 → allow | confirm | deny ----------
 // 规则：未声明的动作 = 默认拒绝（fail-closed）
 const DEFAULT_POLICIES = [
+  // 文件访问
   { role: '员工', action: 'readDoc', decision: 'allow' },
   { role: '员工', action: 'summarize', decision: 'allow' },
+  { role: '员工', action: 'deleteDoc', decision: 'confirm' },
+  // 邮件发送
   { role: '员工', action: 'sendInternalEmail', decision: 'allow' },
   { role: '员工', action: 'sendExternalEmail', decision: 'confirm' }, // 高危 → 二次确认
-  { role: '员工', action: 'deleteDoc', decision: 'confirm' },
+  // 会议预约 / 通讯录读取 / 录音转写
+  { role: '员工', action: 'scheduleMeeting', decision: 'allow' },
+  { role: '员工', action: 'readContact', decision: 'allow' },        // 单条+脱敏由工具层保证
+  { role: '员工', action: 'transcribeAudio', decision: 'allow' },    // 转写结果强制过闸1
+  // 打印控制 / 屏幕共享 / 设备联动（打印机密禁止在工具层前置拦截）
+  { role: '员工', action: 'printDoc', decision: 'confirm' },
+  { role: '员工', action: 'shareScreen', decision: 'confirm' },
+  { role: '员工', action: 'deviceControl', decision: 'confirm' },
+  // 外部上传/云同步：默认拒绝（fail-closed 的最严一档，需专门授权）
+  { role: '员工', action: 'uploadToCloud', decision: 'deny' },
+  // 角色约束示例
   { role: '实习生', action: 'sendExternalEmail', decision: 'deny' },
+  { role: '实习生', action: 'scheduleMeeting', decision: 'deny' },
 ];
 
 class PolicyEngine {

@@ -2,7 +2,7 @@
 
 > **目标赛事**：中国国际大学生创新大赛（2027）· 产业赛道 · 华为企业命题「基于 OpenHarmony 的安全智慧办公系统设计」
 > **底座**：OpenHarmony 6.0.0.1 Release（主设备标准系统 · API 20）+ WS63 星闪节点（OH 轻量系统）
-> **状态**：2026-10-14 立项 · **P0 储备期**（设计骨架 + 环境清单 + **核心机制原型 v0.3 已跑通**；硬件未购）
+> **状态**：2026-10-14 立项 · **P0 储备期**（设计骨架 + 环境清单 + **核心机制原型 v0.4 已跑通**，命题点名项已逐条对齐；硬件未购）
 
 ---
 
@@ -56,10 +56,10 @@
 ├── docs/
 │   ├── 00-Agent安全运行机制-设计骨架-v0.1.md   ← 核心技术方案（命题应答主体）
 │   └── 01-环境搭建清单.md                     ← P1 开工用（三条线 + 避坑）
-└── prototype/                               ← 核心机制原型 v0.3（Node 零依赖，平台无关）
-    ├── demo.cjs                             ← 攻防演示：注入/越权/冻结闭环/近场/回滚（node demo.cjs）
-    ├── src/                                 ← llm 可插拔模型 / planner 计划校验 / guard 四道闸 / governance 治理 / runtime 编排 / scenario 场景
-    └── test/                                ← 19 项测试（npm test，全绿）
+└── prototype/                               ← 核心机制原型 v0.4（Node 零依赖，平台无关）
+    ├── demo.cjs                             ← 攻防演示 12 幕 + 时延开销报告（node demo.cjs）
+    ├── src/                                 ← llm 可插拔模型 / planner 计划校验 / guard 五道闸 / capabilities 能力分级表 / governance 治理 / runtime 编排 / perf 时延度量 / scenario 场景
+    └── test/                                ← 33 项测试（npm test，全绿）；attacks.test.cjs=命题点名 5 类攻击的可复现样例库
 ```
 
 ## 口径纪律

@@ -5,22 +5,28 @@ const assert = require('node:assert');
 
 const {
   sanitizeInput, CapabilityToken, checkToolCall,
-  checkDataBoundary, redact, requestHumanConfirm,
+  checkDataBoundary, redact, requestHumanConfirm, checkAgentOutput,
 } = require('../src/guard.cjs');
 const { PolicyEngine, AuditLog, RiskMeter } = require('../src/governance.cjs');
 const { DOCS } = require('../src/scenario.cjs');
 const { AgentRuntime } = require('../src/runtime.cjs');
-const { GuardedPlanner, validatePlan } = require('../src/planner.cjs');
+const { GuardedPlanner, validatePlan, KNOWN_TOOLS } = require('../src/planner.cjs');
 const { MockLLM, HttpLLM } = require('../src/llm.cjs');
+const { CAPABILITIES, TOOL_META } = require('../src/capabilities.cjs');
+const { PerfMeter } = require('../src/perf.cjs');
 
 // 组装一个完整运行时（共享 policy/audit/risk/planner）
-function mkRt({ tools, domains = [], threshold = 60 } = {}) {
+function mkRt({ tools, domains = [], threshold = 60, maxCalls, perf } = {}) {
   const policy = new PolicyEngine();
   const audit = new AuditLog();
   const risk = new RiskMeter(threshold, { onEvent: (kind, detail) => audit.append(kind, detail) });
   const planner = new GuardedPlanner({ llm: new MockLLM(), audit, risk });
-  const rt = new AgentRuntime({ policy, audit, risk, planner });
-  const token = new CapabilityToken({ tools, allowedExternalDomains: domains });
+  const rt = new AgentRuntime({ policy, audit, risk, planner, perf });
+  const token = new CapabilityToken({
+    tools,
+    allowedExternalDomains: domains,
+    maxCalls: maxCalls === undefined ? Infinity : maxCalls,
+  });
   return { rt, audit, risk, token };
 }
 
@@ -249,4 +255,91 @@ test('端到端③：越权域名被闸2拒绝（私人邮箱）', async () => {
   });
   const lines = await rt.runCommand('把预算评审会纪要发到我私人邮箱', { role: '员工', token, nearfieldOnline: true });
   assert.ok(lines.join('\n').includes('不在白名单'), '163.com 不在白名单应被拒绝');
+});
+
+// ---------- 闸5 · 输出检测（AI 输出侧安全） ----------
+test('闸5：生成内容含机密文档原文片段 → 拦截（防"总结式泄密"）', () => {
+  const oc = checkAgentOutput(`转述如下：${DOCS.M1.body}`, { confidentialDocs: [DOCS.M1] });
+  assert.equal(oc.allowed, false);
+  assert.ok(oc.reasons.join('、').includes('机密'), '应命中机密碎片比对');
+});
+
+test('闸5：违规承诺话术 → 拦截（生成不合规办公内容）', () => {
+  const oc = checkAgentOutput('回复稿：我们保证能够通过最终合规审查，请放心。');
+  assert.equal(oc.allowed, false);
+  assert.ok(oc.reasons.join('、').includes('承诺'), '应命中违规承诺话术');
+});
+
+test('闸5：外发内容 PII 残留 → 自动脱敏（闸3 之后的第二道兜底）', () => {
+  const oc = checkAgentOutput('对接人电话 13800138000', { external: true });
+  assert.equal(oc.allowed, true);
+  assert.equal(oc.action, 'redact');
+  assert.ok(oc.content.includes('[手机号已脱敏]'));
+});
+
+// ---------- 办公能力分级表（单一事实源） ----------
+test('能力分级表：命题点名 8 类能力全覆盖，每个工具都有分级', () => {
+  const named = ['邮件发送', '文件访问', '会议预约', '通讯录读取', '打印控制', '录音转写', '屏幕共享', '设备联动'];
+  for (const name of named) {
+    const cap = CAPABILITIES.find((c) => c.name === name);
+    assert.ok(cap, `能力「${name}」应在分级表内`);
+    assert.ok(['L1', 'L2', 'L3', 'L4'].includes(cap.level), `能力「${name}」应有风险级`);
+    for (const t of cap.tools) assert.ok(KNOWN_TOOLS.has(t), `工具 ${t} 应在工具目录内`);
+  }
+  for (const tool of KNOWN_TOOLS) {
+    assert.ok(TOOL_META[tool] && TOOL_META[tool].level, `工具 ${tool} 应有分级元数据`);
+  }
+});
+
+test('策略：外部上传默认拒绝；打印/共享/设备分级为需确认', () => {
+  const p = new PolicyEngine();
+  assert.equal(p.decide('员工', 'uploadToCloud'), 'deny', '外部上传=默认拒绝');
+  assert.equal(p.decide('员工', 'printDoc'), 'confirm');
+  assert.equal(p.decide('员工', 'shareScreen'), 'confirm');
+  assert.equal(p.decide('员工', 'deviceControl'), 'confirm');
+});
+
+// ---------- 新能力专项约束 ----------
+test('打印控制：内部级放行（水印留痕）；机密级禁止打印', async () => {
+  const { rt, token } = mkRt({ tools: ['readDoc', 'printDoc'] });
+  const ctx = { role: '员工', token, nearfieldOnline: true };
+  await rt.execStep({ action: 'readDoc', args: { id: 'M2' } }, 1, ctx);
+  const okLine = await rt.execStep({ action: 'printDoc', args: { id: 'M2' } }, 2, ctx);
+  assert.ok(okLine.includes('已打印') && okLine.includes('水印'), '内部级应放行并留痕');
+  await rt.execStep({ action: 'readDoc', args: { id: 'M1' } }, 3, ctx);
+  const denyLine = await rt.execStep({ action: 'printDoc', args: { id: 'M1' } }, 4, ctx);
+  assert.ok(denyLine.includes('⛔') && denyLine.includes('机密'), '机密级禁止打印');
+});
+
+test('屏幕共享：知识库存在机密材料 → 拒绝；无机密材料时可确认放行', async () => {
+  const { rt, token } = mkRt({ tools: ['readDoc', 'shareScreen'] });
+  const ctx = { role: '员工', token, nearfieldOnline: true };
+  const ok = await rt.execStep({ action: 'shareScreen', args: { id: 'M2' } }, 1, ctx);
+  assert.ok(ok.includes('已开启'), '无机密材料时可共享');
+  await rt.execStep({ action: 'readDoc', args: { id: 'M1' } }, 2, ctx);
+  const deny = await rt.execStep({ action: 'shareScreen', args: { id: 'M2' } }, 3, ctx);
+  assert.ok(deny.includes('⛔') && deny.includes('机密'), '存在机密材料时禁止共享');
+});
+
+test('录音转写：转写文本按不可信输入过闸1（注入检出并隔离）', async () => {
+  const { rt, token, audit } = mkRt({ tools: ['transcribeAudio'] });
+  const clean = await rt.execStep({ action: 'transcribeAudio', args: { id: 'A1' } }, 1, { role: '员工', token });
+  assert.ok(clean.includes('转写完成') && clean.includes('闸1'), '正常录音转写并标注已过闸1');
+  const tainted = await rt.execStep({ action: 'transcribeAudio', args: { id: 'A2' } }, 2, { role: '员工', token });
+  assert.ok(tainted.includes('⚠️') && tainted.includes('隔离'), '录音里的注入指令应被隔离');
+  assert.ok(rt.knowledge.tr_A2 && rt.knowledge.tr_A2.tainted, '转写稿应标记为受污染');
+  assert.ok(audit.entries.some((e) => e.kind === '闸1触发' && String(e.detail.source || '').includes('转写')));
+});
+
+// ---------- 时延度量（答题要求 #2） ----------
+test('时延度量：各闸耗时被记录（报告可产出）', async () => {
+  const perf = new PerfMeter();
+  const { rt, token } = mkRt({ tools: ['readDoc', 'summarize', 'sendInternalEmail'], perf });
+  await rt.runCommand('把周例会纪要整理一下', { role: '员工', token });
+  const rep = perf.report();
+  assert.ok(rep.length >= 4, `应至少有 4 类打点（实际 ${rep.length}）`);
+  for (const s of rep) {
+    assert.ok(s.count > 0 && s.totalMs >= 0 && s.avgMs >= 0, `${s.label} 打点数据完整`);
+  }
+  assert.ok(perf.totalMs() >= 0);
 });

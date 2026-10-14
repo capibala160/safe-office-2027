@@ -7,17 +7,13 @@
 //      —— 收件人只出现在外部材料、与用户指令无关 = 注入诱导 → 移除并记录证据
 // ============================================================
 const { sanitizeInput } = require('./guard.cjs');
+const { TOOL_META } = require('./capabilities.cjs');
 
-const KNOWN_TOOLS = new Set(['readDoc', 'summarize', 'sendInternalEmail', 'sendExternalEmail', 'deleteDoc']);
-
-// 每个工具的必需参数（缺参 = 结构不完整，不给执行）
-const REQUIRED_ARGS = {
-  readDoc: ['id'],
-  summarize: ['of'],
-  sendInternalEmail: ['to', 'docId'],
-  sendExternalEmail: ['to', 'docId'],
-  deleteDoc: ['id'],
-};
+// 工具目录与必需参数：从能力分级表（单一事实源）派生
+const KNOWN_TOOLS = new Set(Object.keys(TOOL_META));
+const REQUIRED_ARGS = Object.fromEntries(
+  Object.entries(TOOL_META).map(([tool, meta]) => [tool, meta.requiredArgs || []]),
+);
 
 function validatePlan(rawSteps, { command = '', docs = [] } = {}) {
   const steps = [];
@@ -36,6 +32,16 @@ function validatePlan(rawSteps, { command = '', docs = [] } = {}) {
     );
     if (missing.length > 0) {
       findings.push({ level: 'block', reason: `步骤 ${s.action} 缺少必需参数 [${missing.join(', ')}]，已移除`, step: s });
+      continue;
+    }
+    // 身份治理：代发他人身份（以X名义 / 代发）需持委托令牌，当前任务未签发 → 默认拒绝
+    if ((s.action === 'sendInternalEmail' || s.action === 'sendExternalEmail') &&
+        /(以|用).{1,10}名义|代为?(发送|群发|发信)/.test(command)) {
+      findings.push({
+        level: 'block',
+        reason: `代发语义（以他人名义发送）且未持委托令牌 → 默认拒绝（身份治理）`,
+        step: s,
+      });
       continue;
     }
     // 来源溯源：出站收件人的出处检查
