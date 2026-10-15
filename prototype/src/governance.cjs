@@ -4,12 +4,14 @@
 // 平台无关实现——上板时平移 ArkTS（哈希可用 HUKS/标准库）
 // ============================================================
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 
 // ---------- 策略矩阵：角色 × 动作 → allow | confirm | deny ----------
 // 规则：未声明的动作 = 默认拒绝（fail-closed）
 const DEFAULT_POLICIES = [
   // 文件访问
   { role: '员工', action: 'readDoc', decision: 'allow' },
+  { role: '员工', action: 'recognizeImage', decision: 'allow' },
   { role: '员工', action: 'summarize', decision: 'allow' },
   { role: '员工', action: 'deleteDoc', decision: 'confirm' },
   // 邮件发送
@@ -32,7 +34,7 @@ const DEFAULT_POLICIES = [
 
 class PolicyEngine {
   constructor(policies = DEFAULT_POLICIES) {
-    this.policies = policies;
+    this.policies = structuredClone(policies);
     this.changes = []; // 策略热更新的变更记录（由调用方写入审计链）
   }
   decide(role, action) {
@@ -41,6 +43,7 @@ class PolicyEngine {
   }
   // 策略热更新：不重启即可调整「角色 × 动作」决策；变更必须留痕（返回记录供落审计）
   update(role, action, decision, { by = '安全管理员', reason = '' } = {}) {
+    if (!['allow', 'confirm', 'deny'].includes(decision)) throw new Error('非法策略决策');
     const rec = { role, action, decision, by, reason, ts: new Date().toISOString() };
     const hit = this.policies.find((p) => p.role === role && p.action === action);
     rec.before = hit ? hit.decision : '(未声明)';
@@ -65,22 +68,42 @@ class AuditLog {
       ts: new Date().toISOString(),
       prevHash: this.prevHash,
     };
-    rec.hash = crypto.createHash('sha256').update(JSON.stringify(rec)).digest('hex').slice(0, 12);
+    rec.detail = structuredClone(detail);
+    rec.hash = crypto.createHash('sha256').update(JSON.stringify(rec)).digest('hex');
     this.prevHash = rec.hash;
     this.entries.push(rec);
     return rec;
   }
   // 全链校验：任何一条被改动 / 顺序被换 → false
-  verify() {
+  checkpoint() { return { count: this.entries.length, head: this.prevHash }; }
+  // checkpoint 必须由调用者独立保存或签名；与日志放在一起不能抵抗整链替换。
+  save(file) {
+    if (!this.verify()) throw new Error('拒绝持久化损坏的审计链');
+    const checkpoint = this.checkpoint();
+    fs.writeFileSync(file, JSON.stringify({ entries: this.entries, checkpoint }), { encoding: 'utf8', mode: 0o600 });
+    return checkpoint;
+  }
+  static load(file, trustedCheckpoint) {
+    if (!trustedCheckpoint) throw new Error('恢复审计需要独立可信检查点');
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const log = new AuditLog();
+    log.entries = data.entries;
+    log.prevHash = trustedCheckpoint.head;
+    if (!log.verify(trustedCheckpoint)) throw new Error('审计恢复校验失败');
+    return log;
+  }
+  verify(checkpoint = this.checkpoint()) {
     let prev = 'GENESIS';
-    for (const e of this.entries) {
+    for (let i = 0; i < this.entries.length; i++) {
+      const e = this.entries[i];
+      if (e.seq !== i + 1) return false;
       if (e.prevHash !== prev) return false;
       const payload = { seq: e.seq, kind: e.kind, detail: e.detail, ts: e.ts, prevHash: e.prevHash };
-      const h = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 12);
+      const h = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
       if (e.hash !== h) return false;
       prev = e.hash;
     }
-    return true;
+    return checkpoint.count === this.entries.length && checkpoint.head === prev;
   }
 }
 

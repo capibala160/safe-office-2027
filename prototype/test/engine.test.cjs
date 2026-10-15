@@ -29,6 +29,7 @@ function mkRt({ tools, domains = [], threshold = 60, maxCalls, perf } = {}) {
   const rt = new AgentRuntime({ policy, audit, risk, planner, perf });
   const token = new CapabilityToken({
     tools,
+    documentIds: ['M1', 'M2', 'M3', 'I1', 'I2', 'A1', 'A2'],
     allowedExternalDomains: domains,
     maxCalls: maxCalls === undefined ? Infinity : maxCalls,
   });
@@ -119,7 +120,7 @@ test('计划校验：非法动作被移除，合法步骤保留', () => {
 test('计划校验：收件人只来自外部材料 → 溯源拦截并移除', () => {
   const { steps, findings } = validatePlan(
     [{ action: 'sendExternalEmail', args: { to: 'press@media-example.com', docId: 'M1' } }],
-    { command: '把评审会纪要整理成正式版', docs: [DOCS.M3] },
+    { command: '把评审会纪要整理成正式版，发给 team@corp.internal', docs: [DOCS.M3] },
   );
   assert.equal(steps.length, 0, '可疑外发步骤必须被移除');
   assert.equal(findings.length, 1);
@@ -198,24 +199,24 @@ test('冻结拦截：高危动作在冻结期内一律转人工（近场在线�
   risk.add(70, '测试：直接推高');
   assert.ok(risk.frozen);
 
-  let out = (await rt.runCommand('把周例会纪要发给外部参会方', { role: '员工', token, nearfieldOnline: true })).join('\n');
+  let out = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true })).join('\n');
   assert.ok(out.includes('风险冻结拦截'), '冻结期间高危动作应被拦截');
   assert.equal(rt.outbox.length, 0, '冻结期不应产生外发');
   assert.ok(rt.audit.entries.some((e) => e.kind === '冻结拦截'), '拦截应入审计链');
 
   risk.review({ by: '管理员', outcome: 'clear', note: '测试解冻' });
-  out = (await rt.runCommand('把周例会纪要发给外部参会方', { role: '员工', token, nearfieldOnline: true })).join('\n');
+  out = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true })).join('\n');
   assert.ok(out.includes('已发送'), '解冻后应恢复放行');
 });
 
 // ---------- L2 闸4 · 快照回滚 ----------
-test('快照回滚：高危外发可撤回；deleteDoc 真删除并可恢复', async () => {
+test('快照回滚：外发不可撤回；本地删除可恢复', async () => {
   const { rt, token } = mkRt({ tools: ['readDoc', 'sendExternalEmail', 'deleteDoc'], domains: ['partner-example.com'] });
-  await rt.runCommand('把周例会纪要发给外部参会方', { role: '员工', token, nearfieldOnline: true });
+  await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true });
   assert.equal(rt.outbox.length, 1, '先正常外发一封');
   const snap = rt.rollback();
   assert.ok(snap, '应存在执行前快照');
-  assert.equal(rt.outbox.length, 0, '回滚后外发应被撤回');
+  assert.equal(rt.outbox.length, 1, '本地回滚不撤回已经发生的外发');
 
   await rt.execStep({ action: 'readDoc', args: { id: 'M2' } }, 1, { role: '员工', token, nearfieldOnline: true });
   assert.ok(rt.knowledge.M2, 'M2 应已读入');
@@ -235,7 +236,7 @@ test('HttpLLM：未配置环境变量时明确报错（默认走 MockLLM）', as
 // ---------- 端到端 ----------
 test('端到端①：注入带偏模型 → 计划校验移除恶意外发 + 闸1/闸3 分层拦截', async () => {
   const { rt, audit, risk, token } = mkRt({ tools: ['readDoc', 'summarize', 'sendInternalEmail'] });
-  const lines = await rt.runCommand('把昨天的预算评审会纪要整理成正式版', { role: '员工', token, nearfieldOnline: false });
+  const lines = await rt.runCommand('把昨天的预算评审会纪要整理成正式版，发给 team@corp.internal', { role: '员工', token, nearfieldOnline: false });
   const joined = lines.join('\n');
   assert.ok(joined.includes('检出注入'), '读入时应识别出注入');
   assert.ok(joined.includes('计划校验') && joined.includes('已移除'), '被污染的外发步骤应被计划校验移除');
@@ -247,7 +248,7 @@ test('端到端①：注入带偏模型 → 计划校验移除恶意外发 + 闸
 test('端到端②：高危外发——人不在场拒绝，到场确认后放行', async () => {
   const run = async (near) => {
     const { rt, token } = mkRt({ tools: ['readDoc', 'sendExternalEmail'], domains: ['partner-example.com'] });
-    return (await rt.runCommand('把周例会纪要发给外部参会方', { role: '员工', token, nearfieldOnline: near })).join('\n');
+    return (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: near })).join('\n');
   };
   assert.ok((await run(false)).includes('闸4拒绝'), '不在场应拒绝');
   assert.ok((await run(true)).includes('已发送'), '到场确认后应放行发送');
@@ -258,7 +259,7 @@ test('端到端③：越权域名被闸2拒绝（私人邮箱）', async () => {
     tools: ['readDoc', 'summarize', 'sendInternalEmail', 'sendExternalEmail'],
     domains: ['partner-example.com'],
   });
-  const lines = await rt.runCommand('把预算评审会纪要发到我私人邮箱', { role: '员工', token, nearfieldOnline: true });
+  const lines = await rt.runCommand('把预算评审会纪要发到我私人邮箱 personal@163.com', { role: '员工', token, nearfieldOnline: true });
   assert.ok(lines.join('\n').includes('不在白名单'), '163.com 不在白名单应被拒绝');
 });
 
@@ -452,7 +453,7 @@ test('模型边界：云侧规划——机密正文不送云（分流 + 审计�
   const risk = new RiskMeter(60);
   const planner = new GuardedPlanner({ llm: new MockLLM(), audit, risk });
   let seen = null;
-  planner.llm = { plan: async (cmd, blocks) => { seen = blocks; return []; } }; // 抓取模型真实收到的上下文
+  planner.llm = { deployment: 'local', plan: async (cmd, blocks) => { seen = blocks; return []; } }; // 受信任本地适配器
   await planner.makePlan('整理纪要', { docs: [DOCS.M1, DOCS.M2], modelLocation: 'cloud' });
   const m1 = seen.find((b) => b.id === 'M1');
   assert.equal(m1.withheld, true, '机密文档应标记分流');
@@ -488,7 +489,7 @@ test('图片通道：识别文本按不可信输入过闸1（图内注入隔离�
 
 test('图片通道：机密截图识别后外发 → 闸3 按密级拦截（端到端）', async () => {
   const { rt, token } = mkRt({ tools: ['recognizeImage', 'sendExternalEmail'], domains: ['partner-example.com'] });
-  const out = (await rt.runCommand('把预算表截图识别后发给外部参会方', { role: '员工', token, nearfieldOnline: true })).join('\n');
+  const out = (await rt.runCommand('把预算表截图识别后发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true })).join('\n');
   assert.ok(out.includes('闸3拒绝'), '机密截图禁止出站');
   assert.equal(rt.outbox.length, 0);
 });

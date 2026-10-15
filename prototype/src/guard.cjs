@@ -43,9 +43,11 @@ function sanitizeInput(text) {
 
 // ---------- 闸2 · 权限令牌（任务级最小权限） ----------
 class CapabilityToken {
-  constructor({ tools = [], allowedExternalDomains = [], maxCalls = Infinity, issuedFor = '', ttlMs = 0, issuedAt = Date.now() } = {}) {
+  constructor({ tools = [], documentIds = [], allowedExternalDomains = [], allowedInternalDomains = ['corp.internal'], maxCalls = Infinity, issuedFor = '', ttlMs = 0, issuedAt = Date.now() } = {}) {
+    this.documentIds = [...documentIds];
     this.tools = tools;                          // 本任务允许调用的工具白名单
     this.allowedExternalDomains = allowedExternalDomains; // 外发邮件域名白名单
+    this.allowedInternalDomains = allowedInternalDomains; // 内部邮件域名白名单
     this.maxCalls = maxCalls;                    // 调用次数上限
     this.issuedFor = issuedFor;                  // 任务描述（审计用）
     this.issuedAt = issuedAt;                    // 签发时间
@@ -57,22 +59,32 @@ class CapabilityToken {
 // 注意：配额只计「放行的调用」——被拒绝的调用不消耗授权次数，
 // 否则攻击者可用垃圾调用耗干令牌，让正常步骤全部饿死。
 function checkToolCall(token, tool, args = {}, { now = Date.now() } = {}) {
+  if (!token || token.revoked) return { allow: false, reason: '令牌缺失或已撤销' };
   if (token.expiresAt && now > token.expiresAt) {
-    return { allow: false, reason: `令牌已过期（签发于 ${new Date(token.issuedAt).toISOString()}，任务完成后即失效）` };
+      return { allow: false, reason: `令牌已过期（签发于 ${new Date(token.issuedAt).toISOString()}）` };
   }
   if (!token.tools.includes(tool)) {
     return { allow: false, reason: `工具「${tool}」不在本任务授权清单内` };
   }
-  if (tool === 'sendExternalEmail') {
+  if (tool === 'sendExternalEmail' || tool === 'sendInternalEmail') {
     const domain = String(args.to || '').split('@')[1] || '';
-    if (!token.allowedExternalDomains.includes(domain)) {
-      return { allow: false, reason: `外部域名「${domain || '(缺失)'}」不在白名单` };
+    const allowed = tool === 'sendExternalEmail' ? token.allowedExternalDomains : token.allowedInternalDomains;
+    if (!allowed.includes(domain)) {
+      return { allow: false, reason: `${tool === 'sendExternalEmail' ? '外部' : '内部'}域名「${domain || '(缺失)'}」不在白名单` };
     }
   }
   if (token.used + 1 > token.maxCalls) {
     return { allow: false, reason: `令牌调用次数超限（>${token.maxCalls}）` };
   }
   token.used += 1;
+  return { allow: true, reason: 'ok' };
+}
+
+function checkTokenActive(token, { now = Date.now() } = {}) {
+  if (!token || token.revoked) return { allow: false, reason: '令牌缺失或已撤销' };
+  if (token.expiresAt && now > token.expiresAt) {
+    return { allow: false, reason: `令牌已过期（签发于 ${new Date(token.issuedAt).toISOString()}）` };
+  }
   return { allow: true, reason: 'ok' };
 }
 
@@ -94,6 +106,9 @@ const OUTBOUND_ACTIONS = new Set(['sendInternalEmail', 'sendExternalEmail', 'upl
 function checkDataBoundary(doc, action) {
   if (!OUTBOUND_ACTIONS.has(action)) {
     return { allow: true, reason: '非出站动作', content: doc.body };
+  }
+  if (!['公开', '内部', '机密'].includes(doc.level)) {
+    return { allow: false, reason: `文档「${doc.title}」密级未知，禁止出站` };
   }
   if (doc.level === '机密') {
     return { allow: false, reason: `文档「${doc.title}」密级=机密，禁止经 ${action} 外发` };
@@ -121,7 +136,7 @@ const HIGH_RISK_ACTIONS = new Set([
 // 上板后替换为真实 SLE 握手（WS63）
 async function requestHumanConfirm(step, { nearfieldOnline } = {}) {
   if (nearfieldOnline) {
-    return { approved: true, method: '星闪近场确认（SLE 握手成功，本人已到场）' };
+    return { approved: true, method: '模拟确认（非真实 SLE 凭据，不证明本人或距离）' };
   }
   return { approved: false, method: '未检测到近场设备 → 超时拒绝' };
 }
@@ -176,7 +191,7 @@ function checkAgentOutput(text, { level = '内部', confidentialDocs = [], exter
 
 module.exports = {
   sanitizeInput, INJECTION_PATTERNS,
-  CapabilityToken, checkToolCall,
+  CapabilityToken, checkToolCall, checkTokenActive,
   redact, checkDataBoundary, OUTBOUND_ACTIONS,
   HIGH_RISK_ACTIONS, requestHumanConfirm,
   checkAgentOutput, UNCOMPLIANT_OUTPUT_PATTERNS,
