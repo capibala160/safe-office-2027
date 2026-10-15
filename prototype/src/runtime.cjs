@@ -16,8 +16,9 @@ const {
   requestHumanConfirm,
   redact,
 } = require('./guard.cjs');
-const { DOCS, CONTACTS, AUDIOS } = require('./scenario.cjs');
+const { DOCS, CONTACTS, AUDIOS, IMAGES } = require('./scenario.cjs');
 const { PerfMeter } = require('./perf.cjs');
+const { DEFAULT_SANDBOX, checkSandbox } = require('./sandbox.cjs');
 
 class AgentRuntime {
   constructor({ policy, audit, risk, planner, perf }) {
@@ -63,14 +64,18 @@ class AgentRuntime {
     return snap;
   }
 
-  async runCommand(command, { role = '员工', token, nearfieldOnline = false, scene = '' } = {}) {
+  async runCommand(command, { role = '员工', token, nearfieldOnline = false, scene = '', modelLocation = 'local', sandbox } = {}) {
     this.audit.append('用户指令', { role, command, scene });
     const lines = [`指令：「${command}」（角色：${role}）`];
 
     // 出计划（模型 → 计划校验），校验发现直接展示
-    const { steps, findings } = await this.perf.measureAsync('规划+计划校验', () =>
-      this.planner.makePlan(command, { docs: Object.values(DOCS) }),
+    const { steps, findings, contextInfo } = await this.perf.measureAsync('规划+计划校验', () =>
+      this.planner.makePlan(command, { docs: Object.values(DOCS), modelLocation }),
     );
+    if (contextInfo && (contextInfo.modelLocation === 'cloud' || contextInfo.withheld.length > 0)) {
+      lines.push(`  〔模型边界〕规划走云侧模型：送入 [${contextInfo.sent.join(', ') || '无'}]，` +
+        `机密 ${contextInfo.withheld.length} 篇正文已分流（不送云，仅本地处理）——数据流向已入审计`);
+    }
     for (const f of findings) {
       lines.push(`  〔计划校验〕⛔ ${f.reason}`);
     }
@@ -79,7 +84,7 @@ class AgentRuntime {
     }
 
     for (let i = 0; i < steps.length; i++) {
-      lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline }));
+      lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox }));
     }
     return lines;
   }
@@ -92,8 +97,18 @@ class AgentRuntime {
     const t = this.perf.measure('闸2 权限令牌', () => checkToolCall(ctx.token, action, args));
     if (!t.allow) {
       this.risk.add(15, `闸2 拦截 ${action}：${t.reason}`);
+      this.risk.observe({ kind: 'blocked', action });
       this.audit.append('闸2拒绝', { n, action, args, reason: t.reason });
       return `  [${n}] ${action} ⛔ 闸2拒绝：${t.reason}`;
+    }
+
+    // —— 沙箱：执行环境独立一锁（令牌放行 ≠ 环境放行）——
+    const sb = this.perf.measure('沙箱校验', () => checkSandbox(action, args, ctx.sandbox || DEFAULT_SANDBOX));
+    if (!sb.allow) {
+      this.risk.add(20, `沙箱拦截 ${action}：${sb.reason}`);
+      this.risk.observe({ kind: 'blocked', action });
+      this.audit.append('沙箱拒绝', { n, action, args, reason: sb.reason, sandbox: (ctx.sandbox || DEFAULT_SANDBOX).name });
+      return `  [${n}] ${action} ⛔ 沙箱拒绝：${sb.reason}`;
     }
 
     // —— 读文档：先过闸1（输入消毒，注入内容隔离为"仅数据"）——
@@ -111,10 +126,26 @@ class AgentRuntime {
       return `  [${n}] readDoc(${doc.id}) ✓（密级=${doc.level}）`;
     }
 
+    // —— 图片识别：OCR 文本 = 外部内容 → 强制过闸1（图内注入同权隔离）——
+    if (action === 'recognizeImage') {
+      const img = IMAGES[args.id];
+      if (!img) return `  [${n}] recognizeImage(${args.id}) ⛔ 图片不存在`;
+      const san = this.perf.measure('闸1 输入消毒', () => sanitizeInput(img.ocrText));
+      this.knowledge[`img_${img.id}`] = { id: `img_${img.id}`, title: `${img.title}（识别稿）`, level: img.level, cleaned: san.cleaned, tainted: !san.safe, ocr: true };
+      if (!san.safe) {
+        this.risk.add(25, `图片「${img.title}」识别文本检出注入并隔离：${san.reasons.join('、')}`);
+        this.audit.append('闸1触发', { n, source: `图片 ${img.id}`, level: img.level, reasons: san.reasons });
+        return `  [${n}] recognizeImage(${img.id}) ⚠️ 图内文字检出注入并隔离（${san.reasons.join('、')}）→ 仅作数据展示`;
+      }
+      this.audit.append('图片识别', { n, imageId: img.id, level: img.level });
+      return `  [${n}] recognizeImage(${img.id}) ✓（密级=${img.level}，识别文本已过闸1）`;
+    }
+
     // —— 策略矩阵（角色 × 动作）——
     const decision = this.perf.measure('策略矩阵', () => this.policy.decide(ctx.role, action));
     if (decision === 'deny') {
       this.risk.add(30, `策略禁止 ${action}`);
+      this.risk.observe({ kind: 'blocked', action });
       this.audit.append('策略拒绝', { n, role: ctx.role, action });
       return `  [${n}] ${action} ⛔ 策略拒绝：角色「${ctx.role}」不允许该动作`;
     }
@@ -152,6 +183,7 @@ class AgentRuntime {
       const b = this.perf.measure('闸3 数据边界', () => checkDataBoundary(doc, action));
       if (!b.allow) {
         this.risk.add(25, `闸3 拦截外发：${b.reason}`);
+        this.risk.observe({ kind: 'blocked', action });
         this.audit.append('闸3拒绝', { n, action, docId: doc.id, reason: b.reason });
         return `  [${n}] ${action} ⛔ 闸3拒绝：${b.reason}`;
       }
@@ -169,6 +201,7 @@ class AgentRuntime {
       );
       if (!oc.allowed) {
         this.risk.add(20, `闸5 拦截出站内容：${oc.reasons.join('、')}`);
+        this.risk.observe({ kind: 'blocked', action });
         this.audit.append('闸5拒绝', { n, action, reasons: oc.reasons });
         return `  [${n}] ${action} ⛔ 闸5拒绝：${oc.reasons.join('、')}`;
       }
@@ -192,6 +225,7 @@ class AgentRuntime {
       );
       if (!c.approved) {
         this.risk.add(10, `闸4 未确认：${c.method}`);
+        this.risk.observe({ kind: 'blocked', action });
         this.audit.append('闸4拒绝', { n, action, method: c.method });
         return `  [${n}] ${action} ⛔ 闸4拒绝：${c.method}`;
       }
@@ -202,6 +236,7 @@ class AgentRuntime {
     // —— 快照：高危动作执行前落盘，误操作可一键回滚 ——
     if (HIGH_RISK_ACTIONS.has(action)) {
       this.takeSnapshot(`执行前快照：${action}`);
+      this.risk.observe({ kind: 'executed-high-risk', action }); // 行为因子观测（频次/时段）
     }
 
     // —— 执行（模拟副作用）——

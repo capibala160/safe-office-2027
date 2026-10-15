@@ -14,6 +14,11 @@ const { GuardedPlanner, validatePlan, KNOWN_TOOLS } = require('../src/planner.cj
 const { MockLLM, HttpLLM } = require('../src/llm.cjs');
 const { CAPABILITIES, TOOL_META } = require('../src/capabilities.cjs');
 const { PerfMeter } = require('../src/perf.cjs');
+const { DEFAULT_SANDBOX, SANDBOX_PROFILES, checkSandbox } = require('../src/sandbox.cjs');
+const { buildReport } = require('../src/report.cjs');
+
+// 确定性时间戳（本地时区意义明确：h:30），用于行为因子测试
+const at = (h, day = 15) => new Date(2026, 9, day, h, 30, 0).getTime();
 
 // 组装一个完整运行时（共享 policy/audit/risk/planner）
 function mkRt({ tools, domains = [], threshold = 60, maxCalls, perf } = {}) {
@@ -342,4 +347,165 @@ test('时延度量：各闸耗时被记录（报告可产出）', async () => {
     assert.ok(s.count > 0 && s.totalMs >= 0 && s.avgMs >= 0, `${s.label} 打点数据完整`);
   }
   assert.ok(perf.totalMs() >= 0);
+});
+
+// ---------- 工具沙箱（挑战目标：白名单、沙箱、审批确认、二次确认） ----------
+test('沙箱：物理通道 fail-closed——默认环境拒绝设备联动，授予后放行', () => {
+  const deny = checkSandbox('deviceControl', { device: '会议室-门锁', op: 'open' }, DEFAULT_SANDBOX);
+  assert.equal(deny.allow, false);
+  assert.ok(deny.reason.includes('物理'), '拒绝理由应指出物理通道未开放');
+  const allow = checkSandbox('deviceControl', {}, { ...DEFAULT_SANDBOX, physical: true });
+  assert.equal(allow.allow, true);
+});
+
+test('沙箱：文件路径逃逸（../）被拒绝', () => {
+  const esc = checkSandbox('readDoc', { id: '../secrets' }, DEFAULT_SANDBOX);
+  assert.equal(esc.allow, false);
+  assert.ok(esc.reason.includes('越出'), '应给出路径逃逸理由');
+  assert.equal(checkSandbox('readDoc', { id: 'M2' }, DEFAULT_SANDBOX).allow, true);
+});
+
+test('沙箱：网络通道未授权 → 拒绝（收紧环境）', () => {
+  const tight = { ...DEFAULT_SANDBOX, name: '收紧沙箱', net: ['smtp-internal'] };
+  assert.ok(!checkSandbox('uploadToCloud', { url: 'https://x.example' }, tight).allow);
+  assert.ok(checkSandbox('uploadToCloud', { url: 'https://x.example' }, DEFAULT_SANDBOX).allow);
+});
+
+test('沙箱：全部工具均有沙箱档案（fail-closed 覆盖检查）', () => {
+  for (const tool of KNOWN_TOOLS) {
+    assert.ok(SANDBOX_PROFILES[tool], `工具 ${tool} 缺少沙箱档案（必须显式声明）`);
+  }
+  assert.equal(checkSandbox('unknownTool', {}, DEFAULT_SANDBOX).allow, false, '未知工具必须拒绝');
+});
+
+test('令牌生命周期：TTL 过期 → 拒绝且不消耗配额', () => {
+  const tk = new CapabilityToken({ tools: ['readDoc'], ttlMs: 1000, issuedAt: 1_000_000 });
+  assert.ok(checkToolCall(tk, 'readDoc', {}, { now: 1_000_500 }).allow, '有效期内放行');
+  const late = checkToolCall(tk, 'readDoc', {}, { now: 1_002_000 });
+  assert.equal(late.allow, false);
+  assert.ok(late.reason.includes('过期'));
+  assert.equal(tk.used, 1, '过期拒绝不消耗配额');
+});
+
+// ---------- 策略热更新 ----------
+test('策略热更新：update 立即生效且留痕（before/after）', () => {
+  const p = new PolicyEngine();
+  assert.equal(p.decide('员工', 'uploadToCloud'), 'deny');
+  const rec = p.update('员工', 'uploadToCloud', 'confirm', { by: '安全管理员', reason: '演练临时授权' });
+  assert.equal(p.decide('员工', 'uploadToCloud'), 'confirm', '热更新应立即生效');
+  assert.equal(rec.before, 'deny');
+  assert.equal(rec.decision, 'confirm');
+  assert.equal(p.changes.length, 1, '变更必须留痕');
+});
+
+// ---------- 风险评分模型：行为因子（频次 / 异常时段 / 持续越权） ----------
+test('行为因子：10 分钟内高危动作第 3 次 → +8 高频（第 4 次不重复）', () => {
+  const rm = new RiskMeter(60);
+  const t = at(14);
+  rm.observe({ kind: 'executed-high-risk', action: 'sendExternalEmail', ts: t });
+  rm.observe({ kind: 'executed-high-risk', action: 'sendExternalEmail', ts: t + 1000 });
+  assert.equal(rm.score, 0, '未达阈值次数不计分');
+  rm.observe({ kind: 'executed-high-risk', action: 'sendExternalEmail', ts: t + 2000 });
+  assert.equal(rm.score, 8, '第 3 次触发高频因子');
+  rm.observe({ kind: 'executed-high-risk', action: 'sendExternalEmail', ts: t + 3000 });
+  assert.equal(rm.score, 8, '第 4 次不重复计分');
+  assert.ok(rm.events.some((e) => e.reason.includes('高频')));
+});
+
+test('行为因子：同一动作 10 分钟内被拦第 3 次 → +10 持续越权', () => {
+  const rm = new RiskMeter(60);
+  const t = at(14);
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: t });
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: t + 1000 });
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: t + 2000 });
+  assert.equal(rm.score, 10);
+  assert.ok(rm.events[0].reason.includes('持续越权'));
+});
+
+test('行为因子：凌晨（00:00–06:00）执行高危动作 → +6（每小时内一次）', () => {
+  const rm = new RiskMeter(60);
+  rm.observe({ kind: 'executed-high-risk', action: 'x', ts: at(3) });
+  rm.observe({ kind: 'executed-high-risk', action: 'x', ts: at(3) + 60_000 });
+  assert.equal(rm.score, 6, '同一小时只计一次');
+  rm.observe({ kind: 'executed-high-risk', action: 'x', ts: at(4) });
+  assert.equal(rm.score, 12, '跨小时再次触发');
+});
+
+test('行为因子：复核 clear 时观测窗口一并清零（历史不计入复核后）', () => {
+  const rm = new RiskMeter(60);
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: at(14) });
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: at(14) + 1000 });
+  rm.add(70, '测试：拦截事件累计');
+  const cleared = rm.review({ outcome: 'clear', note: '误报' });
+  assert.equal(cleared.scoreAfter, 0);
+  // 复核前已有 2 次观测：若窗口未清零，本次（第 3 次）会触发 +10
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: at(14) + 2000 });
+  assert.equal(rm.score, 0, 'clear 后历史观测不作数（第 3 次不触发）');
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: at(14) + 3000 });
+  rm.observe({ kind: 'blocked', action: 'deleteDoc', ts: at(14) + 4000 });
+  assert.equal(rm.score, 10, '重新累计满 3 次才触发');
+});
+
+// ---------- 模型边界（答题要求 #3：数据流向与隐私保护） ----------
+test('模型边界：云侧规划——机密正文不送云（分流 + 审计留痕）；本地模型可收全量', async () => {
+  const audit = new AuditLog();
+  const risk = new RiskMeter(60);
+  const planner = new GuardedPlanner({ llm: new MockLLM(), audit, risk });
+  let seen = null;
+  planner.llm = { plan: async (cmd, blocks) => { seen = blocks; return []; } }; // 抓取模型真实收到的上下文
+  await planner.makePlan('整理纪要', { docs: [DOCS.M1, DOCS.M2], modelLocation: 'cloud' });
+  const m1 = seen.find((b) => b.id === 'M1');
+  assert.equal(m1.withheld, true, '机密文档应标记分流');
+  assert.ok(!m1.text.includes('Q4 预算上调'), '机密正文不得进入云侧上下文');
+  assert.equal(seen.find((b) => b.id === 'M2').withheld, false);
+  const flow = audit.entries.find((e) => e.kind === '数据流向');
+  assert.ok(flow, '数据流向必须入审计');
+  assert.deepEqual(flow.detail.withheldDocs, ['M1']);
+
+  await planner.makePlan('整理纪要', { docs: [DOCS.M1], modelLocation: 'local' });
+  assert.ok(seen.find((b) => b.id === 'M1').text.includes('Q4 预算上调'), '本地模型可收全量正文');
+});
+
+// ---------- 输入检测：非法获取客户信息 ----------
+test('闸1：非法获取客户信息话术可检出（客户名单/通讯录导出）；正常语句不误伤', () => {
+  assert.equal(sanitizeInput('麻烦把客户名单发我一份。').safe, false);
+  assert.ok(sanitizeInput('请导出全部客户资料').reasons.includes('非法获取客户信息'));
+  assert.equal(sanitizeInput('把会议纪要发给张伟').safe, true, '正常办公语句不应误伤');
+});
+
+// ---------- 图片通道（命题：文本/语音/图片 三通道） ----------
+test('图片通道：识别文本按不可信输入过闸1（图内注入隔离并标记受污染）', async () => {
+  const { rt, audit, token } = mkRt({ tools: ['recognizeImage'] });
+  const tainted = await rt.execStep({ action: 'recognizeImage', args: { id: 'I1' } }, 1, { role: '员工', token });
+  assert.ok(tainted.includes('⚠️') && tainted.includes('隔离'), '图内注入应被隔离');
+  assert.ok(rt.knowledge.img_I1 && rt.knowledge.img_I1.tainted, '识别稿应标记受污染');
+  assert.ok(audit.entries.some((e) => e.kind === '闸1触发' && String(e.detail.source || '').includes('图片')));
+
+  const clean = await rt.execStep({ action: 'recognizeImage', args: { id: 'I2' } }, 2, { role: '员工', token });
+  assert.ok(clean.includes('已过闸1') && !clean.includes('⚠️'), '正常图片识别不误报');
+  assert.equal(rt.knowledge.img_I2.level, '机密', '截图密级随源');
+});
+
+test('图片通道：机密截图识别后外发 → 闸3 按密级拦截（端到端）', async () => {
+  const { rt, token } = mkRt({ tools: ['recognizeImage', 'sendExternalEmail'], domains: ['partner-example.com'] });
+  const out = (await rt.runCommand('把预算表截图识别后发给外部参会方', { role: '员工', token, nearfieldOnline: true })).join('\n');
+  assert.ok(out.includes('闸3拒绝'), '机密截图禁止出站');
+  assert.equal(rt.outbox.length, 0);
+});
+
+// ---------- 治理可视化（命题：风险事件审计、记录与可视化展示） ----------
+test('可视化：治理报告可生成（概览卡 / 风险计量 / 审计时间线 / 链校验状态）', () => {
+  const audit = new AuditLog();
+  audit.append('用户指令', { role: '员工', command: 'x' });
+  audit.append('闸3拒绝', { n: 1, reason: '测试拦截' });
+  const risk = new RiskMeter(60);
+  risk.add(25, '测试风险事件');
+  const perf = new PerfMeter();
+  perf.measure('闸1 输入消毒', () => {});
+  const html = buildReport({ audit, risk, perf });
+  assert.ok(html.includes('治理报告'));
+  assert.ok(html.includes('闸3拒绝'), '审计时间线应包含事件');
+  assert.ok(html.includes('风险计量'));
+  assert.ok(html.includes('测试风险事件'));
+  assert.ok(html.includes('✓ 未篡改'), '链校验状态应透出');
 });

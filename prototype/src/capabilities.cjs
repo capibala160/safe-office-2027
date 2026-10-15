@@ -59,6 +59,10 @@ const CAPABILITIES = [
     name: '内容生成/摘要（扩展）', level: 'L1', tools: ['summarize'],
     constraints: '生成物过闸5（不合规话术拦截）；含机密原文片段的生成物在出站前比对拦截',
   },
+  {
+    name: '图片识别（扩展）', level: 'L1', tools: ['recognizeImage'],
+    constraints: '识别结果=外部内容：OCR 文本强制过闸1（图内注入同权隔离）再入知识库；截图密级随源，涉密截图的出站/共享走闸3与专项约束',
+  },
 ];
 
 // 工具元数据：单一事实源——规划器工具目录 / 必需参数 / 分级全部由此派生
@@ -72,6 +76,7 @@ const TOOL_META = {
   readContact:       { capability: '通讯录读取', level: 'L3', requiredArgs: ['name'] },
   printDoc:          { capability: '打印控制', level: 'L2', requiredArgs: ['id'] },
   transcribeAudio:   { capability: '录音转写', level: 'L2', requiredArgs: ['id'] },
+  recognizeImage:    { capability: '图片识别（扩展）', level: 'L1', requiredArgs: ['id'] },
   shareScreen:       { capability: '屏幕共享', level: 'L3', requiredArgs: ['id'] },
   deviceControl:     { capability: '设备联动', level: 'L4', requiredArgs: ['device', 'op'] },
   uploadToCloud:     { capability: '外部上传/云同步（扩展）', level: 'L3', requiredArgs: ['docId', 'url'], outbound: true },

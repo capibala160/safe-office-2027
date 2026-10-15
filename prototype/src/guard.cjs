@@ -20,6 +20,7 @@ const INJECTION_PATTERNS = [
   { re: /disregard\s+(all\s+)?(previous|prior|above)/i, label: 'instruction-override(en)' },
   { re: /(无需|不用|不必|跳过|绕过).{0,6}(确认|审批|授权|复核|审核)/, label: '绕过审批话术' },
   { re: /(管理员|领导|上级|管理员权限).{0,4}(已|已经)?.{0,4}(批准|授权|同意|放行)/, label: '伪造授权' },
+  { re: /(通讯录|客户(资料|名单|信息)|联系人(名单|列表)).{0,8}(发|给|导出|打包)|(导出|打包|批量).{0,8}(通讯录|联系人|客户(资料|名单|信息))/, label: '非法获取客户信息' },
 ];
 
 // 把外部内容按"句子"过筛：命中可疑模式的句子 → 隔离，不再当指令看待
@@ -42,18 +43,23 @@ function sanitizeInput(text) {
 
 // ---------- 闸2 · 权限令牌（任务级最小权限） ----------
 class CapabilityToken {
-  constructor({ tools = [], allowedExternalDomains = [], maxCalls = Infinity, issuedFor = '' } = {}) {
+  constructor({ tools = [], allowedExternalDomains = [], maxCalls = Infinity, issuedFor = '', ttlMs = 0, issuedAt = Date.now() } = {}) {
     this.tools = tools;                          // 本任务允许调用的工具白名单
     this.allowedExternalDomains = allowedExternalDomains; // 外发邮件域名白名单
     this.maxCalls = maxCalls;                    // 调用次数上限
     this.issuedFor = issuedFor;                  // 任务描述（审计用）
+    this.issuedAt = issuedAt;                    // 签发时间
+    this.expiresAt = ttlMs > 0 ? issuedAt + ttlMs : 0; // 0 = 不过期（任务内短期令牌）
     this.used = 0;
   }
 }
 
 // 注意：配额只计「放行的调用」——被拒绝的调用不消耗授权次数，
 // 否则攻击者可用垃圾调用耗干令牌，让正常步骤全部饿死。
-function checkToolCall(token, tool, args = {}) {
+function checkToolCall(token, tool, args = {}, { now = Date.now() } = {}) {
+  if (token.expiresAt && now > token.expiresAt) {
+    return { allow: false, reason: `令牌已过期（签发于 ${new Date(token.issuedAt).toISOString()}，任务完成后即失效）` };
+  }
   if (!token.tools.includes(tool)) {
     return { allow: false, reason: `工具「${tool}」不在本任务授权清单内` };
   }

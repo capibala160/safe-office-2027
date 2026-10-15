@@ -44,7 +44,7 @@ function validatePlan(rawSteps, { command = '', docs = [] } = {}) {
       });
       continue;
     }
-    // 来源溯源：出站收件人的出处检查
+    // 来源溯源：出站目标（收件人 / 上传地址）的出处检查
     if (s.action === 'sendExternalEmail' && s.args && s.args.to) {
       const fromCommand = command.includes(s.args.to);
       const fromExternal = externalText.includes(s.args.to);
@@ -52,6 +52,18 @@ function validatePlan(rawSteps, { command = '', docs = [] } = {}) {
         findings.push({
           level: 'block',
           reason: `收件人「${s.args.to}」仅出现于外部材料、与用户指令无关（疑似注入诱导），已移除该步骤`,
+          step: s,
+        });
+        continue;
+      }
+    }
+    if (s.action === 'uploadToCloud' && s.args && s.args.url) {
+      const fromCommand = command.includes(s.args.url);
+      const fromExternal = externalText.includes(s.args.url);
+      if (fromExternal && !fromCommand) {
+        findings.push({
+          level: 'block',
+          reason: `上传地址「${s.args.url}」仅出现于外部材料、与用户指令无关（疑似注入诱导），已移除该步骤`,
           step: s,
         });
         continue;
@@ -69,13 +81,30 @@ class GuardedPlanner {
     this.risk = risk;
   }
 
-  async makePlan(command, { docs = [] } = {}) {
+  async makePlan(command, { docs = [], modelLocation = 'local' } = {}) {
     // 1) 上下文装配（闸1 前置：进模型前先消毒）
+    //    —— 模型边界（答题要求 #3 数据流向）：云端模型只收非机密正文；
+    //       机密文档按分级分流（正文不送云），如需其参与规划 → 走本地模型或人工
     const contextBlocks = docs.map((d) => {
       const san = sanitizeInput(d.body);
-      return { id: d.id, title: d.title, level: d.level, sanitized: san.safe, text: san.cleaned };
+      const withheld = modelLocation === 'cloud' && d.level === '机密';
+      return {
+        id: d.id, title: d.title, level: d.level, sanitized: san.safe,
+        withheld,
+        text: withheld ? '【已按数据分级策略拦截：机密正文不送云侧模型，仅可本地处理】' : san.cleaned,
+      };
     });
+    const contextInfo = {
+      modelLocation,
+      sent: contextBlocks.filter((b) => !b.withheld).map((b) => b.id),
+      withheld: contextBlocks.filter((b) => b.withheld).map((b) => b.id),
+    };
     this.audit.append('规划上下文', { docs: contextBlocks.map((b) => ({ id: b.id, sanitized: b.sanitized })) });
+    this.audit.append('数据流向', {
+      model: modelLocation === 'cloud' ? '云侧模型' : '本地模型',
+      sentDocs: contextInfo.sent,
+      withheldDocs: contextInfo.withheld,
+    });
 
     // 2) 模型出计划
     const raw = await this.llm.plan(command, contextBlocks);
@@ -89,7 +118,7 @@ class GuardedPlanner {
     if (findings.length > 0) {
       this.audit.append('计划校正', { before: Array.isArray(raw) ? raw.length : 0, after: steps.length });
     }
-    return { steps, findings };
+    return { steps, findings, contextInfo };
   }
 }
 

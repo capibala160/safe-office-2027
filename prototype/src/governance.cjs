@@ -33,10 +33,21 @@ const DEFAULT_POLICIES = [
 class PolicyEngine {
   constructor(policies = DEFAULT_POLICIES) {
     this.policies = policies;
+    this.changes = []; // 策略热更新的变更记录（由调用方写入审计链）
   }
   decide(role, action) {
     const hit = this.policies.find((p) => p.role === role && p.action === action);
     return hit ? hit.decision : 'deny'; // 未声明 = 默认拒绝
+  }
+  // 策略热更新：不重启即可调整「角色 × 动作」决策；变更必须留痕（返回记录供落审计）
+  update(role, action, decision, { by = '安全管理员', reason = '' } = {}) {
+    const rec = { role, action, decision, by, reason, ts: new Date().toISOString() };
+    const hit = this.policies.find((p) => p.role === role && p.action === action);
+    rec.before = hit ? hit.decision : '(未声明)';
+    if (hit) hit.decision = decision;
+    else this.policies.push({ role, action, decision });
+    this.changes.push(rec);
+    return rec;
   }
 }
 
@@ -77,8 +88,9 @@ class AuditLog {
 // 冻结语义：风险分跨过阈值 → 高危动作一律转人工（近场确认亦不放行）；
 //   人工复核 outcome=clear  → 判定无恶意 → 解冻并清零
 //   人工复核 outcome=escalate → 保持冻结（升级处置）
+// 评分 = 拦截事件（客观阻力点） + 行为因子（设计骨架 §4 L3：高危频次/异常时段/持续越权）
 class RiskMeter {
-  constructor(threshold = 60, { onEvent } = {}) {
+  constructor(threshold = 60, { onEvent, behavioral = true, windowMs = 10 * 60 * 1000 } = {}) {
     this.score = 0;
     this.threshold = threshold;
     this.events = [];
@@ -86,7 +98,13 @@ class RiskMeter {
     this.freezeCount = 0;
     this.reviews = [];
     this.onEvent = typeof onEvent === 'function' ? onEvent : () => {};
+    // —— 行为因子（可解释、确定性：时间戳由调用方给出，便于测试复现）——
+    this.behavioral = behavioral;
+    this.windowMs = windowMs;
+    this._obs = new Map();       // 观测窗口：key → 时间戳数组（滑窗裁剪）
+    this._offHourFired = null;   // 异常时段因子：每小时最多触发一次
   }
+
   add(points, reason) {
     this.score += points;
     this.events.push({ points, reason, score: this.score });
@@ -97,6 +115,36 @@ class RiskMeter {
     }
     return this.score;
   }
+
+  // 行为观测：kind = 'executed-high-risk'（高危动作真实执行） | 'blocked'（动作被拦）
+  // 因子规则（原型固定阈值，参数化作为 P1 项）：
+  //   ① 高频：10 分钟窗口内高危动作执行次数达到 3 的整数倍 → 每次 +8
+  //   ② 凌晨：00:00–06:00 执行高危动作 → 每小时内 +6（一次性）
+  //   ③ 持续越权：同一动作 10 分钟内被拦 3 次 → +10
+  observe({ kind, action = '', ts = Date.now() } = {}) {
+    if (!this.behavioral) return this.score;
+    if (kind === 'executed-high-risk') {
+      const n = this._pushObs('exec', ts);
+      if (n % 3 === 0) this.add(8, `行为因子 · 高频：高危动作 10 分钟内已执行 ${n} 次`);
+      const hour = new Date(ts).getHours();
+      if (hour < 6 && this._offHourFired !== hour) {
+        this._offHourFired = hour;
+        this.add(6, `行为因子 · 异常时段：${String(hour).padStart(2, '0')}:xx 凌晨执行高危动作`);
+      }
+    } else if (kind === 'blocked') {
+      const n = this._pushObs(`block:${action}`, ts);
+      if (n === 3) this.add(10, `行为因子 · 持续越权：「${action}」10 分钟内被拦 3 次`);
+    }
+    return this.score;
+  }
+
+  _pushObs(key, ts) {
+    const arr = (this._obs.get(key) || []).filter((t) => ts - t < this.windowMs);
+    arr.push(ts);
+    this._obs.set(key, arr);
+    return arr.length;
+  }
+
   get alerting() {
     return this.score >= this.threshold;
   }
@@ -105,6 +153,8 @@ class RiskMeter {
     if (outcome === 'clear') {
       this.frozen = false;
       this.score = 0;
+      this._obs.clear();        // 复核判定无恶意 → 行为观测窗口一并清零
+      this._offHourFired = null;
     }
     const rec = { by, outcome, note, scoreBefore, scoreAfter: this.score, frozen: this.frozen, ts: new Date().toISOString() };
     this.reviews.push(rec);
