@@ -22,6 +22,7 @@ const { PerfMeter } = require('./perf.cjs');
 const { DEFAULT_SANDBOX, checkSandbox } = require('./sandbox.cjs');
 const { prepareModelInput } = require('./model-boundary.cjs');
 const { ConfirmationService, digest } = require('./confirmation.cjs');
+const { classifyModelFault, asModelFault } = require('./faults.cjs');
 
 class AgentRuntime {
   constructor({ policy, audit, risk, planner, perf }) {
@@ -35,6 +36,7 @@ class AgentRuntime {
     this.knowledge = {};    // 已读入的文档/转写稿（含消毒结果）
     this.snapshots = [];    // 高危执行前的状态快照（L2 闸4：可一键回滚）
     this.confirmations = new ConfirmationService();
+    this.tasks = new Map(); // 幂等键：taskId → 任务执行记录（防超时重试重复执行）
   }
 
   // —— 快照：执行高危动作前的完整状态（knowledge + outbox + uploads），支撑"误操作可回滚" ——
@@ -67,34 +69,97 @@ class AgentRuntime {
     return snap;
   }
 
-  async runCommand(command, { role = '员工', token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox } = {}) {
-    this.audit.append('用户指令', { role, command, scene });
+  async runCommand(command, { role = '员工', token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true } = {}) {
+    this.audit.append('用户指令', { role, command, scene, taskId });
     const lines = [`指令：「${command}」（角色：${role}）`];
-    const tokenState = checkTokenActive(token);
-    if (!tokenState.allow) {
-      this.audit.append('规划拒绝', { reason: tokenState.reason });
-      return [...lines, `  ⛔ 规划拒绝：${tokenState.reason}`];
+
+    // —— 幂等键（v0.7）：同一 taskId 只执行一次。模型超时等故障的重试
+    //    直接复用首次结果，绝不重复执行——从源头掐死"重试双发"。
+    //    任何终态（含失败）都复用；要真正重试请换新 taskId（标准幂等契约）。
+    if (taskId) {
+      const prior = this.tasks.get(taskId);
+      if (prior && prior.state === 'running') {
+        this.audit.append('幂等拒绝', { taskId, reason: '任务执行中，拒绝并发重复调用' });
+        return [...lines, `  ⛔ 幂等拒绝：任务「${taskId}」正在执行中，本次调用未执行`];
+      }
+      if (prior && (prior.command !== command || prior.role !== role)) {
+        this.audit.append('幂等冲突', { taskId, reason: '同一 taskId 绑定不同指令或角色' });
+        return [...lines, `  ⛔ 幂等冲突：taskId「${taskId}」已绑定其它指令/角色，默认拒绝`];
+      }
+      if (prior) {
+        this.audit.append('幂等复用', { taskId, outcome: prior.outcome });
+        return [...lines, `  〔幂等复用〕taskId「${taskId}」已完成（结果与首次一致），本次未重复执行`, ...prior.lines.slice(1)];
+      }
     }
 
-    // 出计划（模型 → 计划校验），校验发现直接展示
-    const { steps, findings, contextInfo } = await this.perf.measureAsync('规划+计划校验', () =>
-      this.planner.makePlan(command, { docs: Object.values(DOCS).filter(d => token?.documentIds.includes(d.id) && this.policy.decide(role, 'readDoc') === 'allow'), modelLocation, commandLevel }),
-    );
-    if (contextInfo && (contextInfo.modelLocation === 'cloud' || contextInfo.withheld.length > 0)) {
-      lines.push(`  〔模型边界〕规划走云侧模型：送入 [${contextInfo.sent.join(', ') || '无'}]，` +
-        `机密 ${contextInfo.withheld.length} 篇正文已分流（不送云，仅本地处理）——数据流向已入审计`);
-    }
-    for (const f of findings) {
-      lines.push(`  〔计划校验〕⛔ ${f.reason}`);
-    }
-    if (findings.length > 0) {
-      lines.push(`  〔计划〕模型输出 ${findings.length + steps.length} 步 → 校验后 ${steps.length} 步`);
-    }
+    let started = false;
+    try {
+      const tokenState = checkTokenActive(token);
+      if (!tokenState.allow) {
+        this.audit.append('规划拒绝', { reason: tokenState.reason });
+        return [...lines, `  ⛔ 规划拒绝：${tokenState.reason}`];
+      }
+      started = true;
+      if (taskId) this.tasks.set(taskId, { state: 'running', command, role, outcome: null, lines: null });
+      const settle = (outcome) => {
+        if (!taskId) return;
+        const rec = this.tasks.get(taskId);
+        rec.state = 'done';
+        rec.outcome = outcome;
+        rec.lines = [...lines];
+      };
 
-    for (let i = 0; i < steps.length; i++) {
-      lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel }));
+      // 出计划（模型 → 计划校验）。模型故障统一 fail-closed：不执行任何步骤、
+      // 审计记录类别与原始原因、结果对用户可见——绝不半程执行、绝不崩溃。
+      let plan;
+      try {
+        plan = await this.perf.measureAsync('规划+计划校验', () =>
+          this.planner.makePlan(command, { docs: Object.values(DOCS).filter(d => token?.documentIds.includes(d.id) && this.policy.decide(role, 'readDoc') === 'allow'), modelLocation, commandLevel }),
+        );
+      } catch (err) {
+        const fault = classifyModelFault(err);
+        this.audit.append('规划失败', { class: fault.class, reason: fault.reason, executed: false });
+        lines.push(`  〔规划失败〕⛔ ${fault.class}：${fault.reason}`);
+        lines.push('  〔fail-closed〕未执行任何步骤（无副作用）');
+        settle('planning-failed');
+        return lines;
+      }
+      const { steps, findings, contextInfo } = plan;
+      if (contextInfo && (contextInfo.modelLocation === 'cloud' || contextInfo.withheld.length > 0)) {
+        lines.push(`  〔模型边界〕规划走云侧模型：送入 [${contextInfo.sent.join(', ') || '无'}]，` +
+          `机密 ${contextInfo.withheld.length} 篇正文已分流（不送云，仅本地处理）——数据流向已入审计`);
+      }
+      for (const f of findings) {
+        lines.push(`  〔计划校验〕⛔ ${f.reason}`);
+      }
+      if (findings.length > 0) {
+        lines.push(`  〔计划〕模型输出 ${findings.length + steps.length} 步 → 校验后 ${steps.length} 步`);
+      }
+
+      // 执行：任一步骤抛出模型故障（如生成阶段超时）→ 立即中止剩余步骤（fail-closed）
+      for (let i = 0; i < steps.length; i++) {
+        try {
+          lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel }));
+        } catch (err) {
+          const fault = classifyModelFault(err);
+          const notExecuted = steps.length - i - 1;
+          this.audit.append('任务中止', { class: fault.class, reason: fault.reason, atStep: i + 1, action: steps[i].action, notExecuted });
+          lines.push(`  ⛔ 任务中止（${fault.class}）：${fault.reason}`);
+          lines.push(`  〔fail-closed〕第 ${i + 1} 步模型故障，其后 ${notExecuted} 步未执行`);
+          settle('aborted');
+          return lines;
+        }
+      }
+      settle('ok');
+      return lines;
+    } finally {
+      // 任务结束（成功/失败/异常）→ 任务令牌自动吊销，防止跨任务复用
+      // （autoRevoke:false 可显式关闭——仅限确实需要跨命令共享令牌的调用方）
+      if (started && token && autoRevoke && !token.revoked) {
+        token.revoked = true;
+        this.audit.append('令牌吊销', { issuedFor: token.issuedFor, reason: '任务结束自动吊销' });
+      }
     }
-    return lines;
   }
 
   async execStep(step, n, ctx) {
@@ -288,7 +353,15 @@ class AgentRuntime {
           return `  [${n}] summarize ⛔ 机密内容仅可由本地模型处理`;
         }
         this.audit.append('生成数据流向', { model: prepared.location, docId: doc.id });
-        const draft = await this.planner.llm.generate(prepared.command, prepared.blocks);
+        // 生成阶段的模型故障：归类并抛出 → 由 runCommand 统一中止剩余步骤（fail-closed）
+        let draft;
+        try {
+          draft = await this.planner.llm.generate(prepared.command, prepared.blocks);
+        } catch (err) {
+          const fault = asModelFault(err);
+          this.audit.append('生成失败', { n, docId: doc.id, class: fault.faultClass, reason: fault.faultReason });
+          throw fault;
+        }
         const oc = this.perf.measure('闸5 输出检测', () => checkAgentOutput(draft, { level: doc.level }));
         if (!oc.allowed) {
           this.risk.add(20, `闸5 拦截生成内容：${oc.reasons.join('、')}`);

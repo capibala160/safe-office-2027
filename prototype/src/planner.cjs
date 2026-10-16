@@ -7,7 +7,7 @@
 //      —— 收件人只出现在外部材料、与用户指令无关 = 注入诱导 → 移除并记录证据
 // ============================================================
 const { TOOL_META } = require('./capabilities.cjs');
-const { prepareModelInput } = require('./model-boundary.cjs');
+const { prepareModelInput, resolveTargets } = require('./model-boundary.cjs');
 
 // 工具目录与必需参数：从能力分级表（单一事实源）派生
 const KNOWN_TOOLS = new Set(Object.keys(TOOL_META));
@@ -94,23 +94,29 @@ class GuardedPlanner {
       withheld: contextBlocks.filter((b) => b.withheld).map((b) => b.id),
     };
     this.audit.append('规划上下文', { docs: contextBlocks.map((b) => ({ id: b.id, sanitized: b.sanitized })) });
+    const targetPlaceholders = Object.keys(prepared.targets || {});
     this.audit.append('数据流向', {
       model: modelLocation === 'cloud' ? '云侧模型' : '本地模型',
       sentDocs: contextInfo.sent,
       withheldDocs: contextInfo.withheld,
+      // 云侧只见 [目标N] 占位符；真实目标留在端侧（F-05）
+      targetPlaceholders: targetPlaceholders.length > 0 ? targetPlaceholders : undefined,
     });
 
     // 2) 模型出计划
     const raw = await this.llm.plan(prepared.command, contextBlocks);
 
+    // 2.5) 目标占位符回填：规划层用真值做溯源，模型本身从未见过真值（F-05）
+    const resolved = resolveTargets(raw, prepared.targets);
+
     // 3) 计划校验（出模型后的第一道保险）
-    const { steps, findings } = validatePlan(raw, { command, docs });
+    const { steps, findings } = validatePlan(resolved, { command, docs });
     for (const f of findings) {
       this.audit.append('计划校验', { level: f.level, reason: f.reason, step: f.step });
       this.risk.add(f.level === 'block' ? 25 : 5, `计划校验${f.level === 'block' ? '拦截' : '提示'}：${f.reason}`);
     }
     if (findings.length > 0) {
-      this.audit.append('计划校正', { before: Array.isArray(raw) ? raw.length : 0, after: steps.length });
+      this.audit.append('计划校正', { before: Array.isArray(resolved) ? resolved.length : 0, after: steps.length });
     }
     return { steps, findings, contextInfo };
   }

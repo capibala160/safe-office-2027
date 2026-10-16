@@ -199,20 +199,22 @@ test('冻结拦截：高危动作在冻结期内一律转人工（近场在线�
   risk.add(70, '测试：直接推高');
   assert.ok(risk.frozen);
 
-  let out = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true })).join('\n');
+  // 本用例验证冻结语义，需同一令牌跨两次任务复用 → 显式关闭自动吊销
+  let out = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true, autoRevoke: false })).join('\n');
   assert.ok(out.includes('风险冻结拦截'), '冻结期间高危动作应被拦截');
   assert.equal(rt.outbox.length, 0, '冻结期不应产生外发');
   assert.ok(rt.audit.entries.some((e) => e.kind === '冻结拦截'), '拦截应入审计链');
 
   risk.review({ by: '管理员', outcome: 'clear', note: '测试解冻' });
-  out = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true })).join('\n');
+  out = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true, autoRevoke: false })).join('\n');
   assert.ok(out.includes('已发送'), '解冻后应恢复放行');
 });
 
 // ---------- L2 闸4 · 快照回滚 ----------
 test('快照回滚：外发不可撤回；本地删除可恢复', async () => {
   const { rt, token } = mkRt({ tools: ['readDoc', 'sendExternalEmail', 'deleteDoc'], domains: ['partner-example.com'] });
-  await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true });
+  // 本用例随后继续用同一令牌做 execStep → 显式关闭自动吊销
+  await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', { role: '员工', token, nearfieldOnline: true, autoRevoke: false });
   assert.equal(rt.outbox.length, 1, '先正常外发一封');
   const snap = rt.rollback();
   assert.ok(snap, '应存在执行前快照');

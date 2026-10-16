@@ -9,12 +9,13 @@ const { PolicyEngine, AuditLog, RiskMeter } = require('./src/governance.cjs');
 const { CapabilityToken } = require('./src/guard.cjs');
 const { AgentRuntime } = require('./src/runtime.cjs');
 const { GuardedPlanner } = require('./src/planner.cjs');
-const { MockLLM } = require('./src/llm.cjs');
+const { MockLLM, HttpLLM } = require('./src/llm.cjs');
 const { PerfMeter } = require('./src/perf.cjs');
 const { DEFAULT_SANDBOX } = require('./src/sandbox.cjs');
 const { writeReport } = require('./src/report.cjs');
 const { join } = require('node:path');
 const { writeFileSync } = require('node:fs');
+const http = require('node:http');
 
 const line = (s = '') => console.log(s);
 const banner = (t) => { line(); line('═'.repeat(66)); line(`  ${t}`); line('═'.repeat(66)); };
@@ -87,6 +88,33 @@ const banner = (t) => { line(); line('═'.repeat(66)); line(`  ${t}`); line('�
     tools: ['readDoc', 'summarize', 'sendInternalEmail'],
     modelLocation: 'cloud',
   });
+
+  // 幕2c · v0.7 健壮性闭环：模型故障统一 fail-closed + 幂等重试（本地假端点，全程离线）
+  {
+    banner('幕2c · 模型故障统一 fail-closed + 幂等重试（本地假端点模拟云模型超时——真实 HTTP 栈，离线）');
+    const fakeModel = http.createServer((req, res) => {
+      res.on('error', () => {});
+      req.on('data', () => {});
+      req.on('end', () => { // 模拟"模型挂起"：超过客户端超时仍不返回
+        setTimeout(() => {
+          try { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}'); } catch { /* 客户端已断开 */ }
+        }, 1000);
+      });
+    });
+    await new Promise((r) => fakeModel.listen(0, '127.0.0.1', r));
+    const cloudLLM = new HttpLLM({
+      endpoint: `http://127.0.0.1:${fakeModel.address().port}/v1`, apiKey: 'demo-key', timeoutMs: 300,
+    });
+    const rt2c = new AgentRuntime({ policy, audit, risk, planner: new GuardedPlanner({ llm: cloudLLM, audit, risk }) });
+    const tk2c = new CapabilityToken({ tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M2'], issuedFor: '整理周例会纪要' });
+    const t0 = Date.now();
+    (await rt2c.runCommand('把周例会纪要整理后发给 team@corp.internal', { role: '员工', token: tk2c, taskId: 'DEMO-T1', scene: '幕2c' })).forEach(line);
+    line(`  〔说明〕真实 HTTP 请求挂起 ${Date.now() - t0} ms 后被超时中断（与真实模型超时同一条代码路径）：任务零执行、审计留痕、令牌已自动吊销`);
+    line('  〔重试〕客户端用同一 taskId 重试（典型场景：超时后无法确定第一次是否已执行）→');
+    (await rt2c.runCommand('把周例会纪要整理后发给 team@corp.internal', { role: '员工', token: tk2c, taskId: 'DEMO-T1', scene: '幕2c 重试' })).forEach(line);
+    line('  〔说明〕幂等键命中：直接复用首次结果，不重新执行、不重复外发——「超时重试双发」从机制上不可能发生');
+    await new Promise((r) => { fakeModel.closeAllConnections?.(); fakeModel.close(r); });
+  }
 
   // 幕3 · 攻防②：越权外发私人邮箱
   await scene('幕3 · 攻防②：用户要求「发到我私人邮箱 personal@163.com」', '把预算评审会纪要发到我私人邮箱 personal@163.com', {

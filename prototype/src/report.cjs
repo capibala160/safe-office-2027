@@ -26,7 +26,7 @@ function summarize(detail) {
 
 // 事件配色：拦截=红 / 降级脱敏=黄 / 放行执行=绿 / 其余=灰蓝
 function kindClass(kind, detail) {
-  if (/拒绝|拦截/.test(kind)) return 'block';
+  if (/拒绝|拦截|失败|中止/.test(kind)) return 'block';
   if (kind === '计划校验' && detail && detail.level === 'block') return 'block';
   if (/脱敏|隔离|冻结|触发/.test(kind)) return 'warn';
   if (/执行|批准|确认/.test(kind)) return 'ok';
