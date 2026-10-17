@@ -55,6 +55,11 @@ static int test_mac(const uint8_t *data, size_t len,
     return 0;
 }
 
+static void resign(uint8_t *frame, size_t n)
+{
+    (void)test_mac(frame, n - PROTO_MAC_LEN, frame + n - PROTO_MAC_LEN, NULL);
+}
+
 static void fill_bytes(uint8_t *out, size_t n, uint8_t seed)
 {
     size_t i;
@@ -279,6 +284,219 @@ static void test_decision_mac_recheck(void)
                  "accept re-verifies MAC");
 }
 
+static void test_bound_and_lifecycle(void)
+{
+    proto_challenge_t c;
+    proto_decision_t d;
+    proto_pending_t p;
+    uint8_t frame[PROTO_DECISION_MAX], wrong_device[8] = {0}, wrong_hash[32] = {0};
+    size_t n;
+    make_challenge(&c, 0xA0, 8000);
+    proto_pending_init(&p);
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 8000, 0), PROTO_ERR_ARG, "zero TTL");
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, UINT32_MAX, 1), PROTO_ERR_ARG, "TTL overflow");
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 8000, 30), PROTO_OK, "bound begin");
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 8001, 30), PROTO_ERR_STATE, "busy cannot overwrite");
+    CHECK(p.expires_at == 8030, "busy preserves expiry");
+    make_decision(&d, &c, 1, 8005);
+    n = proto_encode_decision(&d, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "bound encode");
+    memcpy(d.mac, frame + n - PROTO_MAC_LEN, PROTO_MAC_LEN);
+    CHECK_STATUS(proto_accept_bound_decision(&p, &d, wrong_device, c.action, c.target_hash, 8005, test_mac, NULL), PROTO_ERR_DEVICE, "wrong paired device");
+    CHECK_STATUS(proto_accept_bound_decision(&p, &d, d.device_id, c.action, wrong_hash, 8005, test_mac, NULL), PROTO_ERR_OPERATION, "content changed");
+    CHECK_STATUS(proto_accept_bound_decision(&p, &d, d.device_id, 2, c.target_hash, 8005, test_mac, NULL), PROTO_ERR_OPERATION, "action changed");
+    CHECK_STATUS(proto_accept_bound_decision(&p, &d, d.device_id, c.action, c.target_hash, 8005, test_mac, NULL), PROTO_OK, "bound approve");
+    make_challenge(&c, 0xB0, 9000);
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 9000, 30), PROTO_OK, "expiry begin");
+    make_decision(&d, &c, 1, 9030);
+    CHECK_STATUS(proto_accept_decision(&p, &d, 9030, test_mac, NULL), PROTO_ERR_EXPIRED, "exact expiry rejected");
+    CHECK(proto_nonce_used(&p, c.nonce), "expired nonce consumed");
+    make_challenge(&c, 0xC0, 10000);
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 10000, 30), PROTO_OK, "replacement begin");
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 10030, 30), PROTO_ERR_REPLAY, "expired nonce cannot restart");
+}
+
+static void test_summary_and_lifetime_validation(void)
+{
+    proto_challenge_t c, out;
+    uint8_t frame[PROTO_CHALLENGE_MAX];
+    size_t n;
+    static const char cn_summary[] = "发送纪要给 partner@example.com";
+
+    make_challenge(&c, 0xD0, 11000);
+    c.summary_len = (uint8_t)(sizeof(cn_summary) - 1u);
+    memcpy(c.summary, cn_summary, c.summary_len);
+    n = proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "UTF-8 summary encodes");
+    CHECK_STATUS(proto_decode_challenge(frame, n, &out, test_mac, NULL), PROTO_OK,
+                 "UTF-8 summary decodes");
+
+    make_challenge(&c, 0xD1, 11000);
+    c.summary_len = 3;
+    c.summary[0] = 'a';
+    c.summary[1] = '\0';
+    c.summary[2] = 'b';
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "NUL summary encode rejected");
+
+    make_challenge(&c, 0xD2, 11000);
+    c.summary_len = 2;
+    c.summary[0] = (char)0xC3;
+    c.summary[1] = (char)0x28;
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "invalid UTF-8 encode rejected");
+
+    /* overlong / surrogate / >U+10FFFF */
+    make_challenge(&c, 0xD3, 11000);
+    c.summary_len = 2;
+    c.summary[0] = (char)0xC0;
+    c.summary[1] = (char)0x80;
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "overlong UTF-8 encode rejected");
+
+    c.summary_len = 3;
+    c.summary[0] = (char)0xED;
+    c.summary[1] = (char)0xA0;
+    c.summary[2] = (char)0x80;
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "UTF-8 surrogate encode rejected");
+
+    c.summary_len = 4;
+    c.summary[0] = (char)0xF4;
+    c.summary[1] = (char)0x90;
+    c.summary[2] = (char)0x80;
+    c.summary[3] = (char)0x80;
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "UTF-8 >U+10FFFF encode rejected");
+
+    /* 合法编码后篡改成 NUL / 非法 UTF-8，重算 MAC 再解码 → 仍拒绝 */
+    make_challenge(&c, 0xD4, 11000);
+    n = proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "summary mutation base frame");
+    frame[PROTO_HEADER_LEN + PROTO_CHALLENGE_PAYLOAD_FIXED] = 0;
+    resign(frame, n);
+    CHECK_STATUS(proto_decode_challenge(frame, n, &out, test_mac, NULL), PROTO_ERR_FRAME,
+                 "NUL summary decode rejected");
+
+    make_challenge(&c, 0xD5, 11000);
+    n = proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "UTF-8 mutation base frame");
+    frame[PROTO_HEADER_LEN + PROTO_CHALLENGE_PAYLOAD_FIXED] = (uint8_t)0xC3;
+    frame[PROTO_HEADER_LEN + PROTO_CHALLENGE_PAYLOAD_FIXED + 1u] = (uint8_t)0x28;
+    resign(frame, n);
+    CHECK_STATUS(proto_decode_challenge(frame, n, &out, test_mac, NULL), PROTO_ERR_FRAME,
+                 "invalid UTF-8 decode rejected");
+
+    /* expires_at 必须严格大于 issued_at */
+    make_challenge(&c, 0xD6, 11000);
+    c.expires_at = c.issued_at;
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "invalid lifetime encode rejected");
+
+    make_challenge(&c, 0xD7, 11000);
+    n = proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "lifetime mutation base frame");
+    memcpy(frame + 71, frame + 67, 4); /* expires_at = issued_at */
+    resign(frame, n);
+    CHECK_STATUS(proto_decode_challenge(frame, n, &out, test_mac, NULL), PROTO_ERR_FRAME,
+                 "invalid lifetime decode rejected");
+}
+
+static void test_decision_value_validation(void)
+{
+    proto_challenge_t c;
+    proto_decision_t d, out;
+    uint8_t frame[PROTO_DECISION_MAX];
+    size_t n;
+
+    make_challenge(&c, 0xE0, 12000);
+    make_decision(&d, &c, 2, 12005);
+    CHECK(proto_encode_decision(&d, frame, sizeof(frame), test_mac, NULL) == 0,
+          "decision >1 encode rejected");
+
+    make_decision(&d, &c, 1, 12005);
+    n = proto_encode_decision(&d, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "decision mutation base frame");
+    frame[PROTO_HEADER_LEN + PROTO_TASK_ID_LEN + PROTO_NONCE_LEN] = 2;
+    resign(frame, n);
+    CHECK_STATUS(proto_decode_decision(frame, n, &out, test_mac, NULL), PROTO_ERR_DECISION,
+                 "decision >1 decode rejected");
+
+    /* 绕过解码层直接调用 accept 也必须拒绝 */
+    {
+        proto_pending_t p;
+        proto_pending_init(&p);
+        CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action,
+                                         c.target_hash, 12000, 30),
+                     PROTO_OK, "decision accept pending");
+        make_decision(&d, &c, 1, 12005);
+        n = proto_encode_decision(&d, frame, sizeof(frame), test_mac, NULL);
+        CHECK(n > 0, "decision accept base frame");
+        memcpy(d.mac, frame + n - PROTO_MAC_LEN, PROTO_MAC_LEN);
+        d.decision = 2;
+        CHECK_STATUS(proto_accept_decision(&p, &d, 12005, test_mac, NULL), PROTO_ERR_DECISION,
+                     "decision >1 accept rejected");
+    }
+}
+
+static void test_action_range(void)
+{
+    proto_challenge_t c, out;
+    proto_decision_t d;
+    proto_pending_t p;
+    uint8_t frame[PROTO_CHALLENGE_MAX];
+    size_t n;
+
+    make_challenge(&c, 0xF0, 13000);
+    c.action = 0;
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "action 0 encode rejected");
+    c.action = 5;
+    CHECK(proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL) == 0,
+          "action 5 encode rejected");
+
+    proto_pending_init(&p);
+    c.action = 0;
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 13000, 30),
+                 PROTO_ERR_ARG, "action 0 pending rejected");
+
+    c.action = 1;
+    n = proto_encode_challenge(&c, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "action range base frame");
+    frame[PROTO_HEADER_LEN + PROTO_TASK_ID_LEN + PROTO_NONCE_LEN] = 0;
+    resign(frame, n);
+    CHECK_STATUS(proto_decode_challenge(frame, n, &out, test_mac, NULL), PROTO_ERR_OPERATION,
+                 "action 0 decode rejected");
+
+    make_decision(&d, &c, 1, 13005);
+    n = proto_encode_decision(&d, frame, sizeof(frame), test_mac, NULL);
+    CHECK(n > 0, "action range decision");
+    memcpy(d.mac, frame + n - PROTO_MAC_LEN, PROTO_MAC_LEN);
+    proto_pending_init(&p);
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 13000, 30),
+                 PROTO_OK, "action range pending");
+    CHECK_STATUS(proto_accept_bound_decision(&p, &d, d.device_id, 0, c.target_hash,
+                                             13005, test_mac, NULL),
+                 PROTO_ERR_ARG, "invalid expected action rejected");
+}
+
+static void test_mac_before_binding(void)
+{
+    proto_challenge_t c;
+    proto_decision_t d;
+    proto_pending_t p;
+    uint8_t wrong_device[8] = {0};
+
+    make_challenge(&c, 0xF1, 14000);
+    proto_pending_init(&p);
+    CHECK_STATUS(proto_pending_begin(&p, c.task_id, c.nonce, c.action, c.target_hash, 14000, 30),
+                 PROTO_OK, "mac-order pending");
+    make_decision(&d, &c, 1, 14005); /* d.mac 为 0：MAC 无效 */
+    CHECK_STATUS(proto_accept_bound_decision(&p, &d, wrong_device, c.action, c.target_hash,
+                                             14005, test_mac, NULL),
+                 PROTO_ERR_MAC, "MAC checked before device/operation binding");
+}
+
 int main(void)
 {
     test_challenge_roundtrip();
@@ -290,6 +508,11 @@ int main(void)
     test_tamper();
     test_header_and_buffer();
     test_decision_mac_recheck();
+    test_bound_and_lifecycle();
+    test_summary_and_lifetime_validation();
+    test_decision_value_validation();
+    test_action_range();
+    test_mac_before_binding();
 
     if (g_failures == 0) {
         printf("PASS: all protocol tests\n");

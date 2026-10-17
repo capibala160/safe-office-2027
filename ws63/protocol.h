@@ -44,6 +44,14 @@ extern "C" {
 #define PROTO_SUMMARY_MAX 96u
 #define PROTO_REPLAY_WINDOW 8u
 
+/* action 只允许 1–4（两端必须一致；新增动作需升级协议版本） */
+#define PROTO_ACTION_SEND_EXTERNAL 1u
+#define PROTO_ACTION_DELETE 2u
+#define PROTO_ACTION_PRINT 3u
+#define PROTO_ACTION_DEVICE 4u
+#define PROTO_ACTION_MIN PROTO_ACTION_SEND_EXTERNAL
+#define PROTO_ACTION_MAX PROTO_ACTION_DEVICE
+
 #define PROTO_CHALLENGE_PAYLOAD_FIXED (PROTO_TASK_ID_LEN + PROTO_NONCE_LEN + 1u + PROTO_HASH_LEN + 4u + 4u + 1u)
 #define PROTO_DECISION_PAYLOAD_LEN (PROTO_TASK_ID_LEN + PROTO_NONCE_LEN + 1u + 8u + 4u)
 #define PROTO_CHALLENGE_MAX (PROTO_HEADER_LEN + PROTO_CHALLENGE_PAYLOAD_FIXED + PROTO_SUMMARY_MAX + PROTO_MAC_LEN)
@@ -62,7 +70,9 @@ typedef enum {
     PROTO_ERR_NONCE = -9,
     PROTO_ERR_REPLAY = -10,
     PROTO_ERR_DECISION = -11,
-    PROTO_ERR_STATE = -12
+    PROTO_ERR_STATE = -12,
+    PROTO_ERR_DEVICE = -13,
+    PROTO_ERR_OPERATION = -14
 } proto_status_t;
 
 /* HMAC-SHA256：data -> out[32]；成功返回 0，失败返回非 0 */
@@ -72,7 +82,7 @@ typedef int (*proto_mac_fn)(const uint8_t *data, size_t len,
 typedef struct {
     uint8_t task_id[PROTO_TASK_ID_LEN];
     uint8_t nonce[PROTO_NONCE_LEN];
-    uint8_t action;                      /* 1=外发 2=删除 3=打印 4=设备控制 */
+    uint8_t action;                      /* PROTO_ACTION_*，只允许 1–4 */
     uint8_t target_hash[PROTO_HASH_LEN]; /* SHA-256(操作摘要) */
     uint32_t issued_at;
     uint32_t expires_at;
@@ -105,7 +115,8 @@ typedef struct {
 /* ---- 状态机（执行端 A） ---- */
 void proto_pending_init(proto_pending_t *p);
 
-/* 开始一次待确认任务；nonce 已被消费过则返回 PROTO_ERR_REPLAY */
+/* 开始任务：不覆盖未过期待确认任务；TTL 须 >0 且不得溢出。
+ * 已过期待确认 nonce 会被消费；已消费 nonce 返回 PROTO_ERR_REPLAY。 */
 int proto_pending_begin(proto_pending_t *p,
                         const uint8_t task_id[PROTO_TASK_ID_LEN],
                         const uint8_t nonce[PROTO_NONCE_LEN],
@@ -116,9 +127,15 @@ int proto_pending_begin(proto_pending_t *p,
 int proto_nonce_used(const proto_pending_t *p, const uint8_t nonce[PROTO_NONCE_LEN]);
 void proto_mark_used(proto_pending_t *p, const uint8_t nonce[PROTO_NONCE_LEN]);
 
-/* 校验确认端的决定；成功（确认）返回 PROTO_OK，取消返回 PROTO_ERR_DECISION */
+/* 底层校验：不核对配对设备/最终操作；部署时使用下面的 bound 入口。 */
 int proto_accept_decision(proto_pending_t *p, const proto_decision_t *d,
                           uint32_t now, proto_mac_fn mac, void *ctx);
+
+/* 部署入口：同时核对配对设备及即将执行的操作。调用方须冻结该操作直到执行结束。 */
+int proto_accept_bound_decision(proto_pending_t *p, const proto_decision_t *d,
+                                const uint8_t expected_device[8], uint8_t action,
+                                const uint8_t target_hash[PROTO_HASH_LEN],
+                                uint32_t now, proto_mac_fn mac, void *ctx);
 
 /* ---- 编解码 ---- */
 /* 返回写入字节数；0 = 失败（参数/缓冲/MAC） */

@@ -7,7 +7,7 @@
 
 - `protocol.h` / `protocol.c`：挑战-应答帧的编解码、MAC 校验、nonce/过期/重放状态机
 - `test_protocol.c`：PC 侧测试（不需要板子）
-- 已测：帧往返、正常确认、取消、过期、错任务、错 nonce、重放、篡改、缓冲不足、MAC 复核
+- 已测：帧往返、正常确认、取消、过期、错任务、错 nonce、重放、篡改、缓冲不足、MAC 复核、摘要 NUL/UTF-8、生命周期、decision 值域
 
 **没有测**：真实 SLE 链路、真实 mbedTLS HMAC、按键/屏幕/继电器、Flash 审计。这些在板端接。
 
@@ -139,8 +139,12 @@ if (rc == PROTO_OK) {
 ```c
 proto_decision_t d;
 if (proto_decode_decision(rx, rx_len, &d, board_hmac, (void *)PRE_SHARED_KEY) == PROTO_OK) {
-    int rc = proto_accept_decision(&pending, &d, now_sec,
-                                   board_hmac, (void *)PRE_SHARED_KEY);
+    /* expected_device 来自可信配对配置；不能使用收到的 d.device_id 代替。
+     * final_action/final_hash 来自冻结的最终执行记录，不从应答中取值。
+     * A 使用自己的时钟判断过期，不依赖 B 的 decided_at。 */
+    int rc = proto_accept_bound_decision(&pending, &d, expected_device,
+                                         final_action, final_hash, now_sec,
+                                         board_hmac, (void *)PRE_SHARED_KEY);
     if (rc == PROTO_OK) {
         execute_action();   /* 继电器/LED/串口日志 */
         audit_append("approved");
@@ -181,6 +185,14 @@ if (proto_decode_decision(rx, rx_len, &d, board_hmac, (void *)PRE_SHARED_KEY) ==
 - [ ] 双板联调：正常 / 不在场 / 取消 / 重放 / 篡改 / 错设备
 
 ## 边界
+
+- 部署入口使用 `proto_accept_bound_decision`，核对预先配对设备和最终操作；旧的 `proto_accept_decision` 仅做底层校验。绑定检查在 MAC 校验之后，错误 MAC 不会泄露设备/操作是否匹配。
+- action 只允许 1–4（外发/删除/打印/设备控制）；新增动作需升级协议版本，C/Node 两端同步。
+- 不覆盖未过期待确认任务；TTL=0、时间加法溢出均拒绝；`now == expires_at` 即过期。过期任务 nonce 同样消费。
+- Node 编解码器位于 `prototype/src/ws63-protocol.cjs`，采用相同 SFC1 二进制帧、16B nonce、秒时间戳和 HMAC-SHA256。摘要按 UTF-8 字节计数，最多 96B。
+- `prototype` 中运行 `node --test test/ws63-protocol.test.cjs` 验证 Node/C 字节一致性；需要 gcc，没有 gcc 时跨语言项会明确跳过。此测试用 Node 真实 HMAC 产生固定向量，C 注入向量 MAC 回调，仅验证编解码，**不验证板端 mbedTLS**。
+- 此编解码器尚未接入运行时串口；Node 原有模拟确认仍保留，不能据此声称硬件链路已通。
+- 节点重启后废弃全部 pending；8 条内存窗口不是持久化防重放。必须使用可靠随机源，每个挑战使用全新 nonce；多设备应配置独立密钥。
 
 - 不证明距离、不防中继、不做本人身份认证
 - 密钥在 Flash，不是 HUKS/TEE

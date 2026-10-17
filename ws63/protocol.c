@@ -40,6 +40,39 @@ static int ct_equal(const uint8_t *a, const uint8_t *b, size_t n)
     return diff == 0;
 }
 
+/* 拒绝 NUL 与非法 UTF-8，与 Node TextDecoder(fatal) 的行为对齐。
+ * 摘要会显示在确认端，坏字节应尽早拒绝，而不是留给 UI。 */
+static int summary_valid(const uint8_t *s, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        uint8_t c = s[i];
+        size_t len;
+        uint32_t cp;
+        size_t j;
+
+        if (c == 0) return 0;
+        if (c < 0x80u) { i++; continue; }
+        if ((c & 0xE0u) == 0xC0u) { len = 2; cp = (uint32_t)(c & 0x1Fu); }
+        else if ((c & 0xF0u) == 0xE0u) { len = 3; cp = (uint32_t)(c & 0x0Fu); }
+        else if ((c & 0xF8u) == 0xF0u) { len = 4; cp = (uint32_t)(c & 0x07u); }
+        else return 0;
+
+        if (i + len > n) return 0;
+        for (j = 1; j < len; j++) {
+            if ((s[i + j] & 0xC0u) != 0x80u) return 0;
+            cp = (cp << 6) | (uint32_t)(s[i + j] & 0x3Fu);
+        }
+        /* 拒绝 overlong、代理区、超出 U+10FFFF */
+        if ((len == 2 && cp < 0x80u) || (len == 3 && cp < 0x800u) ||
+            (len == 4 && cp < 0x10000u)) return 0;
+        if (cp >= 0xD800u && cp <= 0xDFFFu) return 0;
+        if (cp > 0x10FFFFu) return 0;
+        i += len;
+    }
+    return 1;
+}
+
 /* ---------------- 帧头 ---------------- */
 
 static void write_header(uint8_t *out, uint8_t type, uint16_t payload_and_mac_len)
@@ -73,6 +106,7 @@ static int check_header(const uint8_t *buf, size_t len, uint8_t want_type,
     if (buf[5] != want_type) {
         return PROTO_ERR_TYPE;
     }
+    if (buf[6] != 0 || buf[7] != 0) return PROTO_ERR_FRAME;
     body_len = get_u16le(buf + 8);
     if ((size_t)body_len + PROTO_HEADER_LEN != len) {
         return PROTO_ERR_FRAME;
@@ -124,6 +158,15 @@ size_t proto_encode_challenge(const proto_challenge_t *c, uint8_t *out, size_t c
         c->summary_len > PROTO_SUMMARY_MAX) {
         return 0;
     }
+    if (c->expires_at <= c->issued_at) {
+        return 0;
+    }
+    if (c->action < PROTO_ACTION_MIN || c->action > PROTO_ACTION_MAX) {
+        return 0;
+    }
+    if (!summary_valid((const uint8_t *)c->summary, c->summary_len)) {
+        return 0;
+    }
 
     payload_len = (uint16_t)(PROTO_CHALLENGE_PAYLOAD_FIXED + c->summary_len);
     total = (size_t)PROTO_HEADER_LEN + payload_len + PROTO_MAC_LEN;
@@ -162,7 +205,7 @@ size_t proto_encode_decision(const proto_decision_t *d, uint8_t *out, size_t cap
     const size_t total = (size_t)PROTO_HEADER_LEN + payload_len + PROTO_MAC_LEN;
     uint8_t *p;
 
-    if (d == NULL || out == NULL || mac == NULL || total > cap) {
+    if (d == NULL || out == NULL || mac == NULL || total > cap || d->decision > 1) {
         return 0;
     }
 
@@ -223,6 +266,9 @@ int proto_decode_challenge(const uint8_t *buf, size_t len, proto_challenge_t *ou
     memcpy(out->nonce, p, PROTO_NONCE_LEN);
     p += PROTO_NONCE_LEN;
     out->action = *p++;
+    if (out->action < PROTO_ACTION_MIN || out->action > PROTO_ACTION_MAX) {
+        return PROTO_ERR_OPERATION;
+    }
     memcpy(out->target_hash, p, PROTO_HASH_LEN);
     p += PROTO_HASH_LEN;
     out->issued_at = get_u32le(p);
@@ -234,6 +280,12 @@ int proto_decode_challenge(const uint8_t *buf, size_t len, proto_challenge_t *ou
         memcpy(out->summary, p, out->summary_len);
     }
     out->summary[out->summary_len] = '\0';
+    if (out->expires_at <= out->issued_at) {
+        return PROTO_ERR_FRAME;
+    }
+    if (!summary_valid((const uint8_t *)out->summary, out->summary_len)) {
+        return PROTO_ERR_FRAME;
+    }
     memcpy(out->mac, buf + PROTO_HEADER_LEN + payload_len, PROTO_MAC_LEN);
     return PROTO_OK;
 }
@@ -269,6 +321,9 @@ int proto_decode_decision(const uint8_t *buf, size_t len, proto_decision_t *out,
     memcpy(out->nonce, p, PROTO_NONCE_LEN);
     p += PROTO_NONCE_LEN;
     out->decision = *p++;
+    if (out->decision > 1) {
+        return PROTO_ERR_DECISION;
+    }
     memcpy(out->device_id, p, 8);
     p += 8;
     out->decided_at = get_u32le(p);
@@ -324,6 +379,15 @@ int proto_pending_begin(proto_pending_t *p,
     if (p == NULL || task_id == NULL || nonce == NULL || target_hash == NULL) {
         return PROTO_ERR_ARG;
     }
+    if (action < PROTO_ACTION_MIN || action > PROTO_ACTION_MAX) {
+        return PROTO_ERR_ARG;
+    }
+    if (ttl_sec == 0 || ttl_sec > UINT32_MAX - now) return PROTO_ERR_ARG;
+    if (p->pending && now < p->expires_at) return PROTO_ERR_STATE;
+    if (p->pending) {
+        proto_mark_used(p, p->nonce);
+        p->pending = 0;
+    }
     if (proto_nonce_used(p, nonce)) {
         return PROTO_ERR_REPLAY;
     }
@@ -336,13 +400,18 @@ int proto_pending_begin(proto_pending_t *p,
     return PROTO_OK;
 }
 
-int proto_accept_decision(proto_pending_t *p, const proto_decision_t *d,
-                          uint32_t now, proto_mac_fn mac, void *ctx)
+static int accept_decision_internal(proto_pending_t *p, const proto_decision_t *d,
+                                    const uint8_t *expected_device, uint8_t action,
+                                    const uint8_t *target_hash, int check_binding,
+                                    uint32_t now, proto_mac_fn mac, void *ctx)
 {
     uint8_t frame[PROTO_DECISION_MAX];
     size_t n;
 
     if (p == NULL || d == NULL || mac == NULL) {
+        return PROTO_ERR_ARG;
+    }
+    if (check_binding && (expected_device == NULL || target_hash == NULL)) {
         return PROTO_ERR_ARG;
     }
     if (!p->pending) {
@@ -357,15 +426,28 @@ int proto_accept_decision(proto_pending_t *p, const proto_decision_t *d,
     if (proto_nonce_used(p, d->nonce)) {
         return PROTO_ERR_REPLAY;
     }
-    if (now > p->expires_at) {
+    if (now >= p->expires_at) {
+        proto_mark_used(p, p->nonce);
         p->pending = 0;
         return PROTO_ERR_EXPIRED;
     }
+    if (d->decision > 1) {
+        return PROTO_ERR_DECISION;
+    }
 
-    /* 复核 MAC：防止调用方绕过解码层直接构造结构体 */
+    /* 先验 MAC，再核对设备/操作：无密钥者不能靠错误码探测绑定信息 */
     n = proto_encode_decision(d, frame, sizeof(frame), mac, ctx);
     if (n == 0 || !ct_equal(frame + n - PROTO_MAC_LEN, d->mac, PROTO_MAC_LEN)) {
         return PROTO_ERR_MAC;
+    }
+
+    if (check_binding) {
+        if (!ct_equal(expected_device, d->device_id, 8)) {
+            return PROTO_ERR_DEVICE;
+        }
+        if (p->action != action || !ct_equal(p->target_hash, target_hash, PROTO_HASH_LEN)) {
+            return PROTO_ERR_OPERATION;
+        }
     }
 
     if (d->decision == 0) {
@@ -373,13 +455,27 @@ int proto_accept_decision(proto_pending_t *p, const proto_decision_t *d,
         p->pending = 0;
         return PROTO_ERR_DECISION; /* 取消：显式返回拒绝 */
     }
-    if (d->decision != 1) {
-        return PROTO_ERR_DECISION;
-    }
 
     proto_mark_used(p, d->nonce);
     p->pending = 0;
     return PROTO_OK;
+}
+
+int proto_accept_decision(proto_pending_t *p, const proto_decision_t *d,
+                          uint32_t now, proto_mac_fn mac, void *ctx)
+{
+    return accept_decision_internal(p, d, NULL, 0, NULL, 0, now, mac, ctx);
+}
+
+int proto_accept_bound_decision(proto_pending_t *p, const proto_decision_t *d,
+                                const uint8_t expected_device[8], uint8_t action,
+                                const uint8_t target_hash[PROTO_HASH_LEN],
+                                uint32_t now, proto_mac_fn mac, void *ctx)
+{
+    if (action < PROTO_ACTION_MIN || action > PROTO_ACTION_MAX) {
+        return PROTO_ERR_ARG;
+    }
+    return accept_decision_internal(p, d, expected_device, action, target_hash, 1, now, mac, ctx);
 }
 
 const char *proto_status_str(int status)
@@ -398,6 +494,8 @@ const char *proto_status_str(int status)
     case PROTO_ERR_REPLAY: return "REPLAY";
     case PROTO_ERR_DECISION: return "DECISION";
     case PROTO_ERR_STATE: return "STATE";
+    case PROTO_ERR_DEVICE: return "DEVICE";
+    case PROTO_ERR_OPERATION: return "OPERATION";
     default: return "UNKNOWN";
     }
 }
