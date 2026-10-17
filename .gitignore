@@ -3,3 +3,9 @@ node_modules/
 .DS_Store
 Thumbs.db
 prototype/out/
+
+# WS63 协议测试产物
+ws63/test_protocol
+ws63/test_protocol.exe
+ws63/*.o
+ws63/build/
