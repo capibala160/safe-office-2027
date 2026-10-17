@@ -1,8 +1,8 @@
-# 核心机制原型（v0.6 · 平台无关）
+# 核心机制原型（v0.8 · 平台无关）
 
 > **接入变化**：`CapabilityToken.documentIds` 默认空，必须显式授权资源；邮件和上传指令须包含精确地址。模型适配器声明 deployment，未知位置按 cloud 处理；`commandLevel` 应由可信应用提供，机密/未知指令不送云。规划和 generate 共用模型出口检查。正式稿保存为 `draft_源ID`，继承密级及 sourceIds；回滚保留已发送和已上传记录。
 >
-> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。审计支持持久化及独立检查点恢复，HUKS 尚未接入；真实模型和真实工具未联网验收。旧版对应表供历史参考，最新能力以 [v0.6 优化记录](../docs/03-优化记录与落地验收.md) 为准，测试数量以 `node --test` 为准。
+> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。审计支持持久化及独立检查点恢复，HUKS 尚未接入；真实模型和真实工具未联网验收。旧版对应表供历史参考，最新能力以 [v0.8 优化记录](../docs/03-优化记录与落地验收.md) 为准，测试数量以 `node --test` 为准。
 
 > 「Agent 安全运行机制」的可运行原型——**零依赖、纯 Node**，上板前即可跑通全部机制逻辑。
 > 上板路径：本目录逻辑**平移 ArkTS**（行为不变）→ 闸4 的 `nearfieldOnline` 换成 WS63 真实 SLE 握手 → 规划器换成真实 LLM（模型边界已就绪）→ 沙箱对应 OH 应用沙箱/权限模型。
@@ -11,8 +11,10 @@
 
 ```bash
 node demo.cjs        # 攻防演示（答辩预演脚本：正常流 / 能力分级 / 沙箱双锁 / 图片通道 / 注入 / 端云边界 / 越权 / 冻结闭环 / 近场 / 回滚 / 回溯 / 风险行为因子 / 点名 5+1 类攻击速览 / 时延开销）
-npm test             # 自动化测试（51 项，全绿）
+npm test             # 自动化测试（88 项，全绿）
+npm run eval         # 三档评测（无防护 / 仅提示词 / 完整网关，Mock 离线）
 # demo 末尾自动生成治理报告（可视化交付物雏形）：out/governance-report.html
+# eval 生成评测报告：out/eval/eval-report.html + eval-results.json
 ```
 
 ## 结构
@@ -20,6 +22,14 @@ npm test             # 自动化测试（51 项，全绿）
 ```
 prototype/
 ├── demo.cjs                攻防演示 + 治理报告生成（out/governance-report.html）
+├── eval/                   三档评测 harness（详见下节）
+│   ├── corpus.cjs          语料：28 条（开发 14 / 验证 14；正常 12 / 攻击 16）
+│   ├── baseline.cjs        无防护 / 仅提示词档的宽松执行器（只用于对照）
+│   ├── harness.cjs         同一模型 × 三档执行与计分（effects/blocks/时延）
+│   ├── metrics.cjs         指标聚合（成功率/完成率/误拦/P50-P95）
+│   ├── llm-eval.cjs        none 档裸提示词 / prompt·full 档加固提示词
+│   ├── report.cjs          控制台 + JSON + HTML 报告
+│   └── run.cjs             CLI 入口（npm run eval）
 ├── src/
 │   ├── capabilities.cjs    办公能力分级表（命题点名 8 类 + 3 类扩展）：能力→风险级L1-L4→工具→约束；工具元数据=单一事实源
 │   ├── llm.cjs             可插拔 LLM：MockLLM（对抗性模拟，含点名攻击剧本/图片通道）/ HttpLLM（OpenAI 兼容骨架，密钥走 env，带超时）
@@ -33,8 +43,25 @@ prototype/
 │   └── scenario.cjs        场景数据：办公文档库 + 通讯录 + 录音样本 + 图片素材（含注入样本）
 └── test/
     ├── engine.test.cjs     闸级 + 计划校验 + 冻结闭环 + 快照回滚 + 输出检测 + 能力分级 + 沙箱 + 行为因子 + 模型边界 + 图片通道 + 时延 + 可视化 + 端到端（43 项）
-    └── attacks.test.cjs    可复现安全测试样例库：点名 5 类 + 扩展 1 类 + 纵深防御 2 项（8 项）
+    ├── attacks.test.cjs    可复现安全测试样例库：点名 5 类 + 扩展 1 类 + 纵深防御 2 项（8 项）
+    ├── regressions.test.cjs 验收修复回归（15 项）
+    ├── resilience.test.cjs 假端点健壮性 + 幂等 + 自动吊销（16 项）
+    └── eval-harness.test.cjs 评测自身回归：语料结构 / 三档对照 / 指标边界（6 项）
 ```
+
+## 三档评测（v0.8）
+
+```bash
+npm run eval                                  # 离线机制验证（MockLLM，默认）
+node eval/run.cjs --llm=http --repeat=3       # 真实模型（需配置 SAFE_OFFICE_LLM_* 环境变量）
+node eval/run.cjs --split=validation          # 只跑未参与调参的验证集
+```
+
+- 三档：`none` 无防护（模型计划裸执行）/ `prompt` 仅提示词（加固提示词，仍裸执行）/ `full` 完整网关（现有运行时）
+- 指标：攻击成功率、攻击中合法核心完成率、正常任务完成率、误拦率、确认次数/任务、模型/安全/总耗时 P50-P95、各层拦截贡献
+- 2026-10-17 离线跑分：无防护攻击成功率 100%（16/16）；完整网关 **0%（0/16）**、正常完成 100%（12/12）、误拦 0；验证集同样 0% / 100% / 0%
+- **口径**：MockLLM 不读提示词，`prompt` 档与 `none` 档同结果属预期；该跑分是**机制验证**，不是真实模型攻击成功率。真实模型须用 `--llm=http` 复测
+- 未实现：单层消融、真实邮件/打印/设备、板端性能
 
 ## 与设计骨架的对应
 
