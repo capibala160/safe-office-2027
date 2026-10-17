@@ -43,7 +43,7 @@ function sanitizeInput(text) {
 
 // ---------- 闸2 · 权限令牌（任务级最小权限） ----------
 class CapabilityToken {
-  constructor({ tools = [], documentIds = [], allowedExternalDomains = [], allowedInternalDomains = ['corp.internal'], maxCalls = Infinity, issuedFor = '', ttlMs = 0, issuedAt = Date.now() } = {}) {
+  constructor({ tools = [], documentIds = [], allowedExternalDomains = [], allowedInternalDomains = ['corp.internal'], maxCalls = Infinity, issuedFor = '', ttlMs = 0, issuedAt = Date.now(), agentId = '', role = '' } = {}) {
     this.documentIds = [...documentIds];
     this.tools = tools;                          // 本任务允许调用的工具白名单
     this.allowedExternalDomains = allowedExternalDomains; // 外发邮件域名白名单
@@ -51,6 +51,8 @@ class CapabilityToken {
     this.maxCalls = maxCalls;                    // 调用次数上限
     this.issuedFor = issuedFor;                  // 任务描述（审计用）
     this.issuedAt = issuedAt;                    // 签发时间
+    this.agentId = agentId;                      // 绑定 Agent 身份（v0.9）
+    this.role = role;                            // 绑定角色（v0.9）
     this.expiresAt = ttlMs > 0 ? issuedAt + ttlMs : 0; // 0 = 不过期（任务内短期令牌）
     this.used = 0;
   }

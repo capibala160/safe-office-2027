@@ -52,8 +52,9 @@ test('未知密级默认禁止出站', () => {
 
 test('角色拒绝在读取和图片识别前执行', async () => {
   const { rt } = fixture();
+  // 访客=无任何业务权限（实习生自 v0.9 起为只读角色，见 agents.test.cjs）
   for (const [action, id] of [['readDoc', 'M1'], ['recognizeImage', 'I2']]) {
-    const result = await rt.execStep({ action, args: { id } }, 1, { role: '实习生', token: token([id]) });
+    const result = await rt.execStep({ action, args: { id } }, 1, { role: '访客', token: token([id]) });
     assert.match(result, /策略拒绝/);
   }
   assert.deepEqual(rt.knowledge, {});

@@ -15,12 +15,14 @@ const REQUIRED_ARGS = Object.fromEntries(
   Object.entries(TOOL_META).map(([tool, meta]) => [tool, meta.requiredArgs || []]),
 );
 
-function validatePlan(rawSteps, { command = '', docs = [] } = {}) {
+function validatePlan(rawSteps, { command = '', docs = [], delegation = null, delegationVerifier = null } = {}) {
   const steps = [];
   const findings = [];
+  const notes = [];
   const externalText = docs.map((d) => d.body).join('\n');
+  const delegationIntent = /(以|用).{1,10}名义|代为?(发送|群发|发信)/.test(command);
   if (!Array.isArray(rawSteps) || rawSteps.length > 64) {
-    return { steps: [], findings: [{ level: 'block', reason: '计划必须是至多 64 步的数组' }] };
+    return { steps: [], findings: [{ level: 'block', reason: '计划必须是至多 64 步的数组' }], notes: [] };
   }
 
   for (const s of Array.isArray(rawSteps) ? rawSteps : []) {
@@ -37,15 +39,23 @@ function validatePlan(rawSteps, { command = '', docs = [] } = {}) {
       findings.push({ level: 'block', reason: `步骤 ${s.action} 缺少必需参数 [${missing.join(', ')}]，已移除`, step: s });
       continue;
     }
-    // 身份治理：代发他人身份（以X名义 / 代发）需持委托令牌，当前任务未签发 → 默认拒绝
-    if ((s.action === 'sendInternalEmail' || s.action === 'sendExternalEmail') &&
-        /(以|用).{1,10}名义|代为?(发送|群发|发信)/.test(command)) {
-      findings.push({
-        level: 'block',
-        reason: `代发语义（以他人名义发送）且未持委托令牌 → 默认拒绝（身份治理）`,
-        step: s,
-      });
-      continue;
+    // 身份治理：代发他人身份（以X名义 / 代发）需持有效委托令牌；无令牌/令牌不匹配 → 默认拒绝
+    // 注意：委托令牌只解除"身份治理"这一条；目标溯源等下游检查仍必须通过，
+    // 因此放行记录要等所有检查结束后再写（避免"已放行但步骤仍被移除"的假审计）。
+    let delegationAllowed = false;
+    if ((s.action === 'sendInternalEmail' || s.action === 'sendExternalEmail') && delegationIntent) {
+      const verdict = typeof delegationVerifier === 'function'
+        ? delegationVerifier(delegation, { to: s.args && s.args.to, action: s.action })
+        : { allow: false, reason: '未持委托令牌' };
+      if (!verdict.allow) {
+        findings.push({
+          level: 'block',
+          reason: `代发语义（以他人名义发送）且${verdict.reason} → 默认拒绝（身份治理）`,
+          step: s,
+        });
+        continue;
+      }
+      delegationAllowed = true;
     }
     // 来源溯源：出站目标（收件人 / 上传地址）的出处检查
     if (['sendInternalEmail', 'sendExternalEmail'].includes(s.action) && s.args && s.args.to) {
@@ -72,9 +82,15 @@ function validatePlan(rawSteps, { command = '', docs = [] } = {}) {
         continue;
       }
     }
+    if (delegationAllowed) {
+      notes.push({
+        level: 'info',
+        reason: `委托令牌放行：${s.action} → ${(s.args && s.args.to) || '(未指定)'}`,
+      });
+    }
     steps.push(s);
   }
-  return { steps, findings };
+  return { steps, findings, notes };
 }
 
 class GuardedPlanner {
@@ -84,7 +100,7 @@ class GuardedPlanner {
     this.risk = risk;
   }
 
-  async makePlan(command, { docs = [], modelLocation, commandLevel } = {}) {
+  async makePlan(command, { docs = [], modelLocation, commandLevel, delegation = null, delegationVerifier = null } = {}) {
     const prepared = prepareModelInput(this.llm, command, docs, { modelLocation, commandLevel });
     modelLocation = prepared.location;
     const contextBlocks = prepared.blocks;
@@ -110,15 +126,18 @@ class GuardedPlanner {
     const resolved = resolveTargets(raw, prepared.targets);
 
     // 3) 计划校验（出模型后的第一道保险）
-    const { steps, findings } = validatePlan(resolved, { command, docs });
+    const { steps, findings, notes } = validatePlan(resolved, { command, docs, delegation, delegationVerifier });
     for (const f of findings) {
       this.audit.append('计划校验', { level: f.level, reason: f.reason, step: f.step });
       this.risk.add(f.level === 'block' ? 25 : 5, `计划校验${f.level === 'block' ? '拦截' : '提示'}：${f.reason}`);
     }
+    for (const n of notes || []) {
+      this.audit.append('委托放行', { reason: n.reason });
+    }
     if (findings.length > 0) {
       this.audit.append('计划校正', { before: Array.isArray(resolved) ? resolved.length : 0, after: steps.length });
     }
-    return { steps, findings, contextInfo };
+    return { steps, findings, notes, contextInfo };
   }
 }
 

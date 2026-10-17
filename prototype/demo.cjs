@@ -10,6 +10,7 @@ const { CapabilityToken } = require('./src/guard.cjs');
 const { AgentRuntime } = require('./src/runtime.cjs');
 const { GuardedPlanner } = require('./src/planner.cjs');
 const { MockLLM, HttpLLM } = require('./src/llm.cjs');
+const { defineAgent, issueToken, DelegationService } = require('./src/agents.cjs');
 const { PerfMeter } = require('./src/perf.cjs');
 const { DEFAULT_SANDBOX } = require('./src/sandbox.cjs');
 const { writeReport } = require('./src/report.cjs');
@@ -214,6 +215,84 @@ const banner = (t) => { line(); line('═'.repeat(66)); line(`  ${t}`); line('�
     line(`  ▸「${atk.name}」${atk.command}`);
     line(`     ${key.trim()}`);
     if (blocks.length > 1) line(`     （本工况共 ${blocks.length} 处拦截——批量动作被逐条封顶）`);
+  }
+
+  // 幕8 · Agent 权限分级（独立工况：不污染主审计链）
+  banner('幕8 · Agent 权限分级（角色 × 能力 × 资源；独立工况）');
+  {
+    const internAgent = defineAgent({
+      agentId: 'intern-assistant', role: '实习生',
+      allowedTools: ['readDoc', 'readContact', 'summarize', 'recognizeImage', 'transcribeAudio'],
+      documentScopes: ['M2', 'M3', 'I1', 'A1', 'A2'],
+    });
+    const employeeAgent = defineAgent({
+      agentId: 'minutes-assistant', role: '员工',
+      allowedTools: ['readDoc', 'readContact', 'summarize', 'sendInternalEmail', 'sendExternalEmail'],
+      documentScopes: ['M1', 'M2', 'M3', 'I1', 'I2', 'A1', 'A2'],
+    });
+    const auditorAgent = defineAgent({
+      agentId: 'audit-assistant', role: '审计员',
+      allowedTools: ['readDoc', 'summarize'],
+      documentScopes: ['M1', 'M2', 'M3', 'I1', 'I2', 'A1', 'A2'],
+    });
+    const deviceAgent = defineAgent({
+      agentId: 'device-assistant', role: '设备助手',
+      allowedTools: ['deviceControl'], documentScopes: [],
+    });
+
+    const agentScene = async (title, { agent, command, tools, docs, domains = [], nearfieldOnline = false, sandbox, delegation, delegationVerifier }) => {
+      banner(title);
+      const a2 = new AuditLog();
+      const r2 = new RiskMeter(1000, { onEvent: (kind, detail) => a2.append(kind, detail) });
+      const p2 = new GuardedPlanner({ llm: new MockLLM(), audit: a2, risk: r2 });
+      const rt2 = new AgentRuntime({ policy, audit: a2, risk: r2, planner: p2, perf: new PerfMeter() });
+      const issued = issueToken(agent, {
+        tools, documentIds: docs, allowedExternalDomains: domains, issuedFor: command,
+      }, { audit: a2 });
+      line(`  〔令牌〕${agent.agentId} / ${agent.role} → 工具 [${issued.token.tools.join(', ') || '无'}]；资源 [${issued.token.documentIds.join(', ') || '无'}]`);
+      if (issued.deniedTools.length > 0) line(`  〔角色裁剪〕工具被拒：${issued.deniedTools.join('、')}`);
+      if (issued.deniedDocs.length > 0) line(`  〔角色裁剪〕资源被拒：${issued.deniedDocs.join('、')}`);
+      const out = await rt2.runCommand(command, {
+        agent, token: issued.token, nearfieldOnline, sandbox, delegation, delegationVerifier,
+      });
+      out.forEach(line);
+    };
+
+    await agentScene('幕8a · 实习生：只读（通讯录单条查询，最小暴露）', {
+      agent: internAgent, command: '查一下张伟的联系方式', tools: ['readContact'], docs: [],
+    });
+    await agentScene('幕8b · 实习生：申请外发 → 角色裁剪 + 策略拒绝', {
+      agent: internAgent, command: '把周例会纪要发给外部参会方 partner@partner-example.com',
+      tools: ['readDoc', 'sendExternalEmail'], docs: ['M2'], domains: ['partner-example.com'],
+    });
+    await agentScene('幕8c · 员工：外发 → 角色允许 + 近场确认放行', {
+      agent: employeeAgent, command: '把周例会纪要发给外部参会方 partner@partner-example.com',
+      tools: ['readDoc', 'sendExternalEmail'], docs: ['M2'], domains: ['partner-example.com'],
+      nearfieldOnline: true,
+    });
+    await agentScene('幕8d · 审计员：只读 → 外发被策略拒绝', {
+      agent: auditorAgent, command: '把周例会纪要发给外部参会方 partner@partner-example.com',
+      tools: ['readDoc', 'sendExternalEmail'], docs: ['M2'], domains: ['partner-example.com'],
+      nearfieldOnline: true,
+    });
+    await agentScene('幕8e · 设备助手：仅设备联动（物理通道 + 近场）', {
+      agent: deviceAgent, command: '把评审会会议室的门锁打开', tools: ['deviceControl'], docs: [],
+      nearfieldOnline: true,
+      sandbox: { ...DEFAULT_SANDBOX, name: '演练沙箱（授予物理通道）', physical: true },
+    });
+
+    const ds = new DelegationService();
+    await agentScene('幕8f · 委托令牌①：员工代发但无令牌 → 计划校验拒绝', {
+      agent: employeeAgent, command: '以张总名义给全部门发通知：下周例会改期，发到 team@corp.internal',
+      tools: ['readDoc', 'sendInternalEmail'], docs: ['M2'],
+    });
+    const delegation = ds.issue({ from: '张总', to: 'team@corp.internal', actions: ['sendInternalEmail'] });
+    await agentScene('幕8g · 委托令牌②：持张总委托令牌 → 放行（目标仍须在指令中可溯源）', {
+      agent: employeeAgent, command: '以张总名义给全部门发通知：下周例会改期，发到 team@corp.internal',
+      tools: ['readDoc', 'sendInternalEmail'], docs: ['M2'],
+      delegation, delegationVerifier: (t, ctx) => ds.verify(t, ctx),
+    });
+    line('  〔说明〕幕8 使用独立审计/风险实例，不污染主链；清单摘要为进程内防篡改摘要，非密码学签名。');
   }
 
   // 时延与资源开销（答题要求 #2：响应时延 / 资源占用）

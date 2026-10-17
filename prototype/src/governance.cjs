@@ -27,9 +27,30 @@ const DEFAULT_POLICIES = [
   { role: '员工', action: 'deviceControl', decision: 'confirm' },
   // 外部上传/云同步：默认拒绝（fail-closed 的最严一档，需专门授权）
   { role: '员工', action: 'uploadToCloud', decision: 'deny' },
-  // 角色约束示例
+  // —— Agent 角色分级（v0.9）：未声明动作 = 拒绝 ——
+  // 实习生：只读（公开/内部），不得发送/预约/写入/物理动作
+  { role: '实习生', action: 'readDoc', decision: 'allow' },
+  { role: '实习生', action: 'recognizeImage', decision: 'allow' },
+  { role: '实习生', action: 'summarize', decision: 'allow' },
+  { role: '实习生', action: 'transcribeAudio', decision: 'allow' },
+  { role: '实习生', action: 'readContact', decision: 'allow' },
+  { role: '实习生', action: 'sendInternalEmail', decision: 'deny' },
   { role: '实习生', action: 'sendExternalEmail', decision: 'deny' },
   { role: '实习生', action: 'scheduleMeeting', decision: 'deny' },
+  { role: '实习生', action: 'deleteDoc', decision: 'deny' },
+  { role: '实习生', action: 'printDoc', decision: 'deny' },
+  { role: '实习生', action: 'shareScreen', decision: 'deny' },
+  { role: '实习生', action: 'deviceControl', decision: 'deny' },
+  { role: '实习生', action: 'uploadToCloud', decision: 'deny' },
+  // 审计员：只读全部文档 + 治理数据；不执行业务动作
+  { role: '审计员', action: 'readDoc', decision: 'allow' },
+  { role: '审计员', action: 'recognizeImage', decision: 'allow' },
+  { role: '审计员', action: 'summarize', decision: 'allow' },
+  { role: '审计员', action: 'transcribeAudio', decision: 'allow' },
+  // 设备助手：只做设备联动（物理动作需确认 + 近场）
+  { role: '设备助手', action: 'deviceControl', decision: 'confirm' },
+  // 管理员：不声明任何业务动作（策略管理走 PolicyEngine.update，不在业务链路）
+  // 访客：不声明任何动作（用于验证"策略拒绝先于工具执行"）
 ];
 
 class PolicyEngine {

@@ -23,6 +23,7 @@ const { DEFAULT_SANDBOX, checkSandbox } = require('./sandbox.cjs');
 const { prepareModelInput } = require('./model-boundary.cjs');
 const { ConfirmationService, digest } = require('./confirmation.cjs');
 const { classifyModelFault, asModelFault } = require('./faults.cjs');
+const { verifyAgentManifest } = require('./agents.cjs');
 
 class AgentRuntime {
   constructor({ policy, audit, risk, planner, perf }) {
@@ -69,8 +70,34 @@ class AgentRuntime {
     return snap;
   }
 
-  async runCommand(command, { role = '员工', token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true } = {}) {
-    this.audit.append('用户指令', { role, command, scene, taskId });
+  async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null } = {}) {
+    let role = requestedRole || '员工';
+    // —— Agent 身份校验（v0.9）：清单可信 → 角色一致 → 令牌绑定该 Agent ——
+    if (agent) {
+      const check = verifyAgentManifest(agent);
+      if (!check.ok) {
+        this.audit.append('Agent拒绝', { agentId: agent && agent.agentId, reason: check.reason });
+        return [`指令：「${command}」`, `  ⛔ Agent 拒绝：${check.reason}`];
+      }
+      if (requestedRole && requestedRole !== agent.role) {
+        const reason = `角色声明不一致（调用方=${requestedRole}，清单=${agent.role}）`;
+        this.audit.append('Agent拒绝', { agentId: agent.agentId, reason });
+        return [`指令：「${command}」`, `  ⛔ Agent 拒绝：${reason}`];
+      }
+      role = agent.role;
+      if (modelLocation !== undefined && modelLocation !== agent.modelLocation) {
+        const reason = `模型位置声明不一致（调用方=${modelLocation}，清单=${agent.modelLocation}）`;
+        this.audit.append('Agent拒绝', { agentId: agent.agentId, reason });
+        return [`指令：「${command}」`, `  ⛔ Agent 拒绝：${reason}`];
+      }
+      modelLocation = agent.modelLocation;
+      if (token && (!token.agentId || token.agentId !== agent.agentId || token.role !== agent.role)) {
+        this.audit.append('Agent拒绝', { agentId: agent.agentId, reason: '令牌与 Agent 身份不匹配' });
+        return [`指令：「${command}」`, '  ⛔ Agent 拒绝：令牌未绑定该 Agent 身份或角色'];
+      }
+      this.audit.append('Agent身份', { agentId: agent.agentId, role: agent.role, manifestHash: agent.manifestHash, modelLocation: agent.modelLocation });
+    }
+    this.audit.append('用户指令', { role, command, scene, taskId, agentId: agent ? agent.agentId : undefined });
     const lines = [`指令：「${command}」（角色：${role}）`];
 
     // —— 幂等键（v0.7）：同一 taskId 只执行一次。模型超时等故障的重试
@@ -114,7 +141,7 @@ class AgentRuntime {
       let plan;
       try {
         plan = await this.perf.measureAsync('规划+计划校验', () =>
-          this.planner.makePlan(command, { docs: Object.values(DOCS).filter(d => token?.documentIds.includes(d.id) && this.policy.decide(role, 'readDoc') === 'allow'), modelLocation, commandLevel }),
+          this.planner.makePlan(command, { docs: Object.values(DOCS).filter(d => token?.documentIds.includes(d.id) && this.policy.decide(role, 'readDoc') === 'allow'), modelLocation, commandLevel, delegation, delegationVerifier }),
         );
       } catch (err) {
         const fault = classifyModelFault(err);
@@ -124,13 +151,16 @@ class AgentRuntime {
         settle('planning-failed');
         return lines;
       }
-      const { steps, findings, contextInfo } = plan;
+      const { steps, findings, notes, contextInfo } = plan;
       if (contextInfo && (contextInfo.modelLocation === 'cloud' || contextInfo.withheld.length > 0)) {
         lines.push(`  〔模型边界〕规划走云侧模型：送入 [${contextInfo.sent.join(', ') || '无'}]，` +
           `机密 ${contextInfo.withheld.length} 篇正文已分流（不送云，仅本地处理）——数据流向已入审计`);
       }
       for (const f of findings) {
         lines.push(`  〔计划校验〕⛔ ${f.reason}`);
+      }
+      for (const n of notes || []) {
+        lines.push(`  〔计划校验〕✓ ${n.reason}`);
       }
       if (findings.length > 0) {
         lines.push(`  〔计划〕模型输出 ${findings.length + steps.length} 步 → 校验后 ${steps.length} 步`);
