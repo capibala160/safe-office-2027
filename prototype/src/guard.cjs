@@ -105,8 +105,9 @@ function redact(text) {
 const OUTBOUND_ACTIONS = new Set(['sendInternalEmail', 'sendExternalEmail', 'uploadToCloud']);
 
 // 出站数据检查：机密级一律禁止外发；外发自动脱敏；上传外部只允许公开级
-function checkDataBoundary(doc, action) {
-  if (!OUTBOUND_ACTIONS.has(action)) {
+// v0.13：可选 outbound/outboundArg 供工具注册表的自定义出站工具复用同一规则
+function checkDataBoundary(doc, action, { outbound = OUTBOUND_ACTIONS.has(action), outboundArg = null } = {}) {
+  if (!outbound) {
     return { allow: true, reason: '非出站动作', content: doc.body };
   }
   if (!['公开', '内部', '机密'].includes(doc.level)) {
@@ -115,15 +116,16 @@ function checkDataBoundary(doc, action) {
   if (doc.level === '机密') {
     return { allow: false, reason: `文档「${doc.title}」密级=机密，禁止经 ${action} 外发` };
   }
-  if (action === 'uploadToCloud') {
+  if (action === 'uploadToCloud' || outboundArg === 'url') {
     // 上传外部=离开本机信任域：比邮件更严——仅公开级材料可上传
     if (doc.level !== '公开') {
       return { allow: false, reason: `文档「${doc.title}」密级=${doc.level}，禁止上传外部（分级约束：仅公开级可上传）` };
     }
     return { allow: true, reason: '公开级材料可上传（出站已脱敏）', content: redact(doc.body) };
   }
-  const content = action === 'sendExternalEmail' ? redact(doc.body) : doc.body;
-  return { allow: true, reason: action === 'sendExternalEmail' ? '已按外发规则脱敏' : '内网可原样发送', content };
+  const external = action !== 'sendInternalEmail';
+  const content = external ? redact(doc.body) : doc.body;
+  return { allow: true, reason: external ? '已按外发规则脱敏' : '内网可原样发送', content };
 }
 
 // ---------- 闸4 · 执行管控（高危二次确认 / HITL） ----------

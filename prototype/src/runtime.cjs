@@ -26,18 +26,39 @@ const { classifyModelFault, asModelFault } = require('./faults.cjs');
 const { verifyAgentManifest } = require('./agents.cjs');
 
 class AgentRuntime {
-  constructor({ policy, audit, risk, planner, perf }) {
+  constructor({ policy, audit, risk, planner, perf, toolRegistry = null, toolExecutors = null }) {
     this.policy = policy;
     this.audit = audit;
     this.risk = risk;
     this.planner = planner; // GuardedPlanner：模型输出先过计划校验，才轮到本运行时执行
     this.perf = perf || new PerfMeter(); // 时延度量（可选共享实例，跨场景累计）
+    this.toolRegistry = toolRegistry || null; // v0.13：可选工具注册表；null 时退回静态表
+    this.toolExecutors = toolExecutors instanceof Map
+      ? toolExecutors
+      : new Map(Object.entries(toolExecutors || {}));
     this.outbox = [];       // 已发送邮件（模拟副作用）
     this.uploads = [];      // 已上传外部的内容（模拟副作用）
     this.knowledge = {};    // 已读入的文档/转写稿（含消毒结果）
     this.snapshots = [];    // 高危执行前的状态快照（L2 闸4：可一键回滚）
     this.confirmations = new ConfirmationService();
     this.tasks = new Map(); // 幂等键：taskId → 任务执行记录（防超时重试重复执行）
+  }
+
+  _isHighRisk(action) {
+    return this.toolRegistry ? this.toolRegistry.isHighRisk(action) : HIGH_RISK_ACTIONS.has(action);
+  }
+
+  _isOutbound(action) {
+    return this.toolRegistry ? this.toolRegistry.isOutbound(action) : OUTBOUND_ACTIONS.has(action);
+  }
+
+  _sandboxProfile(action) {
+    return this.toolRegistry ? this.toolRegistry.sandboxProfile(action) : undefined;
+  }
+
+  _outboundArg(action) {
+    if (this.toolRegistry) return this.toolRegistry.outboundArg(action);
+    return action === 'uploadToCloud' ? 'url' : 'to';
   }
 
   // —— 快照：执行高危动作前的完整状态（knowledge + outbox + uploads），支撑"误操作可回滚" ——
@@ -70,11 +91,11 @@ class AgentRuntime {
     return snap;
   }
 
-  async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null } = {}) {
+  async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null, deferActions = null, onDeferred = null } = {}) {
     let role = requestedRole || '员工';
     // —— Agent 身份校验（v0.9）：清单可信 → 角色一致 → 令牌绑定该 Agent ——
     if (agent) {
-      const check = verifyAgentManifest(agent);
+      const check = verifyAgentManifest(agent, { registry: this.toolRegistry, policy: this.policy });
       if (!check.ok) {
         this.audit.append('Agent拒绝', { agentId: agent && agent.agentId, reason: check.reason });
         return [`指令：「${command}」`, `  ⛔ Agent 拒绝：${check.reason}`];
@@ -169,7 +190,7 @@ class AgentRuntime {
       // 执行：任一步骤抛出模型故障（如生成阶段超时）→ 立即中止剩余步骤（fail-closed）
       for (let i = 0; i < steps.length; i++) {
         try {
-          lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel }));
+          lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred }));
         } catch (err) {
           const fault = classifyModelFault(err);
           const notExecuted = steps.length - i - 1;
@@ -195,6 +216,12 @@ class AgentRuntime {
   async execStep(step, n, ctx) {
     const { action, args } = step;
     this.audit.append('计划步骤', { n, action, args, fromDoc: step.fromDoc || null });
+    if (this.toolRegistry && !this.toolRegistry.has(action)) {
+      this.risk.add(15, `工具未注册 ${action}`);
+      this.risk.observe({ kind: 'blocked', action });
+      this.audit.append('工具拒绝', { n, action, reason: '未注册工具' });
+      return `  [${n}] ${action} ⛔ 工具拒绝：未在工具注册表中登记（fail-closed）`;
+    }
     const decision = this.perf.measure('策略矩阵', () => this.policy.decide(ctx.role, action));
     if (!['allow', 'confirm'].includes(decision)) {
       this.risk.add(30, `策略禁止 ${action}`);
@@ -225,8 +252,8 @@ class AgentRuntime {
         return `  [${n}] ${action} ⛔ 数据访问拒绝：源资源未授权`;
       }
     }
-    if (OUTBOUND_ACTIONS.has(action)) {
-      const target = action === 'uploadToCloud' ? args.url : args.to;
+    if (this._isOutbound(action)) {
+      const target = args[this._outboundArg(action)];
       const targets = String(ctx.command || '').match(/https:\/\/[^\s，。；）)]+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g) || [];
       if (!targets.includes(target)) {
         this.audit.append('目标授权拒绝', { action, target });
@@ -235,7 +262,8 @@ class AgentRuntime {
     }
 
     // —— 沙箱：执行环境独立一锁（令牌放行 ≠ 环境放行）——
-    const sb = this.perf.measure('沙箱校验', () => checkSandbox(action, args, ctx.sandbox || DEFAULT_SANDBOX));
+    const sb = this.perf.measure('沙箱校验', () =>
+      checkSandbox(action, args, ctx.sandbox || DEFAULT_SANDBOX, this._sandboxProfile(action)));
     if (!sb.allow) {
       this.risk.add(20, `沙箱拦截 ${action}：${sb.reason}`);
       this.risk.observe({ kind: 'blocked', action });
@@ -301,13 +329,14 @@ class AgentRuntime {
 
     // —— 闸3：数据边界（出站动作：密级 + 脱敏）——
     let payload = null;
-    if (OUTBOUND_ACTIONS.has(action)) {
+    if (this._isOutbound(action)) {
       const doc = this.knowledge[args.docId];
       if (!doc) {
         this.audit.append('闸3拒绝', { n, reason: `文档 ${args.docId} 未读入` });
         return `  [${n}] ${action} ⛔ 闸3拒绝：文档 ${args.docId} 未读入，禁止出站`;
       }
-      const b = this.perf.measure('闸3 数据边界', () => checkDataBoundary(doc, action));
+      const b = this.perf.measure('闸3 数据边界', () =>
+        checkDataBoundary(doc, action, { outbound: true, outboundArg: this._outboundArg(action) }));
       if (!b.allow) {
         this.risk.add(25, `闸3 拦截外发：${b.reason}`);
         this.risk.observe({ kind: 'blocked', action });
@@ -315,7 +344,7 @@ class AgentRuntime {
         return `  [${n}] ${action} ⛔ 闸3拒绝：${b.reason}`;
       }
       payload = b.content;
-      if (action === 'sendExternalEmail' || action === 'uploadToCloud') {
+      if (this._isOutbound(action) && action !== 'sendInternalEmail') {
         this.audit.append('闸3脱敏', { n, docId: doc.id, action });
       }
     }
@@ -324,7 +353,10 @@ class AgentRuntime {
     if (payload !== null) {
       const confDocs = Object.values(this.knowledge).filter((d) => d.level === '机密');
       const oc = this.perf.measure('闸5 输出检测', () =>
-        checkAgentOutput(payload, { level: '外发', confidentialDocs: confDocs, external: action === 'sendExternalEmail' || action === 'uploadToCloud' }),
+        checkAgentOutput(payload, {
+          level: '外发', confidentialDocs: confDocs,
+          external: action !== 'sendInternalEmail' && this._isOutbound(action),
+        }),
       );
       if (!oc.allowed) {
         this.risk.add(20, `闸5 拦截出站内容：${oc.reasons.join('、')}`);
@@ -339,14 +371,57 @@ class AgentRuntime {
     }
 
     // —— L3 冻结：风险分超阈值后，高危动作一律转人工（近场确认亦不放行）——
-    if (HIGH_RISK_ACTIONS.has(action) && this.risk.frozen) {
+    if (this._isHighRisk(action) && this.risk.frozen) {
       this.audit.append('冻结拦截', { n, action, score: this.risk.score, threshold: this.risk.threshold });
       return `  [${n}] ${action} ⛔ 风险冻结拦截：风险分 ${this.risk.score} ≥ 阈值 ${this.risk.threshold}，高危动作已转人工复核（近场确认亦不放行）`;
     }
 
+    // —— v0.12 转交确认缝（默认关闭）——
+    //    位置：规划/令牌/沙箱/边界/输出/风险冻结检查之后，闸4之前。
+    //    命中 deferActions 的动作不再执行运行时模拟闸4/模拟副作用，
+    //    而是把已过闸的参数交给上层（控制台）创建冻结操作，再走 WS63 确认。
+    const deferredSet = ctx.deferActions instanceof Set
+      ? ctx.deferActions
+      : new Set(ctx.deferActions || []);
+    if (deferredSet.has(action)) {
+      // 转交前落快照：副作用会在确认后由上层执行，回滚仍可恢复到确认前
+      if (this._isHighRisk(action)) this.takeSnapshot(`转交前快照：${action}`);
+      const doc = this.knowledge[args.docId] || this.knowledge[args.id] || null;
+      const descriptor = {
+        stepNumber: n,
+        action,
+        args: structuredClone(args),
+        payload,
+        decision,
+        role: ctx.role,
+        command: ctx.command,
+        docId: args.docId || args.id || null,
+        docTitle: doc ? doc.title : '',
+        docLevel: doc ? doc.level : '内部',
+        sourceDocIds: doc ? (doc.sourceIds || [doc.id]) : [],
+      };
+      this.audit.append('转交确认闭环', {
+        n,
+        action,
+        decision,
+        requiresNearfield: this._isHighRisk(action),
+        docId: descriptor.docId,
+        docTitle: descriptor.docTitle,
+      });
+      if (typeof ctx.onDeferred === 'function') {
+        try {
+          ctx.onDeferred(descriptor);
+        } catch (err) {
+          this.audit.append('转交失败', { n, action, reason: err.message });
+          return `  [${n}] ${action} ⛔ 转交确认闭环失败：${err.message}（未执行）`;
+        }
+      }
+      return `  [${n}] ${action} ⇥ 已转交确认执行闭环（${this._isHighRisk(action) ? '需近场确认' : '策略自动确认'}）`;
+    }
+
     // —— 闸4：高危二次确认（策略 confirm 或高危动作清单）——
     let confirmNote = '';
-    if (decision === 'confirm' || HIGH_RISK_ACTIONS.has(action)) {
+    if (decision === 'confirm' || this._isHighRisk(action)) {
       const operation = { role: ctx.role, action, args: structuredClone(args), contentHash: digest(payload) };
       const challenge = this.confirmations.challenge(operation);
       const c = await this.perf.measureAsync('闸4 高危确认', () =>
@@ -366,7 +441,7 @@ class AgentRuntime {
     }
 
     // —— 快照：高危动作执行前落盘，误操作可一键回滚 ——
-    if (HIGH_RISK_ACTIONS.has(action)) {
+    if (this._isHighRisk(action)) {
       this.takeSnapshot(`执行前快照：${action}`);
       this.risk.observe({ kind: 'executed-high-risk', action }); // 行为因子观测（频次/时段）
     }
@@ -453,6 +528,35 @@ class AgentRuntime {
       this.uploads.push({ url: args.url, docId: args.docId, content: payload });
       effect = `已上传 → ${args.url}（内容已脱敏）`;
     }
+
+    // —— v0.13 自定义工具执行器（注册表 / 注入 Map）——
+    //    内置动作全部命中原链；只有注册表里的自定义工具会走到这里。
+    if (!effect) {
+      let executor = this.toolExecutors.get(action);
+      if (!executor && this.toolRegistry) {
+        const def = this.toolRegistry.get(action);
+        if (def && typeof def.executor === 'function') executor = def.executor;
+      }
+      if (typeof executor === 'function') {
+        try {
+          const result = await executor({
+            action, args: structuredClone(args), step, n, ctx, payload, decision, runtime: this,
+          });
+          effect = typeof result === 'string' && result.trim()
+            ? result
+            : JSON.stringify(result === undefined ? { ok: true } : result);
+        } catch (err) {
+          this.risk.add(15, `自定义工具执行失败 ${action}`);
+          this.risk.observe({ kind: 'blocked', action });
+          this.audit.append('执行失败', { n, action, reason: err.message });
+          return `  [${n}] ${action} ⛔ 执行失败：${err.message}（未伪造成功）`;
+        }
+      } else {
+        this.audit.append('执行拒绝', { n, action, reason: '未注册执行器' });
+        return `  [${n}] ${action} ⛔ 拒绝：未注册执行器（fail-closed）`;
+      }
+    }
+
     // args 一并入审计：调用链审计需要"对谁/对什么"的完整证据（评测 harness 也据此计分）
     this.audit.append('执行', { n, action, args, outcome: effect });
     return `  [${n}] ${action} ✓ ${effect}${confirmNote}`;

@@ -8,14 +8,20 @@
 // ============================================================
 const { TOOL_META } = require('./capabilities.cjs');
 const { prepareModelInput, resolveTargets } = require('./model-boundary.cjs');
+const { createRegistry } = require('./tool-registry.cjs');
 
 // 工具目录与必需参数：从能力分级表（单一事实源）派生
 const KNOWN_TOOLS = new Set(Object.keys(TOOL_META));
 const REQUIRED_ARGS = Object.fromEntries(
   Object.entries(TOOL_META).map(([tool, meta]) => [tool, meta.requiredArgs || []]),
 );
+// 私有内置注册表：2 参调用不受全局 defaultRegistry 污染
+const BUILTIN_REGISTRY = createRegistry();
 
-function validatePlan(rawSteps, { command = '', docs = [], delegation = null, delegationVerifier = null } = {}) {
+function validatePlan(rawSteps, { command = '', docs = [], delegation = null, delegationVerifier = null, registry = BUILTIN_REGISTRY } = {}) {
+  const reg = registry || null;
+  const hasTool = (name) => (reg ? reg.has(name) : KNOWN_TOOLS.has(name));
+  const requiredOf = (name) => (reg ? reg.requiredArgs(name) : (REQUIRED_ARGS[name] || []));
   const steps = [];
   const findings = [];
   const notes = [];
@@ -27,12 +33,12 @@ function validatePlan(rawSteps, { command = '', docs = [], delegation = null, de
 
   for (const s of Array.isArray(rawSteps) ? rawSteps : []) {
     // 结构校验：动作必须在工具目录内
-    if (!s || typeof s.action !== 'string' || !KNOWN_TOOLS.has(s.action)) {
+    if (!s || typeof s.action !== 'string' || !hasTool(s.action)) {
       findings.push({ level: 'block', reason: `非法动作「${(s && s.action) || '(空)'}」不在工具目录内，已移除`, step: s });
       continue;
     }
     // 结构校验：必需参数齐全
-    const missing = (REQUIRED_ARGS[s.action] || []).filter(
+    const missing = requiredOf(s.action).filter(
       (k) => !s.args || typeof s.args[k] !== 'string' || !s.args[k].trim() || s.args[k].length > 2048,
     );
     if (missing.length > 0) {
@@ -94,10 +100,11 @@ function validatePlan(rawSteps, { command = '', docs = [], delegation = null, de
 }
 
 class GuardedPlanner {
-  constructor({ llm, audit, risk }) {
+  constructor({ llm, audit, risk, registry = BUILTIN_REGISTRY }) {
     this.llm = llm;
     this.audit = audit;
     this.risk = risk;
+    this.registry = registry;
   }
 
   async makePlan(command, { docs = [], modelLocation, commandLevel, delegation = null, delegationVerifier = null } = {}) {
@@ -126,7 +133,9 @@ class GuardedPlanner {
     const resolved = resolveTargets(raw, prepared.targets);
 
     // 3) 计划校验（出模型后的第一道保险）
-    const { steps, findings, notes } = validatePlan(resolved, { command, docs, delegation, delegationVerifier });
+    const { steps, findings, notes } = validatePlan(resolved, {
+      command, docs, delegation, delegationVerifier, registry: this.registry,
+    });
     for (const f of findings) {
       this.audit.append('计划校验', { level: f.level, reason: f.reason, step: f.step });
       this.risk.add(f.level === 'block' ? 25 : 5, `计划校验${f.level === 'block' ? '拦截' : '提示'}：${f.reason}`);

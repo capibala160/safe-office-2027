@@ -47,6 +47,12 @@ const ROLE_DOC_IDS = Object.fromEntries(
   Object.entries(ROLE_DEFS).map(([role, def]) => [role, idsByLevels(def.levels)]),
 );
 
+// v0.13：动态角色工具集；未注入 registry+policy 时回退静态 ROLE_TOOLS（旧行为不变）
+function roleToolsFor(role, { registry = null, policy = null } = {}) {
+  if (registry && policy) return registry.toolsForRole(role, policy);
+  return ROLE_TOOLS[role] || [];
+}
+
 function uniqueStrings(list, name) {
   if (!Array.isArray(list)) throw new Error(`${name} 必须是数组`);
   const out = [];
@@ -69,13 +75,14 @@ function hashManifest(manifest) {
 }
 
 // 定义 Agent 清单：越权申请直接抛错（fail-closed）
-function defineAgent({ agentId, role, allowedTools = [], documentScopes = [], modelLocation = 'cloud' } = {}) {
+function defineAgent({ agentId, role, allowedTools = [], documentScopes = [], modelLocation = 'cloud' } = {}, { registry = null, policy = null } = {}) {
   if (typeof agentId !== 'string' || !agentId.trim()) throw new Error('Agent 清单缺少 agentId');
   if (!ROLE_DEFS[role]) throw new Error(`未知角色「${role}」`);
   if (!['local', 'cloud'].includes(modelLocation)) throw new Error('modelLocation 只能是 local/cloud');
   const tools = uniqueStrings(allowedTools, 'allowedTools');
   const docs = uniqueStrings(documentScopes, 'documentScopes');
-  const beyondTools = tools.filter((t) => !ROLE_TOOLS[role].includes(t));
+  const roleTools = roleToolsFor(role, { registry, policy });
+  const beyondTools = tools.filter((t) => !roleTools.includes(t));
   if (beyondTools.length > 0) {
     throw new Error(`Agent「${agentId}」申请了角色「${role}」不具备的工具：${beyondTools.join(', ')}`);
   }
@@ -88,7 +95,7 @@ function defineAgent({ agentId, role, allowedTools = [], documentScopes = [], mo
 }
 
 // 校验清单：字段齐全 + 摘要匹配 + 不越角色
-function verifyAgentManifest(agent) {
+function verifyAgentManifest(agent, { registry = null, policy = null } = {}) {
   if (!agent || typeof agent !== 'object') return { ok: false, reason: '缺少 Agent 清单' };
   if (typeof agent.agentId !== 'string' || !agent.agentId.trim()) return { ok: false, reason: '清单缺少 agentId' };
   if (!ROLE_DEFS[agent.role]) return { ok: false, reason: `未知角色「${agent.role}」` };
@@ -97,7 +104,8 @@ function verifyAgentManifest(agent) {
   }
   if (!['local', 'cloud'].includes(agent.modelLocation)) return { ok: false, reason: 'modelLocation 非法' };
   if (agent.manifestHash !== hashManifest(agent)) return { ok: false, reason: '清单摘要不匹配（可能被篡改）' };
-  const beyondTools = agent.allowedTools.filter((t) => !ROLE_TOOLS[agent.role].includes(t));
+  const roleTools = roleToolsFor(agent.role, { registry, policy });
+  const beyondTools = agent.allowedTools.filter((t) => !roleTools.includes(t));
   if (beyondTools.length > 0) return { ok: false, reason: `角色「${agent.role}」不具备工具：${beyondTools.join(', ')}` };
   const beyondDocs = agent.documentScopes.filter((d) => !ROLE_DOC_IDS[agent.role].includes(d));
   if (beyondDocs.length > 0) return { ok: false, reason: `角色「${agent.role}」不可读资源：${beyondDocs.join(', ')}` };
@@ -105,8 +113,8 @@ function verifyAgentManifest(agent) {
 }
 
 // 签发任务令牌：角色允许 ∩ Agent 清单 ∩ 任务需要
-function issueToken(agent, task = {}, { audit } = {}) {
-  const check = verifyAgentManifest(agent);
+function issueToken(agent, task = {}, { audit, registry = null, policy = null } = {}) {
+  const check = verifyAgentManifest(agent, { registry, policy });
   if (!check.ok) throw new Error(`Agent 清单无效：${check.reason}`);
 
   const role = agent.role;
@@ -114,7 +122,8 @@ function issueToken(agent, task = {}, { audit } = {}) {
   const requestedTools = uniqueStrings(task.tools === undefined ? agent.allowedTools : task.tools, 'task.tools');
   const requestedDocs = uniqueStrings(task.documentIds === undefined ? agent.documentScopes : task.documentIds, 'task.documentIds');
 
-  const tools = requestedTools.filter((t) => agent.allowedTools.includes(t) && ROLE_TOOLS[role].includes(t));
+  const roleTools = roleToolsFor(role, { registry, policy });
+  const tools = requestedTools.filter((t) => agent.allowedTools.includes(t) && roleTools.includes(t));
   const documentIds = requestedDocs.filter((d) => agent.documentScopes.includes(d) && ROLE_DOC_IDS[role].includes(d));
   const deniedTools = requestedTools.filter((t) => !tools.includes(t));
   const deniedDocs = requestedDocs.filter((d) => !documentIds.includes(d));
@@ -203,7 +212,7 @@ class DelegationService {
 }
 
 module.exports = {
-  ROLE_DEFS, ROLE_TOOLS, ROLE_DOC_IDS,
+  ROLE_DEFS, ROLE_TOOLS, ROLE_DOC_IDS, roleToolsFor,
   defineAgent, verifyAgentManifest, issueToken,
   DelegationService, hashManifest,
 };

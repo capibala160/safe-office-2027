@@ -50,8 +50,7 @@ const SANDBOX_PROFILES = {
 };
 
 // 沙箱校验：工具在该执行环境里是否被允许触达所需资源
-function checkSandbox(tool, args = {}, sandbox = DEFAULT_SANDBOX) {
-  const profile = SANDBOX_PROFILES[tool];
+function checkSandbox(tool, args = {}, sandbox = DEFAULT_SANDBOX, profile = SANDBOX_PROFILES[tool]) {
   if (!profile) {
     return { allow: false, reason: `工具「${tool}」无沙箱档案（fail-closed：未知工具一律拒绝）` };
   }

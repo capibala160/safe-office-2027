@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安全智慧办公 · 办公套件控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">安</span>
+        <div class="brand-text">
+          <strong>安全智慧办公</strong>
+          <small>办公套件控制台 · v0.13</small>
+        </div>
+      </div>
+      <nav id="nav" class="nav" aria-label="主导航"></nav>
+      <div class="side-foot">
+        <span class="dot"></span> 业务动作模拟 · WS63 虚拟设备 · 仅本机
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="crumbs" id="crumbs">工作台</div>
+        <div class="top-status" id="top-status"></div>
+        <div class="top-actions">
+          <label class="field-inline">模式
+            <select id="auto-mode">
+              <option value="manual">人在环</option>
+              <option value="auto-safe">低风险自动</option>
+              <option value="auto-full">全自动（演示）</option>
+            </select>
+          </label>
+          <label class="field-inline">角色
+            <select id="role-select"></select>
+          </label>
+          <label class="field-inline">模型
+            <select id="model-select">
+              <option value="local">本地 Mock</option>
+              <option value="cloud">云端（演示）</option>
+            </select>
+          </label>
+          <label class="switch" title="仅影响运行时内置闸4（上传/共享等未转交动作）；外发/删除/打印/设备走 WS63 虚拟设备">
+            <input type="checkbox" id="nearfield-toggle" checked>
+            <span>近场（内置闸4）</span>
+          </label>
+          <button class="btn ghost" id="btn-reset">重置演示</button>
+        </div>
+      </header>
+      <div id="mode-banner" class="mode-banner" hidden></div>
+
+      <div class="content">
+        <main id="view" class="view" aria-live="polite"></main>
+        <aside class="rail">
+          <section class="rail-card" id="rail-risk"></section>
+          <section class="rail-card" id="rail-chain"></section>
+          <section class="rail-card" id="rail-events"></section>
+        </aside>
+      </div>
+
+      <footer class="foot">
+        演示级最小套件：业务动作模拟（FakeMailer / 假执行器）· WS63 虚拟设备（真实 SFC1 帧 / HMAC，无 SLE/串口）
+        · 仅监听 127.0.0.1 · 无登录 · 不提供距离证明 / 本人身份认证 / 防中继保证
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="/api.js"></script>
+  <script src="/ui.js"></script>
+  <script src="/views.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

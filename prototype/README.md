@@ -1,8 +1,8 @@
-# 核心机制原型（v0.10 · 平台无关）
+# 核心机制原型（v0.13 · 平台无关 + 办公套件控制台 + 工具注册表）
 
 > **接入变化**：`CapabilityToken.documentIds` 默认空，必须显式授权资源；邮件和上传指令须包含精确地址。模型适配器声明 deployment，未知位置按 cloud 处理；`commandLevel` 应由可信应用提供，机密/未知指令不送云。规划和 generate 共用模型出口检查。正式稿保存为 `draft_源ID`，继承密级及 sourceIds；回滚保留已发送和已上传记录。
 >
-> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。审计支持持久化及独立检查点恢复，HUKS 尚未接入；真实模型和真实工具未联网验收。旧版对应表供历史参考，最新能力以 [v0.10 优化记录](../docs/03-优化记录与落地验收.md) 为准，测试数量以 `node --test` 为准。
+> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。**v0.11 新增 WS63 确认适配器**（`nearfield-confirm.cjs`）：SFC1 二进制帧 + 虚拟设备接入冻结操作闭环；串口/SLE 与运行时闸4 仍未接。**v0.12 新增演示级办公套件控制台**（`server.cjs` + `src/console-service.cjs` + `public/`）：10 个页面、转交确认缝、策略自动确认/WS63 确认；业务动作仍为模拟。**v0.13 新增工具注册表 + MCP 骨架**（`tool-registry.cjs` / `mcp-adapter.cjs`）：内置静态表不变，自定义/MCP 工具默认拒绝，必须显式声明沙箱/风险/角色策略。审计支持持久化及独立检查点恢复，HUKS 尚未接入；真实模型和真实工具未联网验收。最新能力以 [优化记录与落地验收](../docs/03-优化记录与落地验收.md)、[v0.11 适配器文档](../docs/11-WS63确认适配器.md) 与 [v0.12 控制台文档](../docs/12-办公套件控制台.md) 为准，测试数量以 `node --test` 为准。
 
 > 「Agent 安全运行机制」的可运行原型——**零依赖、纯 Node**，上板前即可跑通全部机制逻辑。
 > 上板路径：本目录逻辑**平移 ArkTS**（行为不变）→ 闸4 的 `nearfieldOnline` 换成 WS63 真实 SLE 握手 → 规划器换成真实 LLM（模型边界已就绪）→ 沙箱对应 OH 应用沙箱/权限模型。
@@ -10,8 +10,10 @@
 ## 跑起来
 
 ```bash
+npm start            # 办公套件控制台 → http://127.0.0.1:7812（v0.12）
 node demo.cjs        # 攻防演示（答辩预演脚本：正常流 / 能力分级 / 沙箱双锁 / 图片通道 / 注入 / 端云边界 / 越权 / 冻结闭环 / 近场 / 回滚 / 回溯 / 风险行为因子 / 点名 5+1 类攻击速览 / Agent 角色分级 / 委托令牌 / 时延开销）
-npm test             # 自动化测试（109 项，全绿）
+npm run demo:nearfield  # WS63 确认适配器演示（6 幕：正常/取消/超时/重放/篡改/错设备，无硬件）
+npm test             # 自动化测试（173 项，全绿）
 npm run eval         # 三档评测（无防护 / 仅提示词 / 完整网关，Mock 离线）
 # demo 末尾自动生成治理报告（可视化交付物雏形）：out/governance-report.html
 # eval 生成评测报告：out/eval/eval-report.html + eval-results.json
@@ -21,7 +23,10 @@ npm run eval         # 三档评测（无防护 / 仅提示词 / 完整网关，
 
 ```
 prototype/
+├── server.cjs              办公套件控制台 HTTP 服务（v0.12；node:http + 静态 + JSON API）
+├── public/                 控制台前端：index.html / styles.css / api.js / ui.js / app.js / views.js
 ├── demo.cjs                攻防演示 + 治理报告生成（out/governance-report.html）
+├── demo-nearfield.cjs      WS63 确认适配器演示（虚拟设备，6 幕）
 ├── eval/                   三档评测 harness（详见下节）
 │   ├── corpus.cjs          语料：28 条（开发 14 / 验证 14；正常 12 / 攻击 16）
 │   ├── baseline.cjs        无防护 / 仅提示词档的宽松执行器（只用于对照）
@@ -45,6 +50,11 @@ prototype/
 │   ├── runtime.cjs         L1 Agent 运行时：规划 → 每步过闸+过沙箱 → 执行 → 全程审计；高危前快照、一键回滚；过闸耗时打点
 │   ├── perf.cjs            时延度量：每道闸 次数/合计/均值/峰值（答题要求 #2）
 │   ├── report.cjs          治理可视化：单文件 HTML 报告生成（审计时间线/风险计量/复核记录/时延/链校验）
+│   ├── nearfield-confirm.cjs  WS63 确认适配器（v0.11）：SFC1 状态机 + 虚拟设备 + 传输层缝 + confirmWithFulfillment
+│   ├── console-service.cjs  控制台服务（v0.12）：命令/转交/冻结/挑战/治理/报告/重置
+│   ├── demo-executor.cjs    演示执行器：FakeMailer + 删除/打印/设备假动作
+│   ├── tool-registry.cjs    工具注册表（v0.13）：内置种子 + 自定义/MCP 工具 + 默认拒绝
+│   ├── mcp-adapter.cjs      MCP client / HTTP JSON-RPC 骨架 / registerMcpTools
 │   └── scenario.cjs        场景数据：办公文档库 + 通讯录 + 录音样本 + 图片素材（含注入样本）
 └── test/
     ├── engine.test.cjs     闸级 + 计划校验 + 冻结闭环 + 快照回滚 + 输出检测 + 能力分级 + 沙箱 + 行为因子 + 模型边界 + 图片通道 + 时延 + 可视化 + 端到端（43 项）
@@ -54,6 +64,10 @@ prototype/
     ├── agents.test.cjs      Agent 角色矩阵 / 清单 / 令牌交集 / 委托令牌（10 项）
     ├── ws63-protocol.test.cjs SFC1 编解码 / Node-C 固定向量（2 项）
     ├── fulfillment.test.cjs 操作记录 / SQLite / 发送状态机（9 项）
+    ├── nearfield-confirm.test.cjs WS63 适配器：正常/取消/超时/重放/篡改/错设备/窗口/绑定（14 项）
+    ├── console-service.test.cjs 控制台服务：命令/转交/冻结/挑战/治理/报告/重置（17 项）
+    ├── server.test.cjs        HTTP：健康/静态/路径穿越/命令/闭环/异常/重置（14 项）
+    ├── tool-registry.test.cjs 注册表/MCP：种子/策略/planner/运行时/Agent/MCP 骨架（16 项）
     └── eval-harness.test.cjs 评测自身回归：语料结构 / 三档对照 / 指标边界（6 项）
 ```
 
@@ -77,7 +91,50 @@ node demo.cjs   # 幕8：实习生只读 / 员工外发 / 审计员拒绝 / 设�
 - `mailer.cjs`：`FakeMailer`（测试）+ `HttpMailer`（Idempotency-Key）；timeout/network/5xx → unknown，**不自动重试**
 - `fulfillment.cjs`：`prepare → confirm → send → reconcile`；进程中断的 sending 转 unknown
 - 测试：`node --test test/fulfillment.test.cjs`（9 项）
-- 边界：确认适配器仍为模拟；正文明文存 SQLite；不实现 SMTP；不保证外部邮件只执行一次
+- 边界：正文明文存 SQLite；不实现 SMTP；不保证外部邮件只执行一次
+
+## WS63 确认适配器（v0.11）
+
+```bash
+npm run demo:nearfield                       # 6 幕：正常/取消/超时/重放/篡改/错设备
+node --test test/nearfield-confirm.test.cjs  # 14 项
+```
+
+- `nearfield-confirm.cjs`：`NearfieldConfirmer`（A 端）+ `VirtualDevice`（B 端替身）+ `createLoopbackTransport`
+- 真实 SFC1 帧 + HMAC-SHA256；`target_hash` 直接取 `operation.operationHash` 的 32 字节，**不重新哈希 JSON**
+- 状态机镜像 C：`STATE → TASK → NONCE → REPLAY → EXPIRED → DEVICE → OPERATION → DECISION → OK`；8 条 FIFO nonce 窗口
+- 集成：`confirmWithFulfillment({ fulfillment, confirmer, operation })` → `fulfillment.confirm` → `send`
+- 传输层缝：`async send(frame) -> Buffer|null`；上板时换成串口/SLE，上层不变
+- 边界：**虚拟设备不是硬件**；无 SLE/串口；PSK 在 Node 内存；不证明距离/身份/防中继；`runtime.cjs` 闸4 仍为模拟确认。详见 [WS63 确认适配器](../docs/11-WS63确认适配器.md)
+
+## 办公套件控制台（v0.12）
+
+```bash
+npm start          # http://127.0.0.1:7812
+node --test test/console-service.test.cjs
+node --test test/server.test.cjs
+```
+
+- `server.cjs`：零依赖 `node:http` + 静态文件 + JSON API，仅监听 `127.0.0.1`。
+- `src/console-service.cjs`：常驻 `AgentRuntime` + 内存 `OperationStore` + `FulfillmentService` + 虚拟 WS63。
+- **转交确认缝**：`runtime.cjs` 新增默认关闭的 `deferActions`/`onDeferred`；命中外发/删除/打印/设备时，完成规划与五道闸后不再执行模拟副作用，而是创建冻结操作，再走 WS63 虚拟确认。
+- **内网邮件**由策略自动确认（`confirmationId='policy-auto'`）；外发/删除/打印/设备必须设备确认。
+- 10 个页面：工作台 / 命令台 / 纪要中心 / 邮件 / 日历 / 通讯录 / 文件 / 审批与确认 / 设备 / 治理审计。
+- 设备页：OLED 摘要/哈希/倒计时；批准/取消/模拟超时/篡改帧/重放。
+- 自动模式（顶栏）：`manual` 人在环（默认）/ `auto-safe` 低风险自动（仅 `partner-example.com` 内部级外发，配额 3 次）/ `auto-full` 全自动演示（绕过设备，仅对照）。
+- 边界：**演示级最小套件**；业务动作模拟（FakeMailer/假执行器）；无登录/多用户；不接真实 Office/邮件/打印/门锁；不提供距离/身份/防中继。详见 [控制台文档](../docs/12-办公套件控制台.md)。
+
+## 工具注册表与 MCP（v0.13）
+
+```bash
+node --test test/tool-registry.test.cjs   # 16 项
+```
+
+- `tool-registry.cjs`：内置 13 工具从 `TOOL_META`/`SANDBOX_PROFILES`/`HIGH_RISK`/`OUTBOUND` 种子化；`register` 自定义/MCP 工具；**默认拒绝**，必须显式声明沙箱/风险/协议号/角色策略。
+- `mcp-adapter.cjs`：`McpClient`（initialize / tools/list / tools/call）+ `createHttpTransport` JSON-RPC 骨架 + `registerMcpTools`（两阶段，防半注册）。
+- 接缝：planner（动态目录）/ sandbox（第 4 个 profile）/ runtime（动态高危/出站/沙箱 + 自定义 executor）/ agents（动态角色工具）/ console（bootstrap/矩阵/转办）。
+- **默认行为不变**：不注入 registry 时，2 参 `validatePlan`、3 参 `checkSandbox`、旧 `defineAgent/issueToken`、旧 `AgentRuntime`、默认 `ConsoleService` 与 v0.12 一致。
+- 边界：内存态；MCP 仅 client + HTTP JSON-RPC 骨架（无 SSE/stdio/OAuth/重连）；自定义 outbound 必须走 `docId` + 目标授权；不是通用 Agent。详见 [工具注册表与 MCP](../docs/13-工具注册表与MCP.md)。
 
 ## 三档评测（v0.8）
 
@@ -106,6 +163,9 @@ node eval/run.cjs --split=validation          # 只跑未参与调参的验证�
 | L3 策略中心 | `PolicyEngine`（未声明=拒绝；覆盖点名 8 类能力全部工具；**热更新+变更留痕**） |
 | **Agent 权限分级**（v0.9） | `agents.cjs`（角色表 + 清单 + 令牌交集 + 委托令牌）；`runtime.cjs` 校验清单/角色/令牌绑定 |
 | **确认执行闭环**（v0.10） | `operation/store/mailer/fulfillment.cjs`：冻结记录、SQLite、发送状态机、unknown 人工核对 |
+| **WS63 确认适配器**（v0.11） | `nearfield-confirm.cjs`：SFC1 挑战-应答、设备/操作绑定、8 条 nonce 窗口；虚拟设备可跑 6 场（串口/SLE 未接） |
+| **办公套件控制台**（v0.12） | `server.cjs` + `console-service.cjs` + `public/`：10 页 Web 控制台；命令→五道闸→冻结操作→WS63 确认→执行；业务动作模拟 |
+| **工具注册表 / MCP**（v0.13） | `tool-registry.cjs` + `mcp-adapter.cjs`：可注册工具目录、默认拒绝、动态 planner/sandbox/runtime/agents/console 接缝；MCP HTTP JSON-RPC 骨架 |
 | L3 审计 | `AuditLog`（哈希链，篡改即断裂）；含"数据流向"类目 |
 | L3 风险评分 | `RiskMeter`（拦截事件 + **行为因子：高频/异常时段/持续越权**；超阈值自动冻结 → 人工复核 clear/escalate） |
 | **办公能力分级表** | `capabilities.cjs`（8 类点名 + 3 类扩展：L1–L4、调用约束、fail-closed） |

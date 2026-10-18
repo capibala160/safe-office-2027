@@ -169,6 +169,11 @@ class OperationStore {
     return this._rowToOperation(this.db.prepare('SELECT * FROM operations WHERE operation_id = ?').get(operationId));
   }
 
+  listOperations() {
+    return this.db.prepare('SELECT * FROM operations ORDER BY created_at ASC, operation_id ASC')
+      .all().map((row) => this._rowToOperation(row));
+  }
+
   setOperationState(operationId, next, { confirmationId = null, deviceId = null, result = null } = {}) {
     return this._transaction(() => {
       const current = this.getOperation(operationId);
