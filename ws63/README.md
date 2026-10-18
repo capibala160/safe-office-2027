@@ -183,6 +183,7 @@ if (proto_decode_decision(rx, rx_len, &d, board_hmac, (void *)PRE_SHARED_KEY) ==
 - [ ] Flash 审计环形缓冲
 - [ ] 继电器/门锁执行
 - [ ] 双板联调：正常 / 不在场 / 取消 / 重放 / 篡改 / 错设备
+- [x] **Node 侧确认适配器（v0.11，虚拟设备）**：`prototype/src/nearfield-confirm.cjs` 镜像本文件状态机，接冻结操作闭环；见 [docs/11](../docs/11-WS63确认适配器.md)
 
 ## 边界
 
@@ -191,7 +192,7 @@ if (proto_decode_decision(rx, rx_len, &d, board_hmac, (void *)PRE_SHARED_KEY) ==
 - 不覆盖未过期待确认任务；TTL=0、时间加法溢出均拒绝；`now == expires_at` 即过期。过期任务 nonce 同样消费。
 - Node 编解码器位于 `prototype/src/ws63-protocol.cjs`，采用相同 SFC1 二进制帧、16B nonce、秒时间戳和 HMAC-SHA256。摘要按 UTF-8 字节计数，最多 96B。
 - `prototype` 中运行 `node --test test/ws63-protocol.test.cjs` 验证 Node/C 字节一致性；需要 gcc，没有 gcc 时跨语言项会明确跳过。此测试用 Node 真实 HMAC 产生固定向量，C 注入向量 MAC 回调，仅验证编解码，**不验证板端 mbedTLS**。
-- 此编解码器尚未接入运行时串口；Node 原有模拟确认仍保留，不能据此声称硬件链路已通。
+- v0.11 起该编解码器已接入 Node 冻结操作闭环（`prototype/src/nearfield-confirm.cjs`，虚拟设备）；**运行时串口/SLE 仍未接**，`runtime.cjs` 闸4 仍为模拟确认，不能据此声称硬件链路已通。
 - 节点重启后废弃全部 pending；8 条内存窗口不是持久化防重放。必须使用可靠随机源，每个挑战使用全新 nonce；多设备应配置独立密钥。
 
 - 不证明距离、不防中继、不做本人身份认证
