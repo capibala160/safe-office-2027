@@ -7,8 +7,41 @@
 // ============================================================
 const http = require('node:http');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
+const SFC1 = require('./public/sfc1-browser.js');
+
+// 手机确认端从局域网接入时，只开放这些路径；其余一律 403，避免把整个控制台暴露给会场 Wi-Fi
+const LOOPBACK_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const PHONE_ALLOWLIST = new Set([
+  '/confirm.html', '/confirm.js', '/confirm.css', '/sfc1-browser.js',
+  '/api/phone/state', '/api/phone/decision', '/api/health',
+]);
+
+function isLoopbackReq(req) {
+  const addr = req.socket && req.socket.remoteAddress;
+  return !addr || LOOPBACK_ADDRS.has(addr);
+}
+
+function lanUrls(port) {
+  const urls = [];
+  for (const [name, list] of Object.entries(os.networkInterfaces())) {
+    for (const net of list || []) {
+      if (net.family === 'IPv4' && !net.internal) urls.push({ name, url: `http://${net.address}:${port}/confirm.html` });
+    }
+  }
+  return urls;
+}
+
+function randomPairingCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const raw = crypto.randomBytes(8);
+  let out = '';
+  for (let i = 0; i < raw.length; i += 1) out += alphabet[raw[i] % alphabet.length];
+  return `${out.slice(0, 4)}-${out.slice(4)}`;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -134,6 +167,13 @@ function createConsoleServer({
     const { pathname, query } = parsePath(req.url || '/');
     const method = req.method || 'GET';
 
+    // 局域网来源只允许确认端相关路径
+    if (!isLoopbackReq(req) && !PHONE_ALLOWLIST.has(pathname)) {
+      return sendJson(res, 403, {
+        ok: false, error: { code: 'LAN_FORBIDDEN', message: '局域网只开放确认端页面与接口' },
+      });
+    }
+
     try {
       // ---------- API ----------
       if (pathname === '/api/health' && method === 'GET') {
@@ -206,6 +246,13 @@ function createConsoleServer({
       if (pathname === '/api/device' && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getDevice() });
       }
+      if (pathname === '/api/phone/state' && method === 'GET') {
+        return sendJson(res, 200, { ok: true, ...service.getPhoneState() });
+      }
+      if (pathname === '/api/phone/decision' && method === 'POST') {
+        const body = await readJson(req);
+        return sendJson(res, 200, await service.submitPhoneDecision(body.challengeId, body.frame));
+      }
       const decideMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/decide$/);
       if (decideMatch && method === 'POST') {
         const body = await readJson(req);
@@ -273,16 +320,32 @@ function createConsoleServer({
   return server;
 }
 
-function startServer({
+async function startServer({
   port = Number(process.env.PORT) || 7812,
   host = '127.0.0.1',
+  allowLan = false,
   service,
   publicDir,
+  pairingCode = null,
 } = {}) {
-  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
-    throw new Error('控制台只允许监听回环地址（127.0.0.1/localhost/::1）');
+  const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
+  if (!loopback && !allowLan) {
+    throw new Error('控制台默认只监听回环地址；要上局域网请显式传 allowLan: true（且只开放确认端）');
   }
-  const instance = service || new ConsoleService();
+  let instance = service;
+  if (!instance) {
+    if (pairingCode) {
+      const key = Buffer.from(await SFC1.deriveKey(pairingCode));
+      instance = new ConsoleService({
+        nearfieldKey: key,
+        deviceId: 'phone-A',
+        deviceLabel: '手机确认端（演示）',
+        pairingCode,
+      });
+    } else {
+      instance = new ConsoleService();
+    }
+  }
   const server = createConsoleServer({ service: instance, publicDir });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -293,6 +356,8 @@ function startServer({
         server,
         service: instance,
         url: `http://${host}:${actualPort}`,
+        phoneUrls: pairingCode ? lanUrls(actualPort) : [],
+        pairingCode: instance.pairingCode || null,
         close: () => new Promise((done) => {
           server.close(() => {
             instance.close();
@@ -305,10 +370,29 @@ function startServer({
 }
 
 if (require.main === module) {
-  startServer().then(({ url }) => {
+  const argv = process.argv.slice(2);
+  const lan = argv.includes('--lan');
+  const codeArg = argv.find((arg) => arg.startsWith('--code='));
+  const pairingCode = codeArg
+    ? codeArg.slice('--code='.length)
+    : process.env.SAFE_OFFICE_PHONE_CODE || (lan ? randomPairingCode() : null);
+  startServer({
+    port: Number(process.env.PORT) || 7812,
+    host: lan ? '0.0.0.0' : '127.0.0.1',
+    allowLan: lan,
+    pairingCode,
+  }).then(({ url, phoneUrls, pairingCode: code }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);
-    console.log('  仅本机演示：无登录；业务动作模拟；WS63 为虚拟设备');
+    if (code) {
+      console.log('  手机确认端已启用：局域网只开放确认页与 /api/phone/*');
+      console.log(`    配对码：${code}`);
+      for (const item of phoneUrls) console.log(`    手机打开：${item.url}  (${item.name})`);
+      if (phoneUrls.length === 0) console.log('    （未找到局域网 IPv4，请检查网络）');
+    } else {
+      console.log('  仅本机演示：无登录；业务动作模拟；确认端为虚拟设备');
+    }
+    console.log('  业务动作全部模拟；SFC1 为对称密钥，不构成"证明本人在场"');
     console.log('  Ctrl+C 停止');
   }).catch((err) => {
     console.error('控制台启动失败：', err.message);

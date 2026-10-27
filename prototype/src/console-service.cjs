@@ -29,7 +29,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.13.0';
+const VERSION = '0.14.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -92,8 +92,11 @@ class ConsoleService {
     autoSafeDomains = ['partner-example.com'],
     toolRegistry = null,
     toolExecutors = null,
+    pairingCode = null,
   } = {}) {
     this.now = now;
+    this.pairingCode = pairingCode ? String(pairingCode) : null;
+    this.lastPhoneResult = null;
     this.key = Buffer.from(nearfieldKey);
     this.deviceId = deviceId;
     this.deviceLabel = deviceLabel;
@@ -877,6 +880,26 @@ class ConsoleService {
       return { ok: false, outcome: 'timeout', code: 'TIMEOUT', message: '设备无响应', operation: this._operationView(operation) };
     }
 
+    return this._completeChallenge(challenge, reply);
+  }
+
+  // 回帧后的统一收尾：虚拟设备与手机确认端走同一条校验链路
+  async _completeChallenge(challenge, reply) {
+    const operation = this.store.getOperation(challenge.operationId);
+    if (!operation) throw new ConsoleError('NOT_FOUND', '操作不存在', 404);
+    if (operation.state !== 'frozen') {
+      throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能确认`, 409);
+    }
+    const nowSec = this._nowSec();
+    if (nowSec >= challenge.expiresAt) {
+      this.confirmer.cancel(challenge.pending);
+      challenge.state = 'expired';
+      this._pushHistory(challenge, { code: 'EXPIRED', outcome: 'expired' });
+      return {
+        ok: false, outcome: 'expired', code: 'EXPIRED', message: '挑战已过期，nonce 已消费',
+        operation: this._operationView(operation),
+      };
+    }
     let approval;
     try {
       approval = this.confirmer.acceptDecision(challenge.pending, reply, { finalOperation: operation });
@@ -906,7 +929,7 @@ class ConsoleService {
     }
 
     this.lastDecision = {
-      challengeId, operationId: operation.operationId,
+      challengeId: challenge.challengeId, operationId: operation.operationId,
       reply: Buffer.from(reply), pending: challenge.pending, at: this.now(),
     };
     try {
@@ -1012,6 +1035,63 @@ class ConsoleService {
     };
   }
 
+  // ---------- 手机确认端 ----------
+  getPhoneState() {
+    const nowSec = this._nowSec();
+    const pending = [...this.challenges.values()].find((c) => c.state === 'pending') || null;
+    return {
+      device: { id: this.deviceId, label: this.deviceLabel, protocol: 'SFC1' },
+      now: nowSec,
+      pending: pending ? {
+        challengeId: pending.challengeId,
+        frame: pending.frame.toString('base64'),
+        summary: pending.summary,
+        action: pending.action,
+        actionLabel: PROTOCOL_ACTIONS[pending.action] || '未知',
+        issuedAt: pending.issuedAt,
+        expiresAt: pending.expiresAt,
+        remainingSec: Math.max(0, pending.expiresAt - nowSec),
+      } : null,
+      lastResult: this.lastPhoneResult,
+    };
+  }
+
+  async submitPhoneDecision(challengeId, frameBase64) {
+    if (typeof challengeId !== 'string' || !challengeId) {
+      throw new ConsoleError('BAD_REQUEST', '缺少 challengeId');
+    }
+    if (typeof frameBase64 !== 'string' || !frameBase64) {
+      throw new ConsoleError('BAD_REQUEST', '缺少 frame');
+    }
+    const challenge = this.challenges.get(challengeId);
+    if (!challenge) throw new ConsoleError('NOT_FOUND', `挑战不存在：${challengeId}`, 404);
+    if (challenge.state !== 'pending') {
+      return {
+        ok: false, outcome: 'stale', code: 'STATE',
+        message: `挑战已结束（${challenge.state}），拒绝重复提交`,
+      };
+    }
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(frameBase64)) {
+      throw new ConsoleError('BAD_REQUEST', 'frame 不是合法 base64');
+    }
+    const frame = Buffer.from(frameBase64, 'base64');
+    if (frame.length < 42 || frame.length > 1024) {
+      throw new ConsoleError('BAD_REQUEST', 'frame 长度非法');
+    }
+    if (frame.subarray(0, 4).toString('latin1') !== 'SFC1') {
+      throw new ConsoleError('BAD_REQUEST', '不是 SFC1 帧');
+    }
+    const result = await this._completeChallenge(challenge, frame);
+    this.lastPhoneResult = {
+      challengeId,
+      at: this._iso(),
+      outcome: result.outcome,
+      code: result.code || null,
+      message: result.message || null,
+    };
+    return result;
+  }
+
   getDevice() {
     const pending = [...this.challenges.values()]
       .filter((c) => c.state === 'pending')
@@ -1019,8 +1099,10 @@ class ConsoleService {
     return {
       device: {
         id: this.deviceId, label: this.deviceLabel, online: true,
-        transport: 'virtual-loopback', protocol: 'SFC1', note: '虚拟设备（非硬件）',
+        transport: this.pairingCode ? 'phone-lan' : 'virtual-loopback', protocol: 'SFC1',
+        note: this.pairingCode ? '手机确认端（局域网，非硬件）' : '虚拟设备（非硬件）',
       },
+      pairing: this.pairingCode ? { code: this.pairingCode, note: '确认端配对码（局域网内可见）' } : null,
       pending,
       history: this.challengeHistory.slice(0, 12),
       lastDecision: this.lastDecision ? {

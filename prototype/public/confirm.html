@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<title>白鹭哨兵 · 确认端</title>
+<link rel="stylesheet" href="/confirm.css">
+</head>
+<body>
+<main id="app">
+  <header class="brand">
+    <div class="logo">白鹭哨兵</div>
+    <div class="sub">现场确认端 · SFC1</div>
+  </header>
+
+  <section id="pairing" class="panel" hidden>
+    <h2>配对</h2>
+    <p class="hint">输入控制台上显示的配对码。密钥在两端各自派生，不走网络。</p>
+    <input id="pairing-input" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="AB12-CD34" maxlength="16">
+    <button id="pairing-submit" class="primary">配对</button>
+    <p id="pairing-error" class="error" hidden></p>
+  </section>
+
+  <section id="idle" class="panel" hidden>
+    <div class="idle-ring"><span></span></div>
+    <h2>待命中</h2>
+    <p class="hint">机器人有需要确认的动作时，这里会亮起。</p>
+    <p class="meta">设备 <span id="device-id">—</span> · 密钥在端上</p>
+    <button id="re-pair" class="ghost small">重新配对</button>
+  </section>
+
+  <section id="challenge" class="panel challenge" hidden>
+    <div class="tag">待确认</div>
+    <p id="summary" class="summary">—</p>
+    <dl class="facts">
+      <div><dt>动作</dt><dd id="action">—</dd></div>
+      <div><dt>剩余</dt><dd id="countdown">—</dd></div>
+    </dl>
+    <button id="approve" class="primary big">确认执行</button>
+    <button id="cancel" class="ghost">按住 0.6 秒取消</button>
+    <div class="progress"><span id="cancel-fill"></span></div>
+    <p id="frame-state" class="meta"></p>
+  </section>
+
+  <section id="result" class="panel" hidden>
+    <div id="result-mark" class="result-mark">✓</div>
+    <h2 id="result-title">—</h2>
+    <p id="result-detail" class="hint"></p>
+    <button id="result-close" class="ghost">返回待命</button>
+  </section>
+
+  <p id="error" class="error" hidden></p>
+
+  <footer class="foot">
+    <span id="crypto-mode">—</span>
+    <button id="forget" class="link">解除配对</button>
+  </footer>
+</main>
+<script src="/sfc1-browser.js"></script>
+<script src="/confirm.js"></script>
+</body>
+</html>
