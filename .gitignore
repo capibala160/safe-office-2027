@@ -9,3 +9,6 @@ ws63/test_protocol
 ws63/test_protocol.exe
 ws63/*.o
 ws63/build/
+
+# 黑客松材料（WaytoAGI / 锦创杯 方案与 workbench）留在本地，不进产品仓
+hackathon/
