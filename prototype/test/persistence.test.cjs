@@ -179,4 +179,12 @@ test('模型选择：没配端点密钥退回 MockLLM，配了就走 HttpLLM', (
   assert.ok(online instanceof HttpLLM);
   assert.equal(online.deployment, 'cloud');
   assert.equal(online.model, 'test-model');
+  assert.equal(online.timeoutMs, 60000, '带推理的模型默认给 60s');
+
+  const timed = createLlmFromEnv({
+    SAFE_OFFICE_LLM_ENDPOINT: 'https://llm.example.com/v1',
+    SAFE_OFFICE_LLM_KEY: 'test-key',
+    SAFE_OFFICE_LLM_TIMEOUT_MS: '9000',
+  });
+  assert.equal(timed.timeoutMs, 9000, '超时可用环境变量覆盖');
 });
