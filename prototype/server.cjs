@@ -13,6 +13,7 @@ const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
 const { BlobStore } = require('./src/blob-store.cjs');
+const { loadConfigFile } = require('./src/load-config.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
 
@@ -426,6 +427,8 @@ async function startServer({
 }
 
 if (require.main === module) {
+  // 先读 config.env（KEY=VALUE）；命令行/系统环境变量优先，配置文件不覆盖
+  const configInfo = loadConfigFile(path.join(__dirname, 'config.env'));
   const argv = process.argv.slice(2);
   const lan = argv.includes('--lan');
   const codeArg = argv.find((arg) => arg.startsWith('--code='));
@@ -462,6 +465,8 @@ if (require.main === module) {
     console.log(`  ${url}`);
     const model = service.getState().model;
     console.log(`  模型：${model.mode}${model.model ? ` / ${model.model}` : ''}`);
+    if (configInfo.loaded > 0) console.log(`  配置：config.env（${configInfo.loaded} 项）`);
+    else if (!model.model) console.log('  提示：没有 config.env；想用真实模型，复制 config.env.example 再填');
     if (service.storeFile !== ':memory:') {
       console.log(`  持久化：操作 → ${service.storeFile}`);
       console.log(`          审计 → ${service.auditFile || '(未开启)'}`);
