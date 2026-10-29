@@ -86,6 +86,16 @@ class OperationStore {
         created_at TEXT NOT NULL,
         PRIMARY KEY (operation_id, revision)
       );
+      CREATE TABLE IF NOT EXISTS operation_meta (
+        operation_id TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS console_state (
+        key TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         operation_id TEXT,
@@ -257,6 +267,33 @@ class OperationStore {
         note: row.note || '',
         createdAt: row.created_at,
       }));
+  }
+
+  // ---------- 控制台元数据（重启恢复用） ----------
+  saveOperationMeta(operationId, data) {
+    this.db.prepare(`
+      INSERT INTO operation_meta (operation_id, data, updated_at) VALUES (?,?,?)
+      ON CONFLICT(operation_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+    `).run(operationId, JSON.stringify(data || {}), this.now());
+  }
+
+  listOperationMeta() {
+    return this.db.prepare('SELECT * FROM operation_meta').all().map((row) => ({
+      operationId: row.operation_id,
+      data: parseJson(row.data, {}),
+    }));
+  }
+
+  saveState(key, value) {
+    this.db.prepare(`
+      INSERT INTO console_state (key, data, updated_at) VALUES (?,?,?)
+      ON CONFLICT(key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+    `).run(String(key), JSON.stringify(value === undefined ? null : value), this.now());
+  }
+
+  loadState(key) {
+    const row = this.db.prepare('SELECT data FROM console_state WHERE key = ?').get(String(key));
+    return row ? parseJson(row.data, null) : null;
   }
 
   // ---------- outbox ----------

@@ -36,7 +36,16 @@
     <dl class="facts">
       <div><dt>动作</dt><dd id="action">—</dd></div>
       <div><dt>剩余</dt><dd id="countdown">—</dd></div>
+      <div><dt>收件人/目标</dt><dd id="recipient">—</dd></div>
+      <div><dt>密级</dt><dd id="level">—</dd></div>
     </dl>
+    <div id="details" class="details" hidden>
+      <div class="details-head">正文预览 <span id="body-len" class="meta"></span></div>
+      <pre id="body-preview" class="body-preview"></pre>
+      <div id="attachments" class="attachments" hidden></div>
+      <p class="meta" id="details-note"></p>
+    </div>
+    <p id="consistency" class="meta"></p>
     <button id="approve" class="primary big">确认执行</button>
     <button id="cancel" class="ghost">按住 0.6 秒取消</button>
     <div class="progress"><span id="cancel-fill"></span></div>

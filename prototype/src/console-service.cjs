@@ -213,6 +213,70 @@ class ConsoleService {
     };
     this.autoMode = 'manual';
     this.closed = false;
+    this._restoreConsoleState();
+  }
+
+  // 重启恢复：操作来源（runId/文档/参数）、运行历史、风险计量、业务状态（删除/打印/设备/日历）
+  // 边界：行为因子的滑动窗口（_obs）不恢复——它只影响"高频/越权"这类增量判断，重启后重新累积
+  _restoreConsoleState() {
+    if (this.storeFile === ':memory:') return;
+    try {
+      this.operationMeta = new Map(this.store.listOperationMeta().map((row) => [row.operationId, row.data]));
+      const saved = this.store.loadState('console');
+      if (saved) {
+        if (saved.risk) {
+          const r = saved.risk;
+          this.risk.score = Number(r.score) || 0;
+          this.risk.events = Array.isArray(r.events) ? r.events : [];
+          this.risk.frozen = !!r.frozen;
+          this.risk.freezeCount = Number(r.freezeCount) || 0;
+          this.risk.reviews = Array.isArray(r.reviews) ? r.reviews : [];
+        }
+        if (saved.business) {
+          this.business.deletedDocIds = new Set(saved.business.deletedDocIds || []);
+          this.business.printJobs = saved.business.printJobs || [];
+          this.business.deviceCommands = saved.business.deviceCommands || [];
+          this.business.deviceStates = saved.business.deviceStates || {};
+          if (Array.isArray(saved.business.calendarSeed)) this.business.calendarSeed = saved.business.calendarSeed;
+        }
+        if (Array.isArray(saved.runs)) this.runs = saved.runs.slice(0, 50);
+        if (saved.autoMode) this.autoMode = saved.autoMode;
+      }
+      this.recoveryInfo = {
+        operationMeta: this.operationMeta.size,
+        runs: this.runs.length,
+        operations: this.store.listOperations().length,
+        risk: { score: this.risk.score, frozen: this.risk.frozen },
+        note: '重启恢复：操作来源 / 运行历史 / 风险计量 / 业务状态',
+      };
+    } catch (err) {
+      // 恢复失败不改写审计链（审计只记动作）；错误单独暴露
+      this.recoveryInfo = { error: err && err.message ? err.message : String(err) };
+    }
+  }
+
+  // 落盘：风险计量 + 业务状态 + 运行历史（操作元数据单独按条写）
+  _persistConsoleState() {
+    try {
+      this.store.saveState('console', {
+        risk: {
+          score: this.risk.score,
+          events: this.risk.events.slice(-50),
+          frozen: this.risk.frozen,
+          freezeCount: this.risk.freezeCount,
+          reviews: this.risk.reviews.slice(-20),
+        },
+        business: {
+          deletedDocIds: [...this.business.deletedDocIds],
+          calendarSeed: this.business.calendarSeed,
+          printJobs: this.business.printJobs.slice(-50),
+          deviceCommands: this.business.deviceCommands.slice(-50),
+          deviceStates: this.business.deviceStates,
+        },
+        runs: this.runs.slice(0, 50),
+        autoMode: this.autoMode,
+      });
+    } catch { /* 落盘失败不能影响主流程 */ }
   }
 
   // ---------- 审计落盘 ----------
@@ -275,6 +339,7 @@ class ConsoleService {
     }
     this.autoMode = mode;
     this.audit.append('自动模式', { mode, by: '控制台' });
+    this._persistConsoleState();
     return { ok: true, autoMode: mode, autoSafe: this._autoSafeStats() };
   }
 
@@ -329,6 +394,7 @@ class ConsoleService {
       },
       device: this.getDevice(),
       model: this._modelInfo(),
+      recovery: this.recoveryInfo || null,
       autoMode: this.autoMode,
       autoSafe: this._autoSafeStats(),
       boundary: this.storeFile === ':memory:' ? BOUNDARY : BOUNDARY.map((line) => (
@@ -803,8 +869,11 @@ class ConsoleService {
     }
 
     const auditEnd = this.audit.entries.length;
-    for (const meta of this.operationMeta.values()) {
-      if (meta.runId === runId && meta.auditTo === null) meta.auditTo = auditEnd;
+    for (const [operationId, meta] of this.operationMeta.entries()) {
+      if (meta.runId === runId && meta.auditTo === null) {
+        meta.auditTo = auditEnd;
+        this.store.saveOperationMeta(operationId, meta);
+      }
     }
     const run = {
       runId,
@@ -824,6 +893,7 @@ class ConsoleService {
     };
     this.runs.unshift(run);
     if (this.runs.length > 50) this.runs.pop();
+    this._persistConsoleState();
     return { ok: true, ...run };
   }
 
@@ -865,7 +935,7 @@ class ConsoleService {
       modelId: this._modelInfo().model || this._modelInfo().name,
       planHash: sha256Hex(`${runId}|${d.stepNumber}|${action}`),
     });
-    this.operationMeta.set(operation.operationId, {
+    const meta = {
       runId,
       stepNumber: d.stepNumber,
       command: d.command,
@@ -875,7 +945,9 @@ class ConsoleService {
       requiresNearfield: action !== 'sendInternalEmail',
       auditFrom: auditStart,
       auditTo: null,
-    });
+    };
+    this.operationMeta.set(operation.operationId, meta);
+    this.store.saveOperationMeta(operation.operationId, meta);
     return operation;
   }
 
@@ -1200,6 +1272,25 @@ class ConsoleService {
     return this._challengeView(challenge, operation);
   }
 
+  // 确认端展示详情（收件人/正文预览/附件名与大小）
+  _operationDetails(id) {
+    const op = this.store.getOperation(id);
+    if (!op) return null;
+    return {
+      operationId: op.operationId,
+      recipient: op.recipient,
+      subject: op.subject,
+      level: op.level,
+      actionLabel: PROTOCOL_ACTIONS[op.protocolAction] || op.action,
+      bodyPreview: String(op.body || '').slice(0, 600),
+      bodyLength: String(op.body || '').length,
+      attachments: (op.attachments || []).map((a) => ({ name: a.name, size: a.size })),
+      targetHash: op.operationHash,
+      bodyHash: op.bodyHash,
+      verify: verifyOperation(op),
+    };
+  }
+
   _challengeView(challenge, operation = null) {
     const op = operation || this.store.getOperation(challenge.operationId);
     return {
@@ -1443,6 +1534,9 @@ class ConsoleService {
         issuedAt: pending.issuedAt,
         expiresAt: pending.expiresAt,
         remainingSec: Math.max(0, pending.expiresAt - nowSec),
+        // 展示用详情：端上只能校验它与挑战 target_hash 是否同一操作；
+        // 字段内容仍由控制台提供（见 confirm.js 的标注），不冒充端上验证
+        details: this._operationDetails(pending.operationId),
       } : null,
       lastResult: this.lastPhoneResult,
     };
@@ -1577,6 +1671,7 @@ class ConsoleService {
       throw new ConsoleError('BAD_REQUEST', "outcome 必须是 'clear' 或 'escalate'");
     }
     const review = this.risk.review({ by, outcome, note });
+    this._persistConsoleState();
     return {
       ok: true,
       review,

@@ -102,6 +102,10 @@
     $('action').textContent = '—';
     $('countdown').textContent = '—';
     $('frame-state').textContent = '';
+    $('recipient').textContent = '—';
+    $('level').textContent = '—';
+    $('consistency').textContent = '';
+    $('details').hidden = true;
     setButtons(false);
 
     let parsed;
@@ -118,9 +122,48 @@
     state.pending = { challengeId: pending.challengeId, parsed, bad: false, reason: '' };
     $('summary').textContent = parsed.summary;
     $('action').textContent = ACTION_LABELS[parsed.action] || `未知(${parsed.action})`;
-    $('frame-state').textContent = `已验签 · 任务 ${SFC1.bytesToHex(parsed.taskId).slice(0, 8)}…`;
+
+    // 展示详情：先核对"控制台给的详情"与"挑战里的目标哈希"是不是同一个操作
+    const details = pending.details || null;
+    const frameHash = SFC1.bytesToHex(parsed.operationHash);
+    if (details && details.targetHash && details.targetHash.toLowerCase() !== frameHash) {
+      return rejectFrame('展示信息与挑战目标哈希不一致，拒绝确认');
+    }
+    renderDetails(details, frameHash);
+    $('frame-state').textContent = `已验签 · 任务 ${SFC1.bytesToHex(parsed.taskId).slice(0, 8)}… · 目标 ${frameHash.slice(0, 12)}…`;
     setButtons(true);
     startTick();
+  }
+
+  // 详情来自控制台；端上只校验"它指向的就是挑战里的那条操作"
+  function renderDetails(details, frameHash) {
+    const box = $('details');
+    if (!details) {
+      box.hidden = true;
+      $('recipient').textContent = '—';
+      $('level').textContent = '—';
+      $('consistency').textContent = '控制台未提供操作详情';
+      return;
+    }
+    box.hidden = false;
+    $('recipient').textContent = details.recipient || '—';
+    $('level').textContent = details.level || '—';
+    $('body-len').textContent = details.bodyLength ? `共 ${details.bodyLength} 字` : '';
+    $('body-preview').textContent = details.bodyPreview || '（空）';
+    const files = details.attachments || [];
+    const att = $('attachments');
+    if (files.length) {
+      att.hidden = false;
+      att.textContent = '附件：' + files.map((f) => `${f.name}（${(f.size / 1024).toFixed(1)} KB）`).join('、');
+    } else {
+      att.hidden = true;
+      att.textContent = '';
+    }
+    const same = details.targetHash && details.targetHash.toLowerCase() === frameHash;
+    $('consistency').textContent = same
+      ? `展示内容与挑战目标哈希一致（${frameHash.slice(0, 12)}…）· 正文内容由控制台提供，端上校验的是目标哈希`
+      : '无法核对目标哈希';
+    $('details-note').textContent = '正文与附件信息由控制台展示，端上只校验目标哈希；请对照你期望的内容再确认。';
   }
 
   function rejectFrame(reason) {
@@ -129,6 +172,8 @@
     $('action').textContent = '—';
     $('countdown').textContent = '—';
     $('frame-state').textContent = reason;
+    $('details').hidden = true;
+    $('consistency').textContent = '';
     setButtons(false);
   }
 

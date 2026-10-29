@@ -462,3 +462,50 @@ test('取消：任务结束后再取消 → 409', async (t) => {
   await service.liveRuns.get(started.runId).done;
   assert.throws(() => service.cancelRun(started.runId), /已结束/);
 });
+
+test('重启恢复：操作来源、运行历史、风险计量、业务状态跨进程恢复', async (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-restore-'));
+  const storeFile = path.join(dir, 'ops.db');
+  const auditFile = path.join(dir, 'audit.json');
+
+  const a = setup({ service: { storeFile, auditFile } }).service;
+  const run = await a.runCommand({
+    command: '把周例会纪要发给外部参会方 partner@partner-example.com',
+    role: '员工', tools: ['readDoc', 'sendExternalEmail'], documentIds: ['M2'],
+    domains: ['partner-example.com'], nearfieldOnline: true,
+  });
+  const opId = run.operations[0].operationId;
+  a.risk.add(70, '测试用风险累积');
+  a._persistConsoleState();
+  a.close();
+
+  const b = setup({ service: { storeFile, auditFile } }).service;
+  t.after(() => { b.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const detail = b.getOperation(opId);
+  assert.equal(detail.meta.runId, run.runId, '操作来源（runId）要能恢复');
+  assert.equal(detail.meta.docTitle, run.operations[0].docTitle);
+  assert.ok(b.runs.some((r) => r.runId === run.runId), '运行历史要能恢复');
+  assert.equal(b.risk.frozen, true, '风险冻结状态要能恢复');
+  assert.ok(b.getState().counts.operations >= 1);
+  assert.equal(b.getOperation(opId).operation.state, 'frozen');
+});
+
+test('手机确认端：详情带收件人/正文预览/附件，目标哈希与操作一致', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations[0];
+  service.beginChallenge(op.operationId);
+  const state = service.getPhoneState();
+  const details = state.pending.details;
+  assert.ok(details, '待确认时必须带展示详情');
+  assert.equal(details.targetHash, op.operationHash, '端上据此与挑战目标哈希比对');
+  assert.equal(details.recipient, op.recipient);
+  assert.equal(details.level, op.level);
+  assert.ok(details.bodyPreview.length > 0, '应有正文预览');
+  assert.ok(Array.isArray(details.attachments));
+  assert.equal(details.verify.ok, true);
+});
