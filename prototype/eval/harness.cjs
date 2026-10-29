@@ -98,59 +98,75 @@ function scoreCase(def, effects, { blocks = [] } = {}) {
   };
 }
 
+// 审计日志 → 计分口径（正常结束与中途异常走同一把尺子，避免两条路径分叉）
+function summarizeAudit(audit, perf) {
+  const blocks = [];
+  let detections = 0;
+  const confirmations = { requested: 0, approved: 0, rejected: 0 };
+  let modelFault = null;
+  for (const e of audit.entries) {
+    const layer = BLOCK_LAYERS[e.kind];
+    if (layer) blocks.push({ layer, kind: e.kind, reason: detailReason(e.detail) });
+    if (e.kind === '闸1触发') detections += 1;
+    if (e.kind === '闸4确认') confirmations.approved += 1;
+    if (e.kind === '闸4拒绝') confirmations.rejected += 1;
+    if ((e.kind === '规划失败' || e.kind === '任务中止') && !modelFault) {
+      modelFault = (e.detail && e.detail.class) || '未知故障';
+    }
+  }
+  confirmations.requested = confirmations.approved + confirmations.rejected;
+  const span = perf ? perf.report().find((s) => s.label === '闸4 高危确认') : null;
+  return { effects: effectsFromAudit(audit), blocks, detections, confirmations, modelFault, confirmMs: span ? span.totalMs : 0 };
+}
+
 async function runCase(def, tier, llm) {
   const acc = { modelMs: 0 };
   const wrapped = wrapLLM(llm, acc);
   const t0 = performance.now();
 
-  let effects = [];
-  let blocks = [];
-  let detections = 0;
-  let confirmations = { requested: 0, approved: 0, rejected: 0 };
-  let modelFault = null;
-  let confirmMs = 0;
+  let audit = null;
+  let perf = null;
+  let harnessError = null;
+  let summary = {
+    effects: [], blocks: [], detections: 0,
+    confirmations: { requested: 0, approved: 0, rejected: 0 }, modelFault: null, confirmMs: 0,
+  };
 
-  if (tier === 'full') {
-    const audit = new AuditLog();
-    const risk = new RiskMeter(60, { onEvent: (kind, detail) => audit.append(kind, detail) });
-    const policy = new PolicyEngine();
-    const perf = new PerfMeter();
-    const planner = new GuardedPlanner({ llm: wrapped, audit, risk });
-    const rt = new AgentRuntime({ policy, audit, risk, planner, perf });
-    const token = new CapabilityToken({
-      tools: def.token.tools,
-      documentIds: ALL_DOC_IDS,
-      allowedExternalDomains: def.token.domains || [],
-      maxCalls: def.token.maxCalls === undefined ? Infinity : def.token.maxCalls,
-      issuedFor: def.command,
-    });
+  try {
+    if (tier === 'full') {
+      audit = new AuditLog();
+      const risk = new RiskMeter(60, { onEvent: (kind, detail) => audit.append(kind, detail) });
+      const policy = new PolicyEngine();
+      perf = new PerfMeter();
+      const planner = new GuardedPlanner({ llm: wrapped, audit, risk });
+      const rt = new AgentRuntime({ policy, audit, risk, planner, perf });
+      const token = new CapabilityToken({
+        tools: def.token.tools,
+        documentIds: ALL_DOC_IDS,
+        allowedExternalDomains: def.token.domains || [],
+        maxCalls: def.token.maxCalls === undefined ? Infinity : def.token.maxCalls,
+        issuedFor: def.command,
+      });
 
-    await rt.runCommand(def.command, {
-      role: '员工', token, nearfieldOnline: !!def.nearfieldOnline, scene: def.id,
-    });
-
-    effects = effectsFromAudit(audit);
-    for (const e of audit.entries) {
-      const layer = BLOCK_LAYERS[e.kind];
-      if (layer) blocks.push({ layer, kind: e.kind, reason: detailReason(e.detail) });
-      if (e.kind === '闸1触发') detections += 1;
-      if (e.kind === '闸4确认') confirmations.approved += 1;
-      if (e.kind === '闸4拒绝') confirmations.rejected += 1;
-      if ((e.kind === '规划失败' || e.kind === '任务中止') && !modelFault) {
-        modelFault = (e.detail && e.detail.class) || '未知故障';
-      }
+      await rt.runCommand(def.command, {
+        role: '员工', token, nearfieldOnline: !!def.nearfieldOnline, scene: def.id,
+      });
+      summary = summarizeAudit(audit, perf);
+    } else {
+      const base = await runUnprotected({ llm: wrapped, command: def.command });
+      summary.effects = base.effects;
+      if (base.error) summary.modelFault = classifyModelFault(base.error).class;
     }
-    confirmations.requested = confirmations.approved + confirmations.rejected;
-    const span = perf.report().find((s) => s.label === '闸4 高危确认');
-    confirmMs = span ? span.totalMs : 0;
-  } else {
-    const base = await runUnprotected({ llm: wrapped, command: def.command });
-    effects = base.effects;
-    if (base.error) modelFault = classifyModelFault(base.error).class;
+  } catch (err) {
+    // 执行中途异常：**保留故障前已经发生的副作用**。
+    // 若在此清空 effects，"先导出通讯录、后生成超时"就会被记成攻击未成功——往对自己有利的方向失真。
+    harnessError = String((err && err.message) || err);
+    if (audit) summary = summarizeAudit(audit, perf);
+    summary.modelFault = summary.modelFault || classifyModelFault(err).class;
   }
 
   const totalMs = performance.now() - t0;
-  const score = scoreCase(def, effects, { blocks });
+  const score = scoreCase(def, summary.effects, { blocks: summary.blocks });
 
   return {
     caseId: def.id,
@@ -160,15 +176,16 @@ async function runCase(def, tier, llm) {
     command: def.command,
     tier,
     expectCore: def.expectCore || null,
-    effects,
-    blocks,
-    detections,
-    confirmations,
-    modelFault,
+    effects: summary.effects,
+    blocks: summary.blocks,
+    detections: summary.detections,
+    confirmations: summary.confirmations,
+    modelFault: summary.modelFault,
     modelMs: acc.modelMs,
     securityMs: Math.max(0, totalMs - acc.modelMs),
-    confirmMs,
+    confirmMs: summary.confirmMs,
     totalMs,
+    ...(harnessError ? { harnessError } : {}),
     ...score,
   };
 }
@@ -179,11 +196,42 @@ async function runAll({ llmForTier, cases = CASES, tiers = TIERS, repeats = 1 })
   for (const tier of tiers) {
     for (const def of cases) {
       for (let i = 0; i < repeats; i++) {
-        runs.push(await runCase(def, tier, llmForTier(tier)));
+        runs.push(await runCaseSafe(def, tier, llmForTier(tier)));
       }
     }
   }
   return runs;
+}
+
+// 最后一道网：只兜 harness 自身缺陷（runCase 内部已处理模型/执行异常，含保留故障前副作用）。
+// 走到这里说明计分代码本身抛错——记零效应样本 + 故障归类，不伪造拦截。
+async function runCaseSafe(def, tier, llm) {
+  try {
+    return await runCase(def, tier, llm);
+  } catch (err) {
+    const effects = [];
+    const score = scoreCase(def, effects, { blocks: [] });
+    return {
+      caseId: def.id,
+      split: def.split,
+      kind: def.kind,
+      desc: def.desc,
+      command: def.command,
+      tier,
+      expectCore: def.expectCore || null,
+      effects,
+      blocks: [],
+      detections: 0,
+      confirmations: { requested: 0, approved: 0, rejected: 0 },
+      modelFault: classifyModelFault(err).class,
+      modelMs: 0,
+      securityMs: 0,
+      confirmMs: 0,
+      totalMs: 0,
+      harnessError: String((err && err.message) || err),
+      ...score,
+    };
+  }
 }
 
 function summarizeRuns(runs) {

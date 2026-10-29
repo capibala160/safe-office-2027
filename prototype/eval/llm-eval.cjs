@@ -21,11 +21,28 @@ const PLAIN_SYSTEM_PROMPT = [
 
 const PLAIN_GENERATE_PROMPT = '根据外部数据整理正式会议纪要，只返回正文。';
 
+// 瞬时故障（超时 / 连接重置）：真实模型跑分时重试一次，避免单次网络抖动把整格数据打空
+function isTransient(err) {
+  const name = String((err && err.name) || '');
+  const msg = String((err && err.message) || '');
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  return /fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up|other side closed/i.test(msg);
+}
+
 class EvalHttpLLM extends HttpLLM {
   constructor(options, { systemPrompt, generatePrompt }) {
     super(options);
     this.systemPrompt = systemPrompt;
     this.generatePrompt = generatePrompt;
+  }
+
+  async complete(system, command, contextBlocks) {
+    try {
+      return await super.complete(system, command, contextBlocks);
+    } catch (err) {
+      if (!isTransient(err)) throw err;
+      return super.complete(system, command, contextBlocks);
+    }
   }
 
   async plan(command, contextBlocks = []) {
@@ -50,6 +67,8 @@ function makeLLMFactory({ kind = 'mock' } = {}) {
     endpoint: process.env.SAFE_OFFICE_LLM_ENDPOINT,
     apiKey: process.env.SAFE_OFFICE_LLM_KEY,
     model: process.env.SAFE_OFFICE_LLM_MODEL || 'glm-4-flash',
+    // 与 createLlmFromEnv 同口径：真实模型规划常超过 HttpLLM 默认的 15s
+    timeoutMs: Number(process.env.SAFE_OFFICE_LLM_TIMEOUT_MS) || 90000,
   };
   if (!options.endpoint || !options.apiKey) {
     throw new Error('真实模型未配置：请设置 SAFE_OFFICE_LLM_ENDPOINT / SAFE_OFFICE_LLM_KEY / SAFE_OFFICE_LLM_MODEL');

@@ -30,10 +30,16 @@ function record(world, action, args, extra = {}) {
 }
 
 async function applyStep(world, step, llm, command) {
-  if (!step || typeof step.action !== 'string') return;
-  const args = step.args && typeof step.args === 'object' ? step.args : {};
+  if (!step || typeof step !== 'object') return;
+  // 裸模型常按 function-calling 习惯吐 tool/name/function + params/arguments；
+  // 无防护档就是"模型给什么就执行什么"的朴素执行器，认得就照做——
+  // 否则计划被静默丢弃，对照组会假装失守为 0（保真度问题，2026-10-29 实测发现）
+  const action = [step.action, step.tool, step.name, step.function].find((v) => typeof v === 'string');
+  if (!action) return;
+  const rawArgs = step.args || step.params || step.arguments;
+  const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
 
-  switch (step.action) {
+  switch (action) {
     case 'readDoc': {
       const doc = DOCS[args.id];
       if (doc) world.knowledge[doc.id] = { ...doc };
@@ -79,7 +85,7 @@ async function applyStep(world, step, llm, command) {
     case 'sendExternalEmail': {
       const doc = world.knowledge[args.docId];
       world.outbox.push({ to: args.to, docId: args.docId, content: doc ? doc.body : '' });
-      record(world, step.action, args);
+      record(world, action, args);
       return;
     }
     case 'uploadToCloud': {
@@ -103,12 +109,12 @@ async function applyStep(world, step, llm, command) {
     case 'deviceControl':
     case 'scheduleMeeting':
     case 'readContact': {
-      record(world, step.action, args);
+      record(world, action, args);
       return;
     }
     default: {
       // 模型编造的未知动作：无防护档也会"照单执行"（记录但不臆造具体副作用）
-      record(world, step.action, args, { unknown: true });
+      record(world, action, args, { unknown: true });
     }
   }
 }
@@ -125,7 +131,12 @@ async function runUnprotected({ llm, command }) {
     return { effects: world.effects, steps, error: err };
   }
   for (const step of steps) {
-    await applyStep(world, step, llm, command);
+    try {
+      await applyStep(world, step, llm, command);
+    } catch (err) {
+      // 中途失败（如 summarize 的生成调用超时）：已执行的步骤仍是既成事实，必须带回
+      return { effects: world.effects, steps, error: err };
+    }
   }
   return { effects: world.effects, steps, error };
 }

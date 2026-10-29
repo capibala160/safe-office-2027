@@ -1,8 +1,8 @@
-# 核心机制原型（v0.13 · 平台无关 + 办公套件控制台 + 工具注册表）
+# 核心机制原型（v0.16 · 平台无关 + 控制台 + 工具注册表 + 真实资料接入）
 
 > **接入变化**：`CapabilityToken.documentIds` 默认空，必须显式授权资源；邮件和上传指令须包含精确地址。模型适配器声明 deployment，未知位置按 cloud 处理；`commandLevel` 应由可信应用提供，机密/未知指令不送云。规划和 generate 共用模型出口检查。正式稿保存为 `draft_源ID`，继承密级及 sourceIds；回滚保留已发送和已上传记录。
 >
-> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。**v0.11 新增 WS63 确认适配器**（`nearfield-confirm.cjs`）：SFC1 二进制帧 + 虚拟设备接入冻结操作闭环；串口/SLE 与运行时闸4 仍未接。**v0.12 新增演示级办公套件控制台**（`server.cjs` + `src/console-service.cjs` + `public/`）：10 个页面、转交确认缝、策略自动确认/WS63 确认；业务动作仍为模拟。**v0.13 新增工具注册表 + MCP 骨架**（`tool-registry.cjs` / `mcp-adapter.cjs`）：内置静态表不变，自定义/MCP 工具默认拒绝，必须显式声明沙箱/风险/角色策略。审计支持持久化及独立检查点恢复，HUKS 尚未接入；真实模型和真实工具未联网验收。最新能力以 [优化记录与落地验收](../docs/03-优化记录与落地验收.md)、[v0.11 适配器文档](../docs/11-WS63确认适配器.md) 与 [v0.12 控制台文档](../docs/12-办公套件控制台.md) 为准，测试数量以 `node --test` 为准。
+> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。**v0.11 新增 WS63 确认适配器**（`nearfield-confirm.cjs`）：SFC1 二进制帧 + 虚拟设备接入冻结操作闭环；串口/SLE 与运行时闸4 仍未接。**v0.12 新增演示级办公套件控制台**（`server.cjs` + `src/console-service.cjs` + `public/`）：10 个页面、转交确认缝、策略自动确认/WS63 确认；业务动作仍为模拟。**v0.13 新增工具注册表 + MCP 骨架**（`tool-registry.cjs` / `mcp-adapter.cjs`）：内置静态表不变，自定义/MCP 工具默认拒绝，必须显式声明沙箱/风险/角色策略。**v0.14 手机确认端**（`docs/14`）、**v0.15 持久化与模型注入**（`docs/15`）、**v0.16 真实资料接入**（导入/上传/附件/导出已批准正文，`docs/16`）依次落地。审计支持持久化及独立检查点恢复，HUKS 尚未接入。最新能力以 [优化记录与落地验收](../docs/03-优化记录与落地验收.md)、[v0.11 适配器文档](../docs/11-WS63确认适配器.md)、[v0.12 控制台文档](../docs/12-办公套件控制台.md) 与 [v0.16 真实资料接入](../docs/16-真实资料接入.md) 为准，测试数量以 `node --test` 为准。
 
 > 「Agent 安全运行机制」的可运行原型——**零依赖、纯 Node**，上板前即可跑通全部机制逻辑。
 > 上板路径：本目录逻辑**平移 ArkTS**（行为不变）→ 闸4 的 `nearfieldOnline` 换成 WS63 真实 SLE 握手 → 规划器换成真实 LLM（模型边界已就绪）→ 沙箱对应 OH 应用沙箱/权限模型。
@@ -13,7 +13,7 @@
 npm start            # 办公套件控制台 → http://127.0.0.1:7812（v0.12）
 node demo.cjs        # 攻防演示（答辩预演脚本：正常流 / 能力分级 / 沙箱双锁 / 图片通道 / 注入 / 端云边界 / 越权 / 冻结闭环 / 近场 / 回滚 / 回溯 / 风险行为因子 / 点名 5+1 类攻击速览 / Agent 角色分级 / 委托令牌 / 时延开销）
 npm run demo:nearfield  # WS63 确认适配器演示（6 幕：正常/取消/超时/重放/篡改/错设备，无硬件）
-npm test             # 自动化测试（173 项，全绿）
+npm test             # 自动化测试（235 项，全绿）
 npm run eval         # 三档评测（无防护 / 仅提示词 / 完整网关，Mock 离线）
 # demo 末尾自动生成治理报告（可视化交付物雏形）：out/governance-report.html
 # eval 生成评测报告：out/eval/eval-report.html + eval-results.json
@@ -68,7 +68,7 @@ prototype/
     ├── console-service.test.cjs 控制台服务：命令/转交/冻结/挑战/治理/报告/重置（17 项）
     ├── server.test.cjs        HTTP：健康/静态/路径穿越/命令/闭环/异常/重置（14 项）
     ├── tool-registry.test.cjs 注册表/MCP：种子/策略/planner/运行时/Agent/MCP 骨架（16 项）
-    └── eval-harness.test.cjs 评测自身回归：语料结构 / 三档对照 / 指标边界（6 项）
+    └── eval-harness.test.cjs 评测自身回归：语料结构 / 三档对照 / 指标边界 / 字段别名 / 异常路径保留副作用（9 项）
 ```
 
 ## Agent 权限分级（v0.9）

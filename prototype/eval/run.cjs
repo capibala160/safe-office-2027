@@ -10,6 +10,7 @@
 //   node eval/run.cjs --llm=http --repeat=3    # 真实模型（需 env 配置）
 // ============================================================
 const { join, resolve } = require('node:path');
+const { loadConfigFile } = require('../src/load-config.cjs');
 const { CASES, CORPUS_VERSION } = require('./corpus.cjs');
 const { runAll, TIERS } = require('./harness.cjs');
 const { aggregateMatrix } = require('./metrics.cjs');
@@ -63,6 +64,9 @@ const HELP = `
 
   const cases = opts.split === 'all' ? CASES : CASES.filter((c) => c.split === opts.split);
   if (cases.length === 0) throw new Error('筛选后没有可用用例');
+
+  // 真实模型：与 server.cjs 一致，先读 prototype/config.env（已存在的环境变量优先）
+  if (opts.llm === 'http') loadConfigFile(join(__dirname, '..', 'config.env'));
 
   const { kind, factory, modelName } = makeLLMFactory({ kind: opts.llm });
   const runs = await runAll({ llmForTier: factory, cases, tiers: opts.tiers, repeats: opts.repeat });

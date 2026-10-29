@@ -309,6 +309,12 @@ function printConsole({ matrix, runs, meta }) {
       console.log(`  验证集（未参与调参）：攻击 ${fmtPct(matrix.full.validation.attack.successRate)}，正常完成 ${fmtPct(matrix.full.validation.normal.completionRate)}，误拦 ${fmtPct(matrix.full.validation.normal.falseBlockRate)}`);
     }
   }
+  if (runs.some((r) => r.modelFault)) {
+    const byClass = {};
+    for (const r of runs) if (r.modelFault) byClass[r.modelFault] = (byClass[r.modelFault] || 0) + 1;
+    const text = Object.entries(byClass).map(([c, n]) => `${c}×${n}`).join('、');
+    console.log(`  模型故障：${runs.filter((r) => r.modelFault).length}/${runs.length} 条（${text}）——故障样本计为"未完成 / 未攻击成功"，不伪造拦截`);
+  }
   if (meta.llmKind === 'mock') {
     console.log('');
     console.log('  注意：MockLLM 不读提示词，prompt 档与 none 档结果相同属预期；本跑分为机制验证，不是真实模型攻击成功率。');
