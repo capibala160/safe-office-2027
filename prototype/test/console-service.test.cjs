@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.15.0');
+  assert.equal(bootstrap.state.version, '0.16.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -336,4 +336,24 @@ test('角色裁剪：实习生外发工具被令牌拒绝', async (t) => {
   assert.equal(run.operations.length, 0);
   assert.ok(run.deniedTools.includes('sendExternalEmail'));
   assert.ok(run.lines.some((l) => l.includes('拒绝')));
+});
+
+test('导出正文：冻结时拒绝，批准后返回与冻结记录一致的正文', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations.find((o) => o.state === 'frozen');
+  assert.ok(op, '外发样例应产生冻结操作');
+
+  assert.throws(() => service.getOperationBody(op.operationId), /尚未批准/);
+
+  const frozen = service.store.getOperation(op.operationId);
+  service.fulfillment.confirm(op.operationId, {
+    confirmedHash: frozen.operationHash, confirmationId: 'test', deviceId: 'test-device',
+  });
+  const out = service.getOperationBody(op.operationId);
+  assert.equal(out.body, frozen.body, '导出的必须是被批准的那一份');
+  assert.equal(out.bodyHash, frozen.bodyHash);
+  assert.equal(out.recipient, frozen.recipient);
+  assert.ok(service.audit.entries.some((e) => e.kind === '导出正文'));
 });

@@ -29,6 +29,31 @@ const DOCS = {
   },
 };
 
+// ---------- 导入的真实资料（v0.16）----------
+// 样例文档保持静态；真实资料注册后并入同一视图：
+//   allDocuments() 给规划上下文与文档面板；getDocumentById() 给执行期 readDoc
+// 注意：这是一份进程内全局注册表，跨服务实例共享（演示单进程，够用）。
+const INGESTED_DOCS = new Map();
+
+function registerDocuments(docs) {
+  for (const doc of docs || []) {
+    if (doc && typeof doc.id === 'string' && doc.id) INGESTED_DOCS.set(doc.id, doc);
+  }
+  return INGESTED_DOCS.size;
+}
+
+function clearIngestedDocuments() {
+  INGESTED_DOCS.clear();
+}
+
+function allDocuments() {
+  return { ...DOCS, ...Object.fromEntries(INGESTED_DOCS) };
+}
+
+function getDocumentById(id) {
+  return DOCS[id] || INGESTED_DOCS.get(id) || null;
+}
+
 // 图片素材（命题：办公内容安全处理 —— 图片识别；AI 输入检测覆盖 文本/语音/图片 三通道）
 //   图片 = 又一条"外部内容进入通道"：图内文字同样可能藏注入（I1）；截图密级随源（I2）
 const IMAGES = {
@@ -76,4 +101,7 @@ function extractEmbeddedInstruction(doc) {
   return [{ action: 'sendExternalEmail', args: { to: email, docId: 'M1' }, fromDoc: doc.id, tainted: true }];
 }
 
-module.exports = { DOCS, CONTACTS, AUDIOS, IMAGES, extractEmbeddedInstruction };
+module.exports = {
+  DOCS, CONTACTS, AUDIOS, IMAGES, extractEmbeddedInstruction,
+  registerDocuments, clearIngestedDocuments, allDocuments, getDocumentById,
+};

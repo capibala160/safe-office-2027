@@ -3,6 +3,8 @@ node_modules/
 .DS_Store
 Thumbs.db
 prototype/out/
+# 导入的真实资料（本地库，绝不入库）
+prototype/data/
 
 # WS63 协议测试产物
 ws63/test_protocol

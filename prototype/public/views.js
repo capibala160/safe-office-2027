@@ -8,6 +8,37 @@
   } = window.UI;
   const API = window.API;
 
+  // ---------- 导出已批准正文 ----------
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    document.body.removeChild(area);
+  }
+
+  function downloadText(filename, text) {
+    const safe = String(filename).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'draft';
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = safe.endsWith('.txt') ? safe : `${safe}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const EXPORTABLE = new Set(['confirmed', 'executing', 'executed', 'failed']);
+
   // ---------- 通用 ----------
   function page(title, sub) {
     return `<div class="spread"><div><h2 class="page-title">${esc(title)}</h2><div class="sub-text">${esc(sub)}</div></div></div>`;
@@ -62,6 +93,7 @@
         ${op.state === 'frozen' ? `<button class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}">发起 WS63 确认</button><button class="btn ghost small" data-op-action="reject" data-id="${esc(op.operationId)}">拒绝</button>` : ''}
         ${op.state === 'confirmed' ? `<button class="btn small" data-op-action="send" data-id="${esc(op.operationId)}">发送/执行</button>` : ''}
         ${op.outbox && op.outbox.state === 'unknown' ? `<button class="btn small" data-op-action="reconcile" data-outbox="${esc(op.outbox.outboxId)}">人工核对为已发送</button>` : ''}
+        ${EXPORTABLE.has(op.state) ? `<button class="btn ghost small" data-op-action="copy" data-id="${esc(op.operationId)}">复制正文</button><button class="btn ghost small" data-op-action="download" data-id="${esc(op.operationId)}">下载 .txt</button>` : ''}
         <button class="btn ghost small" data-op-action="verify" data-id="${esc(op.operationId)}">只读篡改校验</button>
         <button class="btn ghost small" data-op-action="detail" data-id="${esc(op.operationId)}">详情</button>
       </div>
@@ -97,6 +129,16 @@
             toast('已人工核对为已发送', 'ok');
             await c.refreshState();
             c.rerender();
+          } else if (action === 'copy' || action === 'download') {
+            const res = await API.get(`/api/operations/${encodeURIComponent(id)}/body`);
+            const text = `${res.subject}\n收件人：${res.recipient}\n\n${res.body}`;
+            if (action === 'copy') {
+              await copyText(text);
+              toast('已复制已批准的正文', 'ok');
+            } else {
+              downloadText(res.subject || 'draft', text);
+              toast('已下载已批准的正文', 'ok');
+            }
           } else if (action === 'verify') {
             const res = await API.post(`/api/operations/${encodeURIComponent(id)}/verify-tamper`);
             toast(`原记录校验：${res.original.ok ? '通过' : '失败'}；改动副本：${res.tampered.ok ? '通过' : '拒绝'}`, res.original.ok && !res.tampered.ok ? 'ok' : 'error');

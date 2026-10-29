@@ -17,7 +17,7 @@ const {
   requestHumanConfirm,
   redact,
 } = require('./guard.cjs');
-const { DOCS, CONTACTS, AUDIOS, IMAGES } = require('./scenario.cjs');
+const { CONTACTS, AUDIOS, IMAGES, allDocuments, getDocumentById } = require('./scenario.cjs');
 const { PerfMeter } = require('./perf.cjs');
 const { DEFAULT_SANDBOX, checkSandbox } = require('./sandbox.cjs');
 const { prepareModelInput } = require('./model-boundary.cjs');
@@ -162,7 +162,7 @@ class AgentRuntime {
       let plan;
       try {
         plan = await this.perf.measureAsync('规划+计划校验', () =>
-          this.planner.makePlan(command, { docs: Object.values(DOCS).filter(d => token?.documentIds.includes(d.id) && this.policy.decide(role, 'readDoc') === 'allow'), modelLocation, commandLevel, delegation, delegationVerifier }),
+          this.planner.makePlan(command, { docs: Object.values(allDocuments()).filter(d => token?.documentIds.includes(d.id) && this.policy.decide(role, 'readDoc') === 'allow'), modelLocation, commandLevel, delegation, delegationVerifier }),
         );
       } catch (err) {
         const fault = classifyModelFault(err);
@@ -273,7 +273,7 @@ class AgentRuntime {
 
     // —— 读文档：先过闸1（输入消毒，注入内容隔离为"仅数据"）——
     if (action === 'readDoc') {
-      const doc = DOCS[args.id];
+      const doc = getDocumentById(args.id);
       if (!doc) return `  [${n}] readDoc(${args.id}) ⛔ 文档不存在`;
       const san = this.perf.measure('闸1 输入消毒', () => sanitizeInput(doc.body));
       this.knowledge[doc.id] = { ...doc, cleaned: san.cleaned, tainted: !san.safe };

@@ -13,7 +13,7 @@ const crypto = require('node:crypto');
 const { CapabilityToken } = require('./guard.cjs');
 const { PolicyEngine } = require('./governance.cjs');
 const { TOOL_META } = require('./capabilities.cjs');
-const { DOCS, IMAGES, AUDIOS } = require('./scenario.cjs');
+const { DOCS, IMAGES, AUDIOS, allDocuments } = require('./scenario.cjs');
 
 // 角色定义：可读密级 / 外部域名策略 / 调用上限 / 令牌 TTL
 const ROLE_DEFS = {
@@ -38,11 +38,18 @@ const ROLE_TOOLS = Object.fromEntries(
 // 角色可读资源 = 按密级过滤文档/图片/录音
 function idsByLevels(levels) {
   const ids = [];
-  for (const d of Object.values(DOCS)) if (levels.includes(d.level)) ids.push(d.id);
+  // allDocuments() 含运行时导入的真实资料；样例文档仍是静态快照
+  for (const d of Object.values(allDocuments())) if (levels.includes(d.level)) ids.push(d.id);
   for (const i of Object.values(IMAGES)) if (levels.includes(i.level)) ids.push(i.id);
   for (const a of Object.values(AUDIOS)) if (levels.includes(a.level)) ids.push(a.id);
   return ids;
 }
+// 角色可读资源要在调用时重算（导入的资料在模块加载后才注册）
+function roleDocIds(role) {
+  const def = ROLE_DEFS[role];
+  return def ? idsByLevels(def.levels) : [];
+}
+// 静态快照：仅用于不关心导入资料的旧调用方与文档展示
 const ROLE_DOC_IDS = Object.fromEntries(
   Object.entries(ROLE_DEFS).map(([role, def]) => [role, idsByLevels(def.levels)]),
 );
@@ -86,7 +93,7 @@ function defineAgent({ agentId, role, allowedTools = [], documentScopes = [], mo
   if (beyondTools.length > 0) {
     throw new Error(`Agent「${agentId}」申请了角色「${role}」不具备的工具：${beyondTools.join(', ')}`);
   }
-  const beyondDocs = docs.filter((d) => !ROLE_DOC_IDS[role].includes(d));
+  const beyondDocs = docs.filter((d) => !roleDocIds(role).includes(d));
   if (beyondDocs.length > 0) {
     throw new Error(`Agent「${agentId}」申请了角色「${role}」不可读的资源：${beyondDocs.join(', ')}`);
   }
@@ -107,7 +114,7 @@ function verifyAgentManifest(agent, { registry = null, policy = null } = {}) {
   const roleTools = roleToolsFor(agent.role, { registry, policy });
   const beyondTools = agent.allowedTools.filter((t) => !roleTools.includes(t));
   if (beyondTools.length > 0) return { ok: false, reason: `角色「${agent.role}」不具备工具：${beyondTools.join(', ')}` };
-  const beyondDocs = agent.documentScopes.filter((d) => !ROLE_DOC_IDS[agent.role].includes(d));
+  const beyondDocs = agent.documentScopes.filter((d) => !roleDocIds(agent.role).includes(d));
   if (beyondDocs.length > 0) return { ok: false, reason: `角色「${agent.role}」不可读资源：${beyondDocs.join(', ')}` };
   return { ok: true, reason: 'ok' };
 }
@@ -124,7 +131,7 @@ function issueToken(agent, task = {}, { audit, registry = null, policy = null } 
 
   const roleTools = roleToolsFor(role, { registry, policy });
   const tools = requestedTools.filter((t) => agent.allowedTools.includes(t) && roleTools.includes(t));
-  const documentIds = requestedDocs.filter((d) => agent.documentScopes.includes(d) && ROLE_DOC_IDS[role].includes(d));
+  const documentIds = requestedDocs.filter((d) => agent.documentScopes.includes(d) && roleDocIds(role).includes(d));
   const deniedTools = requestedTools.filter((t) => !tools.includes(t));
   const deniedDocs = requestedDocs.filter((d) => !documentIds.includes(d));
 
@@ -212,7 +219,7 @@ class DelegationService {
 }
 
 module.exports = {
-  ROLE_DEFS, ROLE_TOOLS, ROLE_DOC_IDS, roleToolsFor,
+  ROLE_DEFS, ROLE_TOOLS, ROLE_DOC_IDS, roleDocIds, roleToolsFor,
   defineAgent, verifyAgentManifest, issueToken,
   DelegationService, hashManifest,
 };

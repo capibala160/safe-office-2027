@@ -16,8 +16,10 @@ const { createLlmFromEnv } = require('./llm.cjs');
 const { PerfMeter } = require('./perf.cjs');
 const { AgentRuntime } = require('./runtime.cjs');
 const { DEFAULT_SANDBOX } = require('./sandbox.cjs');
-const { defineAgent, issueToken, ROLE_DEFS, ROLE_DOC_IDS } = require('./agents.cjs');
-const { DOCS, IMAGES, AUDIOS, CONTACTS } = require('./scenario.cjs');
+const { defineAgent, issueToken, ROLE_DEFS, ROLE_DOC_IDS, roleDocIds } = require('./agents.cjs');
+const {
+  IMAGES, AUDIOS, CONTACTS, allDocuments, getDocumentById, registerDocuments,
+} = require('./scenario.cjs');
 const { CAPABILITIES, RISK_LEVELS } = require('./capabilities.cjs');
 const { ToolRegistry } = require('./tool-registry.cjs');
 const { redact } = require('./guard.cjs');
@@ -31,7 +33,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.15.0';
+const VERSION = '0.16.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -98,12 +100,14 @@ class ConsoleService {
     llm = null,
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
     auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
+    documentsStore = null,
   } = {}) {
     this.now = now;
     this.pairingCode = pairingCode ? String(pairingCode) : null;
     this.lastPhoneResult = null;
     // 模型与持久化：默认全内存（测试/演示不变）；给了路径才落盘
     this._injectedLlm = llm;
+    this.documentsStore = documentsStore;   // 导入的真实资料（null = 只有样例）
     this.storeFile = storeFile || ':memory:';
     this.auditFile = auditFile || null;
     this.auditCheckpointFile = this.auditFile ? `${this.auditFile}.head` : null;
@@ -133,6 +137,12 @@ class ConsoleService {
     this.policy = new PolicyEngine();
     this.audit = this._restoreAudit();
     this.audit.onAppend = () => this._saveAudit();
+    // 导入的真实资料并入文档视图（样例文档保持静态）
+    if (this.documentsStore) {
+      registerDocuments(this.documentsStore.list().map((doc) => ({
+        id: doc.id, title: doc.title, level: doc.level, body: doc.body,
+      })));
+    }
     if (this._auditRestoreError) {
       const error = this._auditRestoreError;
       this._auditRestoreError = null;
@@ -287,7 +297,7 @@ class ConsoleService {
       startedAt: this._iso(this.startedAt),
       uptimeSec: Math.max(0, Math.floor((this.now() - this.startedAt) / 1000)),
       counts: {
-        documents: Object.keys(DOCS).length,
+        documents: Object.keys(allDocuments()).length,
         images: Object.keys(IMAGES).length,
         audios: Object.keys(AUDIOS).length,
         operations: operations.length,
@@ -332,7 +342,7 @@ class ConsoleService {
       roleTools: Object.fromEntries(
         Object.keys(ROLE_DEFS).map((role) => [role, this.toolRegistry.toolsForRole(role, this.policy)]),
       ),
-      roleDocs: ROLE_DOC_IDS,
+      roleDocs: Object.fromEntries(Object.keys(ROLE_DEFS).map((r) => [r, roleDocIds(r)])),
       capabilities: CAPABILITIES,
       riskLevels: RISK_LEVELS,
       documents: this.listDocuments(),
@@ -419,7 +429,7 @@ class ConsoleService {
   // ---------- 文档 / 通讯录 / 日历 ----------
   listDocuments() {
     const items = [];
-    for (const d of Object.values(DOCS)) {
+    for (const d of Object.values(allDocuments())) {
       items.push({
         id: d.id, type: 'document', title: d.title, level: d.level,
         status: this.business.deletedDocIds.has(d.id) ? 'deleted' : 'available',
@@ -460,7 +470,7 @@ class ConsoleService {
         status: 'read',
       };
     }
-    const meta = DOCS[id] || IMAGES[id] || AUDIOS[id];
+    const meta = getDocumentById(id) || IMAGES[id] || AUDIOS[id];
     if (!meta) throw new ConsoleError('NOT_FOUND', `文档不存在：${id}`, 404);
     return {
       id, title: meta.title, level: meta.level, body: null, originalBody: null,
@@ -526,7 +536,7 @@ class ConsoleService {
 
   _issueAgentAndToken({ command, role, tools, documentIds, domains, maxCalls, modelLocation }) {
     const roleTools = this.toolRegistry.toolsForRole(role, this.policy);
-    const roleDocs = ROLE_DOC_IDS[role] || [];
+    const roleDocs = roleDocIds(role);
     const requestedTools = tools.length ? tools : roleTools.slice();
     const requestedDocs = documentIds.length ? documentIds : roleDocs.slice();
     const agentTools = requestedTools.filter((t) => roleTools.includes(t) && this.toolRegistry.has(t));
@@ -754,6 +764,29 @@ class ConsoleService {
     const counts = {};
     for (const o of all) counts[o.state] = (counts[o.state] || 0) + 1;
     return { items: filtered.map((o) => this._operationView(o)), counts };
+  }
+
+  // 导出已批准操作的正文：导出前重算冻结记录，保证"导出的就是被批准的那一份"
+  getOperationBody(id) {
+    const operation = this.store.getOperation(id);
+    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+    if (operation.state === 'frozen') throw new ConsoleError('CONFLICT', '操作尚未批准，不能导出正文', 409);
+    if (operation.state === 'rejected' || operation.state === 'expired') {
+      throw new ConsoleError('CONFLICT', `操作已${operation.state === 'rejected' ? '拒绝' : '过期'}，不能导出正文`, 409);
+    }
+    const check = verifyOperation(operation);
+    if (!check.ok) throw new ConsoleError('CONFLICT', `冻结记录校验失败：${check.reason}`, 409);
+    this.audit.append('导出正文', { operationId: id, state: operation.state });
+    return {
+      operationId: operation.operationId,
+      subject: operation.subject,
+      recipient: operation.recipient,
+      level: operation.level,
+      state: operation.state,
+      body: operation.body,
+      bodyHash: operation.bodyHash,
+      operationHash: operation.operationHash,
+    };
   }
 
   getOperation(id) {

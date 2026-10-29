@@ -11,6 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
+const { DocumentStore } = require('./src/ingest.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
 
 // 手机确认端从局域网接入时，只开放这些路径；其余一律 403，避免把整个控制台暴露给会场 Wi-Fi
@@ -223,6 +224,10 @@ function createConsoleServer({
       if (opMatch && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getOperation(decodeURIComponent(opMatch[1])) });
       }
+      const opBody = pathname.match(/^\/api\/operations\/([^/]+)\/body$/);
+      if (opBody && method === 'GET') {
+        return sendJson(res, 200, { ok: true, ...service.getOperationBody(decodeURIComponent(opBody[1])) });
+      }
       const opChallenge = pathname.match(/^\/api\/operations\/([^/]+)\/challenge$/);
       if (opChallenge && method === 'POST') {
         return sendJson(res, 200, { ok: true, challenge: service.beginChallenge(decodeURIComponent(opChallenge[1])) });
@@ -327,6 +332,7 @@ async function startServer({
   service,
   publicDir,
   pairingCode = null,
+  documentsStore = null,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -341,9 +347,10 @@ async function startServer({
         deviceId: 'phone-A',
         deviceLabel: '手机确认端（演示）',
         pairingCode,
+        documentsStore,
       });
     } else {
-      instance = new ConsoleService();
+      instance = new ConsoleService({ documentsStore });
     }
   }
   const server = createConsoleServer({ service: instance, publicDir });
@@ -361,6 +368,7 @@ async function startServer({
         close: () => new Promise((done) => {
           server.close(() => {
             instance.close();
+            try { if (documentsStore) documentsStore.close(); } catch { /* ignore */ }
             done();
           });
         }),
@@ -376,11 +384,21 @@ if (require.main === module) {
   const pairingCode = codeArg
     ? codeArg.slice('--code='.length)
     : process.env.SAFE_OFFICE_PHONE_CODE || (lan ? randomPairingCode() : null);
+  // 导入的真实资料：默认落在 prototype/data/documents.db（已 gitignore）
+  const documentsDb = process.env.SAFE_OFFICE_DOCS_DB
+    || path.join(__dirname, 'data', 'documents.db');
+  let documentsStore = null;
+  try {
+    documentsStore = new DocumentStore(documentsDb);
+  } catch (err) {
+    console.warn(`⚠ 文档库打不开（${documentsDb}）：${err.message}；本次只用样例文档`);
+  }
   startServer({
     port: Number(process.env.PORT) || 7812,
     host: lan ? '0.0.0.0' : '127.0.0.1',
     allowLan: lan,
     pairingCode,
+    documentsStore,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);
@@ -394,6 +412,12 @@ if (require.main === module) {
       }
     } else {
       console.log('  内存模式：重启清空（设 SAFE_OFFICE_STORE_FILE / SAFE_OFFICE_AUDIT_FILE 可落盘）');
+    }
+    if (documentsStore) {
+      const imported = documentsStore.list().length;
+      console.log(imported > 0
+        ? `  真实资料：${imported} 份（${documentsDb}）`
+        : '  真实资料：0 份（导入：npm run import -- <文件> --level 内部）');
     }
     if (code) {
       console.log('  手机确认端已启用：局域网只开放确认页与 /api/phone/*');
