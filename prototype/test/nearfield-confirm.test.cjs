@@ -358,6 +358,25 @@ test('摘要：≤96B、按码点截断、无 NUL，编码器接受', () => {
   }, KEY));
 });
 
+test('摘要：长中文主题不能挤掉收件人（确认人必须看得到发给谁）', () => {
+  const summary = buildSummary({
+    protocolAction: 1,
+    subject: '报价再确认'.repeat(20),
+    recipient: 'partner@example.com',
+  });
+  assert.ok(Buffer.byteLength(summary, 'utf8') <= SUMMARY_MAX_BYTES);
+  assert.ok(summary.includes('→ partner@example.com'), `收件人应完整可见，实际：${summary}`);
+  assert.ok(summary.startsWith('外发｜'));
+  assert.ok(!summary.includes('报价再确认'.repeat(20)), '主题应被截断');
+
+  // 收件人本身超长时，也保留动作与箭头，优先保证"有收件人"这件事可见
+  const longRecipient = buildSummary({
+    protocolAction: 1, subject: '短主题', recipient: `${'x'.repeat(200)}@example.com`,
+  });
+  assert.ok(Buffer.byteLength(longRecipient, 'utf8') <= SUMMARY_MAX_BYTES);
+  assert.ok(longRecipient.startsWith('外发｜→ ') || longRecipient.includes('｜→ '), longRecipient);
+});
+
 test('taskId/deviceId 派生：确定性、恒 8 字节、Buffer 直通', () => {
   assert.equal(deriveTaskId('T-1').length, 8);
   assert.equal(deriveDeviceId('ws63-A').length, 8);

@@ -98,7 +98,18 @@ function buildSummary(operation = {}) {
   const clean = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
   const subject = clean(operation.subject) || '（无主题）';
   const recipient = clean(operation.recipient);
-  return truncateUtf8(`${label}｜${subject}｜→ ${recipient}`, SUMMARY_MAX_BYTES);
+  const sep = '｜';
+  const tail = recipient ? `｜→ ${recipient}` : '';
+  const labelBytes = Buffer.byteLength(label, 'utf8');
+  const fixedBytes = Buffer.byteLength(`${label}${sep}${tail}`, 'utf8');
+
+  // 收件人是"发给谁"的唯一凭据：先保证它完整可见，主题让位。
+  // 旧实现整体截断 → 长中文主题能把收件人整个挤掉，确认人看不到发给谁。
+  if (Buffer.byteLength(`${label}${tail}`, 'utf8') >= SUMMARY_MAX_BYTES) {
+    return `${label}${truncateUtf8(tail, Math.max(0, SUMMARY_MAX_BYTES - labelBytes))}`;
+  }
+  const shortSubject = truncateUtf8(subject, SUMMARY_MAX_BYTES - fixedBytes);
+  return shortSubject ? `${label}${sep}${shortSubject}${tail}` : `${label}${tail}`;
 }
 
 class NearfieldConfirmer {
