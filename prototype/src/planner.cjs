@@ -27,6 +27,11 @@ function validatePlan(rawSteps, { command = '', docs = [], delegation = null, de
   const notes = [];
   const externalText = docs.map((d) => d.body).join('\n');
   const delegationIntent = /(以|用).{1,10}名义|代为?(发送|群发|发信)/.test(command);
+  // 生成稿绑定：同一计划里总结过 X，就必须发 draft_X——不能让模型把源文档直接发出去
+  const summarizedSources = new Set();
+  for (const s of Array.isArray(rawSteps) ? rawSteps : []) {
+    if (s && s.action === 'summarize' && s.args && typeof s.args.of === 'string') summarizedSources.add(s.args.of);
+  }
   if (!Array.isArray(rawSteps) || rawSteps.length > 64) {
     return { steps: [], findings: [{ level: 'block', reason: '计划必须是至多 64 步的数组' }], notes: [] };
   }
@@ -87,6 +92,17 @@ function validatePlan(rawSteps, { command = '', docs = [], delegation = null, de
         });
         continue;
       }
+    }
+    // 生成稿绑定：本计划已生成 draft_X，却直接发送源文档 X → 移除（不许拿原件外发）
+    // 放在溯源检查之后：收件人本身未授权时，先报"收件人来源"这一条更准确
+    if (['sendInternalEmail', 'sendExternalEmail'].includes(s.action) && s.args && s.args.docId
+      && summarizedSources.has(s.args.docId)) {
+      findings.push({
+        level: 'block',
+        reason: `步骤 ${s.action} 直接发送源文档「${s.args.docId}」；本计划已生成 draft_${s.args.docId}，必须发送生成稿`,
+        step: s,
+      });
+      continue;
     }
     if (delegationAllowed) {
       notes.push({

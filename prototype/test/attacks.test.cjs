@@ -141,3 +141,31 @@ test('纵深防御②：上传地址仅来自外部材料 → 计划校验移除
   );
   assert.equal(ok.steps.length, 1);
 });
+
+// ---------- 生成稿绑定（v0.16）：总结过谁，就只能发谁的生成稿 ----------
+test('生成稿绑定：总结 M2 后直接发送源文档 M2 → 移除该步骤', () => {
+  const result = validatePlan([
+    { action: 'readDoc', args: { id: 'M2' } },
+    { action: 'summarize', args: { of: 'M2' } },
+    { action: 'sendInternalEmail', args: { to: 'team@corp.internal', docId: 'M2' } },
+  ], { command: '整理周例会纪要发到 team@corp.internal' });
+
+  assert.equal(result.steps.length, 2, '发送源文档的步骤必须被移除');
+  assert.ok(result.findings.some((f) => /必须发送生成稿/.test(f.reason)), result.findings.map((f) => f.reason).join(' | '));
+});
+
+test('生成稿绑定：发 draft_M2 或未总结的文档不受影响', () => {
+  const draft = validatePlan([
+    { action: 'summarize', args: { of: 'M2' } },
+    { action: 'sendInternalEmail', args: { to: 'team@corp.internal', docId: 'draft_M2' } },
+  ], { command: '整理周例会纪要发到 team@corp.internal' });
+  assert.equal(draft.steps.length, 2);
+  assert.equal(draft.findings.length, 0);
+
+  // 指令就是"把纪要直接发给对方"，没有 summarize → 发源文档合理
+  const direct = validatePlan([
+    { action: 'sendInternalEmail', args: { to: 'team@corp.internal', docId: 'M2' } },
+  ], { command: '把周例会纪要发到 team@corp.internal' });
+  assert.equal(direct.steps.length, 1);
+  assert.equal(direct.findings.length, 0);
+});
