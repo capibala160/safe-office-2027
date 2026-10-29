@@ -4,7 +4,7 @@
 (function () {
   const {
     esc, short, time, dateTime, badge, kindClass, summarize, toast,
-    errorText, statusText,
+    errorText, statusText, renderDiff,
   } = window.UI;
   const API = window.API;
 
@@ -300,13 +300,52 @@
       sandboxPreset: root.querySelector('#cmd-sandbox').value,
     });
 
+    // —— 任务进度：排队 → 规划 → 执行 i/n → 待确认/完成 ——
+    const stageText = (snap) => {
+      const last = (snap.stageLog || []).slice(-1)[0] || {};
+      if (snap.stage === '执行' && last.step) return `执行 ${last.step}/${last.total}`;
+      return snap.stage;
+    };
+    const progressHtml = (snap) => `<section class="card">
+      <div class="card-head"><h2>任务 ${esc(snap.runId)}</h2><span class="sub" id="run-stage">${esc(stageText(snap))}</span></div>
+      <div class="sub-text" id="run-log">${esc((snap.stageLog || []).map((s) => (s.step ? `${s.stage} ${s.step}/${s.total}` : s.stage)).join(' → '))}</div>
+      <div class="btn-row mt8"><button class="btn ghost small" id="run-cancel">取消任务</button></div>
+      <div class="sub-text mt8">离开本页任务不受影响；回来会接着显示进度。</div>
+    </section>`;
+    const finish = async (snap) => {
+      const target = root.querySelector('#cmd-result');
+      if (snap.status === 'error') {
+        target.innerHTML = `<div class="notice block">任务失败：${esc(snap.error || '未知错误')}</div>`;
+        return;
+      }
+      if (snap.result) {
+        target.innerHTML = renderRun(snap.result);
+        bindOpActions(root, c);
+      }
+      if (snap.cancelRequested) toast('已取消：已执行的步骤保留记录，后续步骤未执行', 'info');
+      try { await c.refreshState(); } catch { /* best effort */ }
+    };
+    const watch = async (runId) => {
+      const target = root.querySelector('#cmd-result');
+      target.innerHTML = progressHtml({ runId, stage: '排队', stageLog: [] });
+      const snap = await c.pollRun(runId, (s) => {
+        const st = root.querySelector('#run-stage');
+        const lg = root.querySelector('#run-log');
+        if (st) st.textContent = stageText(s);
+        if (lg) lg.textContent = (s.stageLog || []).map((x) => (x.step ? `${x.stage} ${x.step}/${x.total}` : x.stage)).join(' → ');
+        const cancelBtn = root.querySelector('#run-cancel');
+        if (cancelBtn) cancelBtn.disabled = s.status !== 'running' || s.cancelRequested;
+      });
+      await finish(snap);
+    };
     root.querySelector('#cmd-run').addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       btn.disabled = true;
       try {
-        const picked = [...(root.querySelector('#cmd-files').files || [])].slice(0, 5);
+        const allFiles = [...(root.querySelector('#cmd-files').files || [])];
+        if (allFiles.length > 5) throw new Error(`附件最多 5 个（当前选了 ${allFiles.length} 个），请先删减`);
         const attachments = [];
-        for (const file of picked) {
+        for (const file of allFiles) {
           if (file.size > 5 * 1024 * 1024) throw new Error(`附件「${file.name}」超过 5MB`);
           attachments.push({
             filename: file.name,
@@ -316,14 +355,32 @@
         }
         const payload = collect();
         if (attachments.length) payload.attachments = attachments;
-        const run = await c.runCommand(payload);
-        const target = root.querySelector('#cmd-result');
-        target.innerHTML = renderRun(run);
-        bindOpActions(root, c);
-        await c.refreshState();
+        const started = await c.startRun(payload);
+        await watch(started.runId);
       } catch (err) { toast(c.errorText(err), 'error'); }
       finally { btn.disabled = false; }
     });
+    root.querySelector('#cmd-result').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('#run-cancel');
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        await c.cancelRun(c.store.activeRunId);
+        toast('已请求取消：当前步骤结束后停止，已执行步骤保留记录', 'info');
+      } catch (err) { toast(c.errorText(err), 'error'); btn.disabled = false; }
+    });
+    // 回到本页时恢复未跑完的任务
+    let resumeId = c.store.activeRunId;
+    if (!resumeId) { try { resumeId = localStorage.getItem('safe-office.activeRun'); } catch { resumeId = null; } }
+    if (resumeId) {
+      try {
+        const snap = await API.get(`/api/commands/${encodeURIComponent(resumeId)}`).catch(() => null);
+        if (snap && snap.status === 'running') { c.store.activeRunId = resumeId; await watch(resumeId); }
+        else if (snap) await finish(snap);
+      } catch (err) {
+        toast(`恢复任务失败：${c.errorText(err)}`, 'error');
+      }
+    }
     root.querySelector('#cmd-clear').addEventListener('click', () => {
       root.querySelector('#cmd-text').value = '';
       root.querySelectorAll('#cmd-tools input').forEach((x) => { x.checked = false; });
@@ -539,6 +596,8 @@
         const contentBase64 = await fileToBase64(file);
         const res = await API.post('/api/documents/import', { filename: file.name, level, contentBase64 });
         toast(`已导入 ${res.document.id}：${res.document.title}`, 'ok');
+        // 导入后必须刷新全局 bootstrap，否则命令台的授权文档列表看不到新资料
+        await c.refreshBootstrap();
         c.rerender();
       } catch (err) {
         toast(c.errorText(err), 'error');
@@ -574,9 +633,20 @@
   }
 
   // ---------- 审批与确认 ----------
-  function renderOperationDetail(detail) {
+  function renderOperationDetail(detail, revisions = null) {
     const op = detail.operation;
     const meta = detail.meta || {};
+    const versionBlock = revisions && revisions.revisions && revisions.revisions.length
+      ? `<div class="mt12"><div class="sub-text">版本历史（当前 v${esc(revisions.current.revision)}）</div>
+          ${revisions.revisions.slice().reverse().map((r) => `<details class="rev"><summary>v${esc(r.revision)} · ${esc(dateTime(r.createdAt))} · ${esc(r.editor)} · ${esc(short(r.operationHash, 10))}</summary>${renderDiff(r.body, revisions.current.body)}</details>`).join('')}
+        </div>`
+      : '';
+    const bodyBlock = op.state === 'frozen'
+      ? `<div class="mt12"><div class="sub-text">编辑正文：保存后重新计算 bodyHash / operationHash，旧挑战与确认作废，需要重新确认</div>
+          <textarea class="textarea" id="op-body-edit" rows="10">${esc(op.body || '')}</textarea>
+          <div class="btn-row mt8"><button class="btn" id="op-body-save">保存并重新冻结</button><button class="btn ghost" id="op-body-reset">还原</button></div>
+        </div>`
+      : `<div class="mt12"><div class="sub-text">正文预览</div><pre class="lines">${esc(op.body || '（空）')}</pre></div>`;
     return `<section class="card">
       <div class="card-head"><h2>操作详情</h2><span class="sub mono">${esc(op.operationId)}</span></div>
       <div class="grid-2">
@@ -593,7 +663,8 @@
           <div class="sub-text mt8">确认：${esc(op.confirmationId || '—')} · 设备：${esc(op.deviceId || '—')}</div>
         </div>
       </div>
-      <div class="mt12"><div class="sub-text">正文预览</div><pre class="lines">${esc(op.body || '（空）')}</pre></div>
+      ${bodyBlock}
+      ${versionBlock}
       <div class="mt12"><div class="sub-text">操作事件（SQLite 事件链）</div>
         <div class="event-list">${(detail.events || []).slice().reverse().map((e) => `<div class="event info"><div><div class="kind">${esc(e.kind)}</div><div class="detail">${esc(summarize(e.detail))}</div></div><div class="seq">${esc(time(e.createdAt))}</div></div>`).join('') || '<div class="empty">无</div>'}</div>
       </div>
@@ -608,8 +679,12 @@
     let detailHtml = '';
     if (c.store.operationId) {
       try {
-        const detail = await API.get(`/api/operations/${encodeURIComponent(c.store.operationId)}`);
-        detailHtml = renderOperationDetail(detail);
+        const id = encodeURIComponent(c.store.operationId);
+        const [detail, revisions] = await Promise.all([
+          API.get(`/api/operations/${id}`),
+          API.get(`/api/operations/${id}/revisions`).catch(() => null),
+        ]);
+        detailHtml = renderOperationDetail(detail, revisions);
       } catch (err) {
         detailHtml = `<div class="notice block">${esc(c.errorText(err))}</div>`;
       }
@@ -625,6 +700,27 @@
       ${detailHtml}
       <div id="approvals-result"></div>`;
     bindOpActions(root, c);
+    const editBox = root.querySelector('#op-body-edit');
+    if (editBox) {
+      const original = editBox.value;
+      root.querySelector('#op-body-reset').addEventListener('click', () => { editBox.value = original; });
+      root.querySelector('#op-body-save').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        try {
+          const res = await API.post(`/api/operations/${encodeURIComponent(c.store.operationId)}/body`, {
+            body: editBox.value, editor: c.store.role,
+          });
+          if (res.changed) {
+            toast(`已保存 v${res.revisions ? res.revisions.length + 1 : ''}：哈希已重算${res.voidedChallenges ? `，${res.voidedChallenges} 个待确认挑战作废` : ''}`, 'ok');
+            await c.refreshState();
+          } else {
+            toast('正文未变化', 'info');
+          }
+          c.rerender();
+        } catch (err) { toast(c.errorText(err), 'error'); btn.disabled = false; }
+      });
+    }
     root.querySelectorAll('[data-op-filter]').forEach((btn) => {
       btn.addEventListener('click', () => { c.store.opFilter = btn.dataset.opFilter; c.rerender(); });
     });

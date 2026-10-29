@@ -209,6 +209,19 @@ function createConsoleServer({
       if (pathname === '/api/commands' && method === 'GET') {
         return sendJson(res, 200, { ok: true, items: service.runs.slice(0, 50) });
       }
+      // 异步任务：起跑即返回 runId；轮询进度 / 取消
+      if (pathname === '/api/commands/async' && method === 'POST') {
+        const body = await readJson(req);
+        return sendJson(res, 202, { ok: true, ...service.startCommand(body) });
+      }
+      const runMatch = pathname.match(/^\/api\/commands\/([^/]+)$/);
+      if (runMatch && method === 'GET') {
+        return sendJson(res, 200, { ok: true, ...service.getRun(decodeURIComponent(runMatch[1])) });
+      }
+      const runCancel = pathname.match(/^\/api\/commands\/([^/]+)\/cancel$/);
+      if (runCancel && method === 'POST') {
+        return sendJson(res, 200, service.cancelRun(decodeURIComponent(runCancel[1])));
+      }
       // 浏览器上传导入：请求体为 base64，服务端做扩展名白名单 + 魔数/编码嗅探 + 大小上限
       if (pathname === '/api/documents/import' && method === 'POST') {
         if (!service.documentsStore) {
@@ -266,6 +279,14 @@ function createConsoleServer({
       const opBody = pathname.match(/^\/api\/operations\/([^/]+)\/body$/);
       if (opBody && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getOperationBody(decodeURIComponent(opBody[1])) });
+      }
+      if (opBody && method === 'POST') {
+        const body = await readJson(req);
+        return sendJson(res, 200, service.editOperationBody(decodeURIComponent(opBody[1]), body));
+      }
+      const opRevisions = pathname.match(/^\/api\/operations\/([^/]+)\/revisions$/);
+      if (opRevisions && method === 'GET') {
+        return sendJson(res, 200, { ok: true, ...service.listOperationRevisions(decodeURIComponent(opRevisions[1])) });
       }
       const opAttachment = pathname.match(/^\/api\/operations\/([^/]+)\/attachments\/([^/]+)$/);
       if (opAttachment && method === 'GET') {

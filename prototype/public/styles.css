@@ -349,3 +349,15 @@ a.sample { display: block; text-decoration: none; color: inherit; }
   .two-col, .device-panel, .grid-2, .grid-3, .sample-grid { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; flex-direction: column; }
 }
+
+/* ---------- 草稿版本对比 ---------- */
+.rev { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-top: 8px; background: #fcfdff; }
+.rev > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.diff {
+  margin-top: 8px; background: #0f172a; color: #dbe4f0; border-radius: 8px;
+  padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+}
+.diff-line { display: block; }
+.diff-line.add { color: #7bdca8; }
+.diff-line.del { color: #ff9d8f; }

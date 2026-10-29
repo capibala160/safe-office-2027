@@ -75,6 +75,17 @@ class OperationStore {
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_outbox_operation ON outbox(operation_id);
+      CREATE TABLE IF NOT EXISTS operation_revisions (
+        operation_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        body_hash TEXT NOT NULL,
+        operation_hash TEXT NOT NULL,
+        editor TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (operation_id, revision)
+      );
       CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         operation_id TEXT,
@@ -191,6 +202,61 @@ class OperationStore {
       this.appendEvent('操作状态', { operationId, from: current.state, to: next }, { operationId });
       return this.getOperation(operationId);
     });
+  }
+
+  // 草稿编辑：只有 frozen（尚未确认）的记录可以改；改完必须重新过校验并重新确认
+  updateFrozenOperation(operation) {
+    if (!operation || operation.state !== 'frozen') {
+      throw new Error('只有 frozen 状态的操作记录可以编辑');
+    }
+    const check = verifyOperation(operation);
+    if (!check.ok) throw new Error(`拒绝写入未通过校验的操作记录：${check.reason}`);
+    return this._transaction(() => {
+      const current = this.getOperation(operation.operationId);
+      if (!current) throw new Error(`操作不存在：${operation.operationId}`);
+      if (current.state !== 'frozen') throw new Error(`操作状态 ${current.state} 不能编辑`);
+      this.db.prepare(`
+        UPDATE operations
+           SET body = ?, body_hash = ?, operation_hash = ?, subject = ?, updated_at = ?
+         WHERE operation_id = ? AND state = 'frozen'
+      `).run(operation.body, operation.bodyHash, operation.operationHash, operation.subject,
+        this.now(), operation.operationId);
+      this.appendEvent('草稿修改', {
+        operationId: operation.operationId,
+        fromHash: current.operationHash,
+        toHash: operation.operationHash,
+      }, { operationId: operation.operationId });
+      return this.getOperation(operation.operationId);
+    });
+  }
+
+  insertRevision(revision) {
+    return this._transaction(() => {
+      this.db.prepare(`
+        INSERT INTO operation_revisions (
+          operation_id, revision, body, body_hash, operation_hash, editor, note, created_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+      `).run(
+        revision.operationId, revision.revision, revision.body, revision.bodyHash,
+        revision.operationHash, revision.editor, revision.note || '', revision.createdAt,
+      );
+      return this.listRevisions(revision.operationId);
+    });
+  }
+
+  listRevisions(operationId) {
+    return this.db.prepare('SELECT * FROM operation_revisions WHERE operation_id = ? ORDER BY revision ASC')
+      .all(operationId)
+      .map((row) => ({
+        operationId: row.operation_id,
+        revision: row.revision,
+        body: row.body,
+        bodyHash: row.body_hash,
+        operationHash: row.operation_hash,
+        editor: row.editor,
+        note: row.note || '',
+        createdAt: row.created_at,
+      }));
   }
 
   // ---------- outbox ----------

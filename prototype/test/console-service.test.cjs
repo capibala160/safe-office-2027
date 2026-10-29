@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.16.0');
+  assert.equal(bootstrap.state.version, '0.17.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -356,4 +356,109 @@ test('导出正文：冻结时拒绝，批准后返回与冻结记录一致的�
   assert.equal(out.bodyHash, frozen.bodyHash);
   assert.equal(out.recipient, frozen.recipient);
   assert.ok(service.audit.entries.some((e) => e.kind === '导出正文'));
+});
+
+test('草稿编辑：正文改动 → 重新哈希 → 旧挑战作废 → 保留版本历史', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations[0];
+  assert.equal(op.state, 'frozen');
+  const challenge = service.beginChallenge(op.operationId);
+
+  const edited = service.editOperationBody(op.operationId, { body: '改过的正文：只发这一段。', editor: '测试' });
+  assert.equal(edited.changed, true);
+  assert.equal(edited.voidedChallenges, 1, '旧挑战必须作废');
+  assert.notEqual(edited.operation.operationHash, op.operationHash);
+  assert.notEqual(edited.operation.bodyHash, op.bodyHash);
+  assert.equal(service.challenges.get(challenge.challengeId).state, 'expired');
+
+  // 重新发起挑战，目标哈希必须是新记录的
+  const next = service.beginChallenge(op.operationId);
+  assert.equal(next.targetHash, edited.operation.operationHash);
+
+  const history = service.listOperationRevisions(op.operationId);
+  assert.equal(history.revisions.length, 1);
+  assert.equal(history.revisions[0].bodyHash, op.bodyHash, '旧版本正文哈希要留档');
+  assert.equal(history.current.body, '改过的正文：只发这一段。');
+});
+
+test('草稿编辑：已确认/已执行的操作不能再改', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations[0];
+  const challenge = service.beginChallenge(op.operationId);
+  const decided = await service.decideChallenge(challenge.challengeId, 'approve');
+  assert.equal(decided.outcome, 'approved');
+  assert.throws(
+    () => service.editOperationBody(op.operationId, { body: '偷偷改一下' }),
+    /不能再编辑/,
+  );
+});
+
+test('授权语义：未传=角色默认，显式空=不授权（不能扩大权限）', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  await assert.rejects(
+    () => service.runCommand({ command: '查一下张伟的联系方式', role: '员工', tools: [], documentIds: [] }),
+    /空选择等于不授权/,
+  );
+  // 显式空文档 = 不授权任何文档，但不报错
+  const run = await service.runCommand({ command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [] });
+  assert.deepEqual(run.documentIds, []);
+});
+
+test('异步任务：起跑即返回 runId，阶段可轮询，完成有结果', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const started = service.startCommand({
+    command: '把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal',
+    role: '员工', tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M2'],
+  });
+  assert.match(started.runId, /^RUN-\d+$/);
+  const live = service.liveRuns.get(started.runId);
+  await live.done;
+  const snap = service.getRun(started.runId);
+  assert.equal(snap.status, 'done');
+  assert.ok(snap.stageLog.some((s) => s.stage === '规划'), '应有规划阶段');
+  assert.ok(snap.stageLog.some((s) => s.stage === '执行'), '应有执行阶段');
+  assert.ok(snap.result, '完成后的任务要能取回结果');
+});
+
+test('取消：规划期间请求取消 → 后续步骤全部不执行，已发生的保留', async (t) => {
+  const gate = new Promise((resolve) => setTimeout(resolve, 40));
+  const llm = {
+    deployment: 'local',
+    async plan() {
+      await gate;
+      return [
+        { action: 'readDoc', args: { id: 'M2' } },
+        { action: 'summarize', args: { of: 'M2' } },
+        { action: 'sendInternalEmail', args: { to: 'team@corp.internal', docId: 'draft_M2' } },
+      ];
+    },
+    async generate() { return '正文'; },
+  };
+  const { service } = setup({ service: { llm } });
+  t.after(() => service.close());
+  const started = service.startCommand({
+    command: '整理纪要并发内网', role: '员工',
+    tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M2'],
+  });
+  service.cancelRun(started.runId);
+  const run = await service.liveRuns.get(started.runId).done;
+  assert.ok(run.lines.some((l) => l.includes('任务取消')), '结果里要写明已取消');
+  assert.equal(service.getRun(started.runId).status, 'done');
+  assert.ok(service.audit.entries.some((e) => e.kind === '任务取消'), '取消要进审计');
+});
+
+test('取消：任务结束后再取消 → 409', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const started = service.startCommand({
+    command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+  });
+  await service.liveRuns.get(started.runId).done;
+  assert.throws(() => service.cancelRun(started.runId), /已结束/);
 });

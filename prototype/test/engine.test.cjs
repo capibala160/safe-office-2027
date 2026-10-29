@@ -512,3 +512,21 @@ test('可视化：治理报告可生成（概览卡 / 风险计量 / 审计时�
   assert.ok(html.includes('测试风险事件'));
   assert.ok(html.includes('✓ 未篡改'), '链校验状态应透出');
 });
+
+// ---------- 任务取消（v0.17） ----------
+test('取消：在步骤之间生效——第 1 步执行后停下，已执行的保留、后续不执行', async () => {
+  const { rt, audit, token } = mkRt({ tools: ['readDoc', 'summarize', 'sendInternalEmail'] });
+  let abort = false;
+  const lines = await rt.runCommand('把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal', {
+    role: '员工',
+    token,
+    onStage: (stage, info) => { if (stage === '执行' && info.step === 1) abort = true; },
+    shouldAbort: () => abort,
+  });
+  const cancel = audit.entries.find((e) => e.kind === '任务取消');
+  assert.ok(cancel, '必须有任务取消审计');
+  assert.equal(cancel.detail.executed, 1, '第 1 步应已执行');
+  assert.ok(cancel.detail.notExecuted >= 1, '后续步骤不应执行');
+  assert.ok(!audit.entries.some((e) => e.kind === '执行' && e.detail.action === 'sendInternalEmail'), '发送不能发生');
+  assert.ok(lines.some((l) => l.includes('任务取消')));
+});

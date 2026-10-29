@@ -31,10 +31,10 @@ const { FakeMailer } = require('./mailer.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
 } = require('./nearfield-confirm.cjs');
-const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex } = require('./operation.cjs');
+const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.16.0';
+const VERSION = '0.17.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -133,6 +133,7 @@ class ConsoleService {
     this.seq = 0;
     this.agentSeq = 0;
     this.runs = [];
+    this.liveRuns = new Map();
     this._runChain = Promise.resolve();
     this._initWorkspace();
   }
@@ -510,6 +511,101 @@ class ConsoleService {
     return task;
   }
 
+  // 异步任务：立即返回 runId，前端轮询进度；离开页面任务照常跑完
+  startCommand(input = {}) {
+    this._normalizeCommandInput(input); // 参数错误立刻 400，不进队列
+    const runId = `RUN-${++this.seq}`;
+    const live = {
+      runId,
+      command: String(input.command || ''),
+      role: input.role || '员工',
+      stage: '排队',
+      status: 'running',
+      cancelRequested: false,
+      startedAt: this.now(),
+      stageLog: [{ stage: '排队', at: this._iso() }],
+      result: null,
+      error: null,
+    };
+    this.liveRuns.set(runId, live);
+    if (this.liveRuns.size > 50) {
+      const oldest = this.liveRuns.keys().next().value;
+      if (oldest !== runId) this.liveRuns.delete(oldest);
+    }
+    const task = this._runChain.then(() => this._executeCommand(input, {
+      runId,
+      onStage: (stage, info) => {
+        live.stage = stage;
+        live.stageLog.push({ stage, at: this._iso(), ...(info || {}) });
+        if (live.stageLog.length > 40) live.stageLog.shift();
+      },
+      shouldAbort: () => live.cancelRequested,
+    })).then((run) => {
+      const pending = (run.operations || []).filter((o) => o.state === 'frozen').length;
+      live.stage = pending ? '待确认' : '完成';
+      live.status = 'done';
+      live.pendingOperations = pending;
+      live.result = run;
+      return run;
+    }).catch((err) => {
+      live.stage = '失败';
+      live.status = 'error';
+      live.error = err.message;
+      throw err;
+    });
+    live.done = task;
+    this._runChain = task.then(() => {}, () => {});
+    return { runId, stage: live.stage, status: live.status };
+  }
+
+  getRun(runId) {
+    const live = this.liveRuns.get(runId);
+    if (live) {
+      return {
+        runId: live.runId,
+        command: live.command,
+        role: live.role,
+        stage: live.stage,
+        status: live.status,
+        cancelRequested: live.cancelRequested,
+        pendingOperations: live.pendingOperations || 0,
+        stageLog: live.stageLog,
+        startedAt: this._iso(live.startedAt),
+        result: live.result,
+        error: live.error,
+      };
+    }
+    const done = this.runs.find((r) => r.runId === runId);
+    if (!done) throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
+    const pending = (done.operations || []).filter((o) => o.state === 'frozen').length;
+    return {
+      runId,
+      command: done.command,
+      role: done.role,
+      stage: pending ? '待确认' : '完成',
+      status: 'done',
+      cancelRequested: false,
+      pendingOperations: pending,
+      stageLog: [],
+      startedAt: done.at,
+      result: done,
+      error: null,
+    };
+  }
+
+  cancelRun(runId) {
+    const live = this.liveRuns.get(runId);
+    if (!live) {
+      const done = this.runs.find((r) => r.runId === runId);
+      if (done) throw new ConsoleError('CONFLICT', '任务已结束，不能取消', 409);
+      throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
+    }
+    if (live.status !== 'running') throw new ConsoleError('CONFLICT', `任务已结束（${live.stage}），不能取消`, 409);
+    live.cancelRequested = true;
+    this.audit.append('任务取消请求', { runId, stage: live.stage });
+    return { ok: true, runId, stage: live.stage, cancelRequested: true };
+  }
+
   _normalizeCommandInput(input) {
     const command = typeof input.command === 'string' ? input.command.trim() : '';
     if (!command) throw new ConsoleError('BAD_REQUEST', '缺少指令 command');
@@ -524,11 +620,20 @@ class ConsoleService {
     if (!(maxCalls === Infinity || (Number.isInteger(maxCalls) && maxCalls > 0))) {
       throw new ConsoleError('BAD_REQUEST', 'maxCalls 必须是正整数');
     }
+    // 未传（undefined）= 用角色默认全量；显式传空数组 = 用户明确不授权任何一项。
+    // 两者不能混：把"全部取消勾选"当成"全部授权"会凭空扩大权限。
+    const tools = input.tools === undefined || input.tools === null ? null : uniqueStrings(input.tools);
+    const documentIds = input.documentIds === undefined || input.documentIds === null
+      ? null
+      : uniqueStrings(input.documentIds);
+    if (tools !== null && tools.length === 0) {
+      throw new ConsoleError('BAD_REQUEST', '未勾选任何工具：空选择等于不授权，不是全部授权');
+    }
     return {
       command,
       role,
-      tools: uniqueStrings(input.tools),
-      documentIds: uniqueStrings(input.documentIds),
+      tools,
+      documentIds,
       domains: uniqueStrings(input.domains),
       maxCalls,
       modelLocation,
@@ -586,8 +691,8 @@ class ConsoleService {
   _issueAgentAndToken({ command, role, tools, documentIds, domains, maxCalls, modelLocation }) {
     const roleTools = this.toolRegistry.toolsForRole(role, this.policy);
     const roleDocs = roleDocIds(role);
-    const requestedTools = tools.length ? tools : roleTools.slice();
-    const requestedDocs = documentIds.length ? documentIds : roleDocs.slice();
+    const requestedTools = tools === null ? roleTools.slice() : tools;
+    const requestedDocs = documentIds === null ? roleDocs.slice() : documentIds;
     const agentTools = requestedTools.filter((t) => roleTools.includes(t) && this.toolRegistry.has(t));
     const agentDocs = requestedDocs.filter((d) => roleDocs.includes(d));
     const agent = defineAgent({
@@ -612,10 +717,10 @@ class ConsoleService {
     };
   }
 
-  async _executeCommand(input) {
+  async _executeCommand(input, { runId: presetRunId = null, onStage = null, shouldAbort = null } = {}) {
     const options = this._normalizeCommandInput(input);
     const generation = this.generation;
-    const runId = `RUN-${++this.seq}`;
+    const runId = presetRunId || `RUN-${++this.seq}`;
     const startedAt = this.now();
     const auditStart = this.audit.entries.length;
     const { agent, token, deniedTools, deniedDocs } = this._issueAgentAndToken({ ...options, command: options.command });
@@ -635,6 +740,8 @@ class ConsoleService {
       sandbox,
       deferActions: this.toolRegistry.deferredNames(),
       onDeferred: (descriptor) => deferred.push(descriptor),
+      onStage,
+      shouldAbort,
     });
 
     // 运行期间工作区被重置：这一轮的结果属于上一个工作区，整轮丢弃（不写操作、不写审计）
@@ -835,6 +942,100 @@ class ConsoleService {
       body: operation.body,
       bodyHash: operation.bodyHash,
       operationHash: operation.operationHash,
+    };
+  }
+
+  // 草稿编辑：改正文 → 重新计算 bodyHash/operationHash → 旧挑战作废 → 必须重新确认
+  // 已确认/已执行的操作不能改（否则等于绕过确认），只能新建一条。
+  editOperationBody(id, { body, editor = '用户', note = '' } = {}) {
+    const current = this.store.getOperation(id);
+    if (!current) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+    if (current.state !== 'frozen') {
+      throw new ConsoleError('CONFLICT', `操作状态为 ${current.state}，不能再编辑（已确认/已执行的记录只能新建）`, 409);
+    }
+    const check = verifyOperation(current);
+    if (!check.ok) throw new ConsoleError('CONFLICT', `冻结记录校验失败：${check.reason}`, 409);
+    if (typeof body !== 'string') throw new ConsoleError('BAD_REQUEST', 'body 必须是字符串');
+    const text = body.replace(/\r\n/g, '\n');
+    if (!text.trim()) throw new ConsoleError('BAD_REQUEST', '正文不能为空');
+    if (text.length > 200000) throw new ConsoleError('BAD_REQUEST', '正文超过 200000 字符');
+    if (text === current.body) {
+      return { ok: true, changed: false, operation: this._operationView(current), revisions: this.store.listRevisions(id) };
+    }
+
+    const revisions = this.store.listRevisions(id);
+    const currentRevision = revisions.length + 1;
+    this.store.insertRevision({
+      operationId: id,
+      revision: currentRevision,
+      body: current.body,
+      bodyHash: current.bodyHash,
+      operationHash: current.operationHash,
+      editor: String(editor || '用户').slice(0, 40),
+      note: String(note || '').slice(0, 200),
+      createdAt: this._iso(),
+    });
+
+    const next = sealOperation({
+      operationId: current.operationId,
+      taskId: current.taskId,
+      action: current.action,
+      protocolAction: current.protocolAction,
+      tool: current.tool,
+      recipient: current.recipient,
+      subject: current.subject,
+      body: text,
+      attachments: current.attachments,
+      sourceDocIds: current.sourceDocIds,
+      level: current.level,
+      createdAt: current.createdAt,
+      expiresAt: current.expiresAt,
+      modelId: current.modelId,
+      planHash: current.planHash,
+    });
+    this.store.updateFrozenOperation(next);
+
+    // 旧确认一律失效：挑战作废、设备侧 pending 取消
+    let voided = 0;
+    for (const challenge of this.challenges.values()) {
+      if (challenge.operationId === id && challenge.state === 'pending') {
+        try { this.confirmer.cancel(challenge.pending); } catch { /* 已失效 */ }
+        challenge.state = 'expired';
+        this._pushHistory(challenge, { code: 'EXPIRED', outcome: 'superseded' });
+        voided += 1;
+      }
+    }
+    this.audit.append('草稿修改', {
+      operationId: id,
+      revision: { from: currentRevision, to: currentRevision + 1 },
+      fromHash: current.operationHash.slice(0, 16),
+      toHash: next.operationHash.slice(0, 16),
+      voidedChallenges: voided,
+      editor: String(editor || '用户').slice(0, 40),
+    });
+
+    return {
+      ok: true,
+      changed: true,
+      voidedChallenges: voided,
+      operation: this._operationView(this.store.getOperation(id)),
+      revisions: this.store.listRevisions(id),
+    };
+  }
+
+  listOperationRevisions(id) {
+    const operation = this.store.getOperation(id);
+    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+    return {
+      operationId: id,
+      current: {
+        revision: this.store.listRevisions(id).length + 1,
+        body: operation.body,
+        bodyHash: operation.bodyHash,
+        operationHash: operation.operationHash,
+        state: operation.state,
+      },
+      revisions: this.store.listRevisions(id),
     };
   }
 
@@ -1497,6 +1698,7 @@ class ConsoleService {
     this.seq = 0;
     this.agentSeq = 0;
     this.runs = [];
+    this.liveRuns = new Map();
     this._runChain = Promise.resolve();
     this._initWorkspace();
     return this.getState();

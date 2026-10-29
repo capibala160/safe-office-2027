@@ -91,7 +91,7 @@ class AgentRuntime {
     return snap;
   }
 
-  async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null, deferActions = null, onDeferred = null } = {}) {
+  async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null, deferActions = null, onDeferred = null, onStage = null, shouldAbort = null } = {}) {
     let role = requestedRole || '员工';
     // —— Agent 身份校验（v0.9）：清单可信 → 角色一致 → 令牌绑定该 Agent ——
     if (agent) {
@@ -161,6 +161,7 @@ class AgentRuntime {
       // 审计记录类别与原始原因、结果对用户可见——绝不半程执行、绝不崩溃。
       let plan;
       try {
+        if (onStage) onStage('规划', { command });
         plan = await this.perf.measureAsync('规划+计划校验', () =>
           this.planner.makePlan(command, { docs: Object.values(allDocuments()).filter(d => token?.documentIds.includes(d.id) && this.policy.decide(role, 'readDoc') === 'allow'), modelLocation, commandLevel, delegation, delegationVerifier }),
         );
@@ -189,7 +190,16 @@ class AgentRuntime {
 
       // 执行：任一步骤抛出模型故障（如生成阶段超时）→ 立即中止剩余步骤（fail-closed）
       for (let i = 0; i < steps.length; i++) {
+        // 取消入口：在步骤之间生效；已执行的步骤保留（副作用不可撤回，只停止后续）
+        if (shouldAbort && shouldAbort()) {
+          const notExecuted = steps.length - i;
+          this.audit.append('任务取消', { atStep: i + 1, executed: i, notExecuted });
+          lines.push(`  ⛔ 任务取消：第 ${i + 1} 步前停止，其后 ${notExecuted} 步未执行；已执行的 ${i} 步保留记录`);
+          settle('cancelled');
+          return lines;
+        }
         try {
+          if (onStage) onStage('执行', { step: i + 1, total: steps.length });
           lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred }));
         } catch (err) {
           const fault = classifyModelFault(err);

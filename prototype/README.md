@@ -1,8 +1,8 @@
-# 核心机制原型（v0.16 · 平台无关 + 控制台 + 工具注册表 + 真实资料接入）
+# 核心机制原型（v0.17 · 平台无关 + 控制台 + 草稿编辑 + 任务进度）
 
 > **接入变化**：`CapabilityToken.documentIds` 默认空，必须显式授权资源；邮件和上传指令须包含精确地址。模型适配器声明 deployment，未知位置按 cloud 处理；`commandLevel` 应由可信应用提供，机密/未知指令不送云。规划和 generate 共用模型出口检查。正式稿保存为 `draft_源ID`，继承密级及 sourceIds；回滚保留已发送和已上传记录。
 >
-> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。**v0.11 新增 WS63 确认适配器**（`nearfield-confirm.cjs`）：SFC1 二进制帧 + 虚拟设备接入冻结操作闭环；串口/SLE 与运行时闸4 仍未接。**v0.12 新增演示级办公套件控制台**（`server.cjs` + `src/console-service.cjs` + `public/`）：10 个页面、转交确认缝、策略自动确认/WS63 确认；业务动作仍为模拟。**v0.13 新增工具注册表 + MCP 骨架**（`tool-registry.cjs` / `mcp-adapter.cjs`）：内置静态表不变，自定义/MCP 工具默认拒绝，必须显式声明沙箱/风险/角色策略。**v0.14 手机确认端**（`docs/14`）、**v0.15 持久化与模型注入**（`docs/15`）、**v0.16 真实资料接入**（导入/上传/附件/导出已批准正文，`docs/16`）依次落地。审计支持持久化及独立检查点恢复，HUKS 尚未接入。最新能力以 [优化记录与落地验收](../docs/03-优化记录与落地验收.md)、[v0.11 适配器文档](../docs/11-WS63确认适配器.md)、[v0.12 控制台文档](../docs/12-办公套件控制台.md) 与 [v0.16 真实资料接入](../docs/16-真实资料接入.md) 为准，测试数量以 `node --test` 为准。
+> `ConfirmationService` 支持限时、一次性及操作/内容绑定的 HMAC 协议模拟，不能证明本人身份、距离或防中继。**v0.11 新增 WS63 确认适配器**（`nearfield-confirm.cjs`）：SFC1 二进制帧 + 虚拟设备接入冻结操作闭环；串口/SLE 与运行时闸4 仍未接。**v0.12 新增演示级办公套件控制台**（`server.cjs` + `src/console-service.cjs` + `public/`）：10 个页面、转交确认缝、策略自动确认/WS63 确认；业务动作仍为模拟。**v0.13 新增工具注册表 + MCP 骨架**（`tool-registry.cjs` / `mcp-adapter.cjs`）：内置静态表不变，自定义/MCP 工具默认拒绝，必须显式声明沙箱/风险/角色策略。**v0.14 手机确认端**（`docs/14`）、**v0.15 持久化与模型注入**（`docs/15`）、**v0.16 真实资料接入**（导入/上传/附件/导出已批准正文，`docs/16`）、**v0.17 草稿编辑与任务进度**（重新冻结 + 版本 diff + 异步进度/取消，`docs/17`）依次落地。审计支持持久化及独立检查点恢复，HUKS 尚未接入。最新能力以 [优化记录与落地验收](../docs/03-优化记录与落地验收.md)、[v0.11 适配器文档](../docs/11-WS63确认适配器.md)、[v0.12 控制台文档](../docs/12-办公套件控制台.md) 与 [v0.16 真实资料接入](../docs/16-真实资料接入.md) 为准，测试数量以 `node --test` 为准。
 
 > 「Agent 安全运行机制」的可运行原型——**零依赖、纯 Node**，上板前即可跑通全部机制逻辑。
 > 上板路径：本目录逻辑**平移 ArkTS**（行为不变）→ 闸4 的 `nearfieldOnline` 换成 WS63 真实 SLE 握手 → 规划器换成真实 LLM（模型边界已就绪）→ 沙箱对应 OH 应用沙箱/权限模型。
@@ -13,7 +13,7 @@
 npm start            # 办公套件控制台 → http://127.0.0.1:7812（v0.12）
 node demo.cjs        # 攻防演示（答辩预演脚本：正常流 / 能力分级 / 沙箱双锁 / 图片通道 / 注入 / 端云边界 / 越权 / 冻结闭环 / 近场 / 回滚 / 回溯 / 风险行为因子 / 点名 5+1 类攻击速览 / Agent 角色分级 / 委托令牌 / 时延开销）
 npm run demo:nearfield  # WS63 确认适配器演示（6 幕：正常/取消/超时/重放/篡改/错设备，无硬件）
-npm test             # 自动化测试（235 项，全绿）
+npm test             # 自动化测试（242 项，全绿）
 npm run eval         # 三档评测（无防护 / 仅提示词 / 完整网关，Mock 离线）
 # demo 末尾自动生成治理报告（可视化交付物雏形）：out/governance-report.html
 # eval 生成评测报告：out/eval/eval-report.html + eval-results.json
@@ -135,6 +135,20 @@ node --test test/tool-registry.test.cjs   # 16 项
 - 接缝：planner（动态目录）/ sandbox（第 4 个 profile）/ runtime（动态高危/出站/沙箱 + 自定义 executor）/ agents（动态角色工具）/ console（bootstrap/矩阵/转办）。
 - **默认行为不变**：不注入 registry 时，2 参 `validatePlan`、3 参 `checkSandbox`、旧 `defineAgent/issueToken`、旧 `AgentRuntime`、默认 `ConsoleService` 与 v0.12 一致。
 - 边界：内存态；MCP 仅 client + HTTP JSON-RPC 骨架（无 SSE/stdio/OAuth/重连）；自定义 outbound 必须走 `docId` + 目标授权；不是通用 Agent。详见 [工具注册表与 MCP](../docs/13-工具注册表与MCP.md)。
+
+## 草稿编辑与任务进度（v0.17）
+
+```bash
+npm start        # 审批与确认页：冻结操作可直接改正文、看版本 diff
+# 异步任务：POST /api/commands/async → GET /api/commands/:runId → POST /api/commands/:runId/cancel
+node --test test/console-service.test.cjs
+```
+
+- **编辑即重新冻结**：只有 `frozen` 可改；`sealOperation` 重算 `bodyHash`/`operationHash`，pending 挑战全部作废，必须重新确认才能导出
+- **版本留档**：`operation_revisions` 存被替换的正文与两个哈希（编辑人 / 备注）；审批页行级 diff
+- **异步进度**：`排队 → 规划 → 执行 i/n → 待确认/完成`；`stageLog` 记录时间点，离开页面任务照跑、回来接上
+- **取消**：步骤间生效，已执行步骤保留记录，`任务取消` 入审计；不能中断进行中的模型调用
+- 边界：已确认/已执行不能改（只能新建）；附件不能在这一步增删；正文明文存 SQLite。详见 [草稿编辑与任务进度](../docs/17-草稿编辑与任务进度.md)
 
 ## 三档评测（v0.8）
 

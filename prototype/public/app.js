@@ -91,6 +91,34 @@
       try { await ctx.refreshState(); } catch { /* chrome refresh is best-effort */ }
       return run;
     },
+    // 异步任务：起跑后轮询阶段，离开页面任务继续跑（runId 存 localStorage）
+    async startRun(payload) {
+      const body = { ...payload };
+      if (body.role === undefined) body.role = store.role;
+      if (body.modelLocation === undefined) body.modelLocation = store.modelLocation;
+      if (body.nearfieldOnline === undefined) body.nearfieldOnline = store.nearfieldOnline;
+      const res = await API.post('/api/commands/async', body);
+      store.activeRunId = res.runId;
+      try { localStorage.setItem('safe-office.activeRun', res.runId); } catch { /* 隐私模式 */ }
+      return res;
+    },
+    async pollRun(runId, onUpdate, { intervalMs = 900 } = {}) {
+      for (;;) {
+        const snap = await API.get(`/api/commands/${encodeURIComponent(runId)}`);
+        if (onUpdate) onUpdate(snap);
+        if (snap.status !== 'running') {
+          if (store.activeRunId === runId) {
+            store.activeRunId = null;
+            try { localStorage.removeItem('safe-office.activeRun'); } catch { /* ignore */ }
+          }
+          return snap;
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    },
+    async cancelRun(runId) {
+      return API.post(`/api/commands/${encodeURIComponent(runId)}/cancel`, {});
+    },
     navigate(route) {
       const target = `#/${route}`;
       if (location.hash === target) renderRoute();
@@ -115,6 +143,13 @@
     const roles = store.bootstrap.roles || [];
     if (!roles.some((r) => r.name === store.role)) store.role = roles[0] ? roles[0].name : '员工';
     select.innerHTML = roles.map((r) => `<option value="${esc(r.name)}" ${r.name === store.role ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
+  }
+
+  // 顶栏模型状态以服务端实际部署为准（配置了真实模型就不能再显示"本地 Mock"）
+  function modelLabel(model) {
+    if (!model) return '未知';
+    const who = model.model || model.name || '模型';
+    return `${who}（${model.location === 'cloud' ? '云' : '本地'}）`;
   }
 
   function renderChrome() {
@@ -148,7 +183,7 @@
           `<span class="pill ${risk.frozen ? 'block' : (risk.score > 0 ? 'warn' : 'ok')}">风险 ${esc(risk.score || 0)}/${esc(risk.threshold || 60)}</span>`,
           `<span class="pill ${state.audit && state.audit.verified ? 'ok' : 'block'}">审计链 ${state.audit && state.audit.verified ? '✓' : '异常'} · ${esc(state.counts ? state.counts.audit : 0)}</span>`,
           `<span class="pill ${state.counts && state.counts.pendingOperations ? 'warn' : 'info'}">待确认 ${esc(state.counts ? state.counts.pendingOperations : 0)}</span>`,
-          `<span class="pill info">模型 ${esc(store.modelLocation === 'cloud' ? '云端（演示）' : '本地 Mock')}</span>`,
+          `<span class="pill info" title="${esc(state.model ? state.model.mode : '')}">模型 ${esc(modelLabel(state.model))}</span>`,
           store.offline ? '<span class="pill block">连接中断</span>' : '',
         ].join('');
       }
