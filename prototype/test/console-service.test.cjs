@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.14.0');
+  assert.equal(bootstrap.state.version, '0.15.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);

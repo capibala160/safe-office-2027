@@ -381,9 +381,20 @@ if (require.main === module) {
     host: lan ? '0.0.0.0' : '127.0.0.1',
     allowLan: lan,
     pairingCode,
-  }).then(({ url, phoneUrls, pairingCode: code }) => {
+  }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);
+    const model = service.getState().model;
+    console.log(`  模型：${model.mode}${model.model ? ` / ${model.model}` : ''}`);
+    if (service.storeFile !== ':memory:') {
+      console.log(`  持久化：操作 → ${service.storeFile}`);
+      console.log(`          审计 → ${service.auditFile || '(未开启)'}`);
+      if (service.recoveredInFlight > 0) {
+        console.log(`  ⚠ 上次中断的在途发送 ${service.recoveredInFlight} 条已转「待核对」，不会自动重试`);
+      }
+    } else {
+      console.log('  内存模式：重启清空（设 SAFE_OFFICE_STORE_FILE / SAFE_OFFICE_AUDIT_FILE 可落盘）');
+    }
     if (code) {
       console.log('  手机确认端已启用：局域网只开放确认页与 /api/phone/*');
       console.log(`    配对码：${code}`);

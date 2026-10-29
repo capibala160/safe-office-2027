@@ -204,4 +204,15 @@ class HttpLLM {
   }
 }
 
-module.exports = { MockLLM, HttpLLM, PLAN_SYSTEM_PROMPT };
+// 按环境变量选模型：配了「端点 + 密钥」才走真实模型，否则退回确定性 MockLLM。
+// 控制台用它做默认值；测试/演示可显式注入别的实现（同一个 plan/generate 接口）。
+function createLlmFromEnv(env = process.env) {
+  const endpoint = env.SAFE_OFFICE_LLM_ENDPOINT;
+  const apiKey = env.SAFE_OFFICE_LLM_KEY;
+  if (endpoint && apiKey) {
+    return new HttpLLM({ endpoint, apiKey, model: env.SAFE_OFFICE_LLM_MODEL || undefined });
+  }
+  return new MockLLM();
+}
+
+module.exports = { MockLLM, HttpLLM, createLlmFromEnv, PLAN_SYSTEM_PROMPT };

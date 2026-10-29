@@ -8,9 +8,11 @@
 //   边界：业务动作全部模拟；WS63 是虚拟设备；仅本机演示。
 // ============================================================
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { PolicyEngine, AuditLog, RiskMeter } = require('./governance.cjs');
 const { GuardedPlanner } = require('./planner.cjs');
-const { MockLLM } = require('./llm.cjs');
+const { createLlmFromEnv } = require('./llm.cjs');
 const { PerfMeter } = require('./perf.cjs');
 const { AgentRuntime } = require('./runtime.cjs');
 const { DEFAULT_SANDBOX } = require('./sandbox.cjs');
@@ -29,7 +31,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.14.0';
+const VERSION = '0.15.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -93,10 +95,21 @@ class ConsoleService {
     toolRegistry = null,
     toolExecutors = null,
     pairingCode = null,
+    llm = null,
+    storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
+    auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
   } = {}) {
     this.now = now;
     this.pairingCode = pairingCode ? String(pairingCode) : null;
     this.lastPhoneResult = null;
+    // 模型与持久化：默认全内存（测试/演示不变）；给了路径才落盘
+    this._injectedLlm = llm;
+    this.storeFile = storeFile || ':memory:';
+    this.auditFile = auditFile || null;
+    this.auditCheckpointFile = this.auditFile ? `${this.auditFile}.head` : null;
+    this.generation = 0;          // 工作区版本：reset 时自增，用于丢弃在途旧结果
+    this.recoveredInFlight = 0;
+    this._auditRestoreError = null;
     this.key = Buffer.from(nearfieldKey);
     this.deviceId = deviceId;
     this.deviceLabel = deviceLabel;
@@ -118,7 +131,13 @@ class ConsoleService {
 
   _initWorkspace() {
     this.policy = new PolicyEngine();
-    this.audit = new AuditLog();
+    this.audit = this._restoreAudit();
+    this.audit.onAppend = () => this._saveAudit();
+    if (this._auditRestoreError) {
+      const error = this._auditRestoreError;
+      this._auditRestoreError = null;
+      this.audit.append('审计恢复失败', { error, note: '旧链不可信，从新链重新记录' });
+    }
     this.risk = new RiskMeter(this.riskThreshold, {
       onEvent: (kind, detail) => this.audit.append(kind, detail),
     });
@@ -129,14 +148,16 @@ class ConsoleService {
       : new Map(Object.entries(this._injectedExecutors || {}));
     this.toolRegistry.applyPolicies(this.policy);
     this.planner = new GuardedPlanner({
-      llm: new MockLLM(), audit: this.audit, risk: this.risk, registry: this.toolRegistry,
+      llm: this._injectedLlm || createLlmFromEnv(),
+      audit: this.audit, risk: this.risk, registry: this.toolRegistry,
     });
     this.perf = new PerfMeter();
     this.runtime = new AgentRuntime({
       policy: this.policy, audit: this.audit, risk: this.risk, planner: this.planner, perf: this.perf,
       toolRegistry: this.toolRegistry, toolExecutors: this.toolExecutors,
     });
-    this.store = new OperationStore(':memory:', { now: () => new Date(this.now()).toISOString() });
+    if (this.storeFile !== ':memory:') fs.mkdirSync(path.dirname(this.storeFile), { recursive: true });
+    this.store = new OperationStore(this.storeFile, { now: () => new Date(this.now()).toISOString() });
     this.mailer = this._mailer instanceof FakeMailer
       ? new FakeMailer({ behavior: this._mailer.behavior, messageId: this._mailer.messageId })
       : this._mailer;
@@ -146,6 +167,14 @@ class ConsoleService {
       onBusinessAction: async ({ operation }) => this._applyBusinessAction(operation),
     });
     this.fulfillment = new FulfillmentService({ store: this.store, mailer: this.executor, now: this.now });
+    // 重启恢复：上次进程中断时还在 sending 的结果未知 → 统一转 unknown，等人工核对
+    this.recoveredInFlight = this.storeFile === ':memory:' ? 0 : this.fulfillment.recoverInFlight();
+    if (this.recoveredInFlight > 0) {
+      this.audit.append('恢复', {
+        inFlight: this.recoveredInFlight,
+        note: '进程重启：在途发送结果未知，已转 unknown，禁止自动重试',
+      });
+    }
     this.confirmer = new NearfieldConfirmer({
       key: this.key,
       expectedDeviceId: this.deviceId,
@@ -169,6 +198,47 @@ class ConsoleService {
     };
     this.autoMode = 'manual';
     this.closed = false;
+  }
+
+  // ---------- 审计落盘 ----------
+  // 审计链 + 独立检查点是两份文件：同一磁盘上不抵抗篡改，只保证"整链替换会被发现"。
+  _restoreAudit() {
+    if (!this.auditFile) return new AuditLog();
+    if (!fs.existsSync(this.auditFile)) return new AuditLog();
+    if (!fs.existsSync(this.auditCheckpointFile)) {
+      // 有链无检查点 = 检查点被删；不能拿链自带的 head 自证
+      this._auditRestoreError = '检查点文件缺失';
+      return new AuditLog();
+    }
+    try {
+      const checkpoint = JSON.parse(fs.readFileSync(this.auditCheckpointFile, 'utf8'));
+      return AuditLog.load(this.auditFile, checkpoint);
+    } catch (err) {
+      this._auditRestoreError = err && err.message ? err.message : String(err);
+      return new AuditLog();
+    }
+  }
+
+  _saveAudit() {
+    if (!this.auditFile) return;
+    try {
+      fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
+      const checkpoint = this.audit.save(this.auditFile);
+      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
+    } catch { /* 落盘失败不打断运行；下一条 append 会重试 */ }
+  }
+
+  // 模型信息要如实反映实际用的实现，不能对真实模型还标"MockLLM（演示）"
+  _modelInfo() {
+    const llm = this.planner && this.planner.llm;
+    const name = llm && llm.constructor ? llm.constructor.name : 'MockLLM';
+    const location = llm && llm.deployment === 'cloud' ? 'cloud' : 'local';
+    return {
+      location,
+      name,
+      model: (llm && llm.model) || null,
+      mode: location === 'cloud' ? `${name}（真实模型）` : `${name}（演示）`,
+    };
   }
 
   _nowSec() { return Math.floor(this.now() / 1000); }
@@ -243,10 +313,14 @@ class ConsoleService {
         reviews: this.risk.reviews.slice(-3),
       },
       device: this.getDevice(),
-      model: { location: 'local', mode: 'MockLLM（演示）' },
+      model: this._modelInfo(),
       autoMode: this.autoMode,
       autoSafe: this._autoSafeStats(),
-      boundary: BOUNDARY,
+      boundary: this.storeFile === ':memory:' ? BOUNDARY : BOUNDARY.map((line) => (
+        line.startsWith('操作/审计/风险在内存')
+          ? '操作/审计已落盘（重启恢复）；风险计量仍在内存'
+          : line
+      )),
     };
   }
 
@@ -481,6 +555,7 @@ class ConsoleService {
 
   async _executeCommand(input) {
     const options = this._normalizeCommandInput(input);
+    const generation = this.generation;
     const runId = `RUN-${++this.seq}`;
     const startedAt = this.now();
     const auditStart = this.audit.entries.length;
@@ -502,6 +577,19 @@ class ConsoleService {
       deferActions: this.toolRegistry.deferredNames(),
       onDeferred: (descriptor) => deferred.push(descriptor),
     });
+
+    // 运行期间工作区被重置：这一轮的结果属于上一个工作区，整轮丢弃（不写操作、不写审计）
+    if (this.generation !== generation) {
+      return {
+        ok: false,
+        stale: true,
+        reason: 'RESET_DURING_RUN',
+        runId,
+        command: options.command,
+        lines: ['〔丢弃〕运行期间工作区已重置，本次结果作废'],
+        operations: [],
+      };
+    }
 
     const operations = [];
     for (const descriptor of deferred) {
@@ -608,7 +696,7 @@ class ConsoleService {
       level: d.docLevel || '内部',
       createdAt: this._iso(),
       expiresAt: this._iso(this.now() + this.operationTtlMs),
-      modelId: 'mock',
+      modelId: this._modelInfo().model || this._modelInfo().name,
       planHash: sha256Hex(`${runId}|${d.stepNumber}|${action}`),
     });
     this.operationMeta.set(operation.operationId, {
@@ -1218,7 +1306,7 @@ class ConsoleService {
       meta: [
         '演示级最小套件 v0.13',
         `模式：${this.autoMode}`,
-        '模型：本地 MockLLM（演示）',
+        `模型：${this._modelInfo().location === 'cloud' ? '云侧' : '本地'} ${this._modelInfo().name}${this._modelInfo().model ? ` / ${this._modelInfo().model}` : ''}`,
         `操作 ${operations.length} 条`,
         `审计 ${this.audit.entries.length} 条`,
         'WS63：虚拟设备（非硬件）',
@@ -1298,7 +1386,9 @@ class ConsoleService {
 
   // ---------- 重置 / 关闭 ----------
   reset() {
+    this.generation += 1;  // 工作区换版：在途运行的结果一律作废
     this.close();
+    this._clearPersistentFiles();
     this.seq = 0;
     this.agentSeq = 0;
     this.runs = [];
@@ -1307,9 +1397,20 @@ class ConsoleService {
     return this.getState();
   }
 
+  // 重置语义 = 清空：文件模式下连库一起删，不能让旧操作在下次启动时"复活"
+  _clearPersistentFiles() {
+    if (this.storeFile === ':memory:') return;
+    const files = [this.storeFile, `${this.storeFile}-wal`, `${this.storeFile}-shm`];
+    if (this.auditFile) files.push(this.auditFile, this.auditCheckpointFile);
+    for (const file of files) {
+      try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+    }
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true;
+    this._saveAudit();
     try { this.store.close(); } catch { /* ignore */ }
   }
 }

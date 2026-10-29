@@ -77,9 +77,11 @@ class PolicyEngine {
 
 // ---------- 审计日志：哈希链（prevHash 串联，防篡改） ----------
 class AuditLog {
-  constructor() {
+  // onAppend：每次写入后的回调（控制台用它落盘；抛错不影响审计本身）
+  constructor({ onAppend = null } = {}) {
     this.entries = [];
     this.prevHash = 'GENESIS';
+    this.onAppend = onAppend;
   }
   append(kind, detail) {
     const rec = {
@@ -93,6 +95,9 @@ class AuditLog {
     rec.hash = crypto.createHash('sha256').update(JSON.stringify(rec)).digest('hex');
     this.prevHash = rec.hash;
     this.entries.push(rec);
+    if (this.onAppend) {
+      try { this.onAppend(rec); } catch { /* 落盘失败不打断审计链 */ }
+    }
     return rec;
   }
   // 全链校验：任何一条被改动 / 顺序被换 → false
