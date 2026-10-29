@@ -172,3 +172,58 @@ test('控制台：没导入时文档数保持样例数量（默认不受影响�
     service.close();
   }
 });
+
+// ---------- 浏览器上传接口 ----------
+async function bootServer(t, store) {
+  const { startServer } = require('../server.cjs');
+  const started = await startServer({ port: 0, documentsStore: store });
+  t.after(() => started.close());
+  return started;
+}
+
+function upload(server, payload) {
+  return fetch(`${server.url}/api/documents/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+test('上传：合法 md 导入后立刻出现在文档面板', async (t) => {
+  const store = new DocumentStore(':memory:');
+  const server = await bootServer(t, store);
+  t.after(() => clearIngestedDocuments());
+
+  const content = Buffer.from('# 供应商沟通纪要\n价格 12 万，下周签约。', 'utf8');
+  const res = await upload(server, {
+    filename: '供应商沟通纪要.md', level: '内部', contentBase64: content.toString('base64'),
+  });
+  const body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.match(body.document.id, /^IMP-/);
+
+  const docs = await (await fetch(`${server.url}/api/documents`)).json();
+  assert.ok(docs.items.some((item) => item.id === body.document.id), '导入后应立刻可见，不用重启');
+  assert.equal(docs.items.find((item) => item.id === body.document.id).level, '内部');
+});
+
+test('上传：不合规的文件一律 400，且不落库', async (t) => {
+  const store = new DocumentStore(':memory:');
+  const server = await bootServer(t, store);
+  t.after(() => clearIngestedDocuments());
+
+  const cases = [
+    [{ filename: '工具.exe', level: '内部', contentBase64: Buffer.from('MZ').toString('base64') }, /暂不支持/],
+    [{ filename: '假docx.docx', level: '内部', contentBase64: Buffer.from('hello').toString('base64') }, /不是 ZIP/],
+    [{ filename: '二进制.txt', level: '内部', contentBase64: Buffer.from([0x61, 0x00, 0x62]).toString('base64') }, /NUL/],
+    [{ filename: '纪要.md', contentBase64: Buffer.from('# x').toString('base64') }, /密级/],
+    [{ filename: '纪要.md', level: '内部', contentBase64: '!!!!' }, /base64/],
+  ];
+  for (const [payload, pattern] of cases) {
+    const res = await upload(server, payload);
+    const body = await res.json();
+    assert.equal(res.status, 400, `${payload.filename} 应被拒：${JSON.stringify(body)}`);
+    assert.match(body.error.message, pattern, JSON.stringify(body));
+  }
+  assert.equal(store.list().length, 0, '被拒绝的文件不能落库');
+});

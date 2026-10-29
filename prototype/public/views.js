@@ -476,9 +476,30 @@
   }
 
   // ---------- 文件 ----------
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || '');
+        resolve(result.slice(result.indexOf(',') + 1));
+      };
+      reader.onerror = () => reject(new Error('读取文件失败'));
+      reader.readAsDataURL(file);
+    });
+  }
+
   async function files(root, c) {
     const docs = (await API.get('/api/documents')).items;
     root.innerHTML = `${page('文件', '文档/图片/录音/生成稿；删除需令牌上限 + 快照 + WS63 确认')}
+      <section class="card">
+        <div class="card-head"><h2>导入真实资料</h2><span class="sub">.txt / .md / .docx，单个 ≤5MB</span></div>
+        <div class="btn-row">
+          <input type="file" id="doc-file" accept=".txt,.md,.markdown,.docx" />
+          <select id="doc-level" class="select"><option value="内部">内部</option><option value="公开">公开</option><option value="机密">机密</option></select>
+          <button class="btn small" id="doc-import">导入</button>
+        </div>
+        <div class="sub-text mt8">密级由你指定，模型不能改；导入后按密级进入角色可读集合。资料只存本机，不进仓库。</div>
+      </section>
       <section class="card">
         <div class="card-head"><h2>文件列表</h2><span class="sub">${docs.length} 项</span></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>类型</th><th>标题</th><th>密级</th><th>状态</th><th>操作</th></tr></thead><tbody>
@@ -490,6 +511,25 @@
       <div id="files-detail"></div><div id="files-result"></div>`;
     const detail = root.querySelector('#files-detail');
     root.querySelectorAll('[data-doc]').forEach((btn) => btn.addEventListener('click', () => showDocDetail(detail, c, btn.dataset.doc)));
+    root.querySelector('#doc-import').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const input = root.querySelector('#doc-file');
+      const level = root.querySelector('#doc-level').value;
+      const file = input.files && input.files[0];
+      if (!file) { toast('先选一个文件', 'info'); return; }
+      if (file.size > 5 * 1024 * 1024) { toast('文件超过 5MB', 'error'); return; }
+      btn.disabled = true;
+      try {
+        const contentBase64 = await fileToBase64(file);
+        const res = await API.post('/api/documents/import', { filename: file.name, level, contentBase64 });
+        toast(`已导入 ${res.document.id}：${res.document.title}`, 'ok');
+        c.rerender();
+      } catch (err) {
+        toast(c.errorText(err), 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    });
     root.querySelector('#files-delete').addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       btn.disabled = true;

@@ -94,21 +94,45 @@ function docxToText(buffer) {
 }
 
 // ---------- 文件解析 ----------
-function parseFile(filePath) {
-  const buffer = fs.readFileSync(filePath);
+const ALLOWED_EXT = new Set(['.txt', '.md', '.markdown', '.docx']);
+const DOCX_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // "PK\x03\x04"
+
+// 上传通道要防"改了后缀的别的文件"：docx 必须真是 ZIP，文本必须是 UTF-8 且无 NUL
+function assertBufferSafe(buffer, ext) {
+  if (buffer.length === 0) throw new Error('文件是空的');
   if (buffer.length > MAX_BYTES) throw new Error(`文件超过 ${MAX_BYTES / 1024 / 1024}MB，拒绝导入`);
-  const ext = path.extname(filePath).toLowerCase();
-  let body;
-  if (ext === '.docx') body = docxToText(buffer);
-  else if (ext === '.txt' || ext === '.md' || ext === '.markdown' || ext === '') {
-    body = buffer.toString('utf8').replace(/^﻿/, '').trim();
-  } else {
-    throw new Error(`暂不支持 ${ext}；请另存为 .txt / .md / .docx`);
+  if (ext === '.docx') {
+    if (!buffer.subarray(0, 4).equals(DOCX_MAGIC)) {
+      throw new Error('扩展名是 .docx，但内容不是 ZIP——可能是改了后缀的其它文件');
+    }
+    return;
   }
+  if (buffer.includes(0)) throw new Error('文本文件里含 NUL 字节，疑似二进制文件');
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  } catch {
+    throw new Error('不是合法的 UTF-8 文本；请另存为 UTF-8 后再导入');
+  }
+}
+
+function parseBuffer(buffer, fileName) {
+  const ext = path.extname(String(fileName || '')).toLowerCase();
+  if (!ALLOWED_EXT.has(ext)) {
+    throw new Error(`暂不支持 ${ext || '(无扩展名)'}；请用 .txt / .md / .docx`);
+  }
+  assertBufferSafe(buffer, ext);
+  const body = ext === '.docx'
+    ? docxToText(buffer)
+    : buffer.toString('utf8').replace(/^﻿/, '').trim();
   if (!body) throw new Error('文件没有可用正文');
   const firstLine = body.split('\n').map((line) => line.trim()).find(Boolean) || '';
-  const title = (firstLine.replace(/^#+\s*/, '').slice(0, 40)) || path.basename(filePath, ext);
+  const fallback = path.basename(String(fileName || ''), ext);
+  const title = (firstLine.replace(/^#+\s*/, '').slice(0, 40)) || fallback || '未命名资料';
   return { title, body, ext };
+}
+
+function parseFile(filePath) {
+  return parseBuffer(fs.readFileSync(filePath), filePath);
 }
 
 function normalizeLevel(level) {
@@ -174,22 +198,27 @@ class DocumentStore {
 
 // 导入一个文件：id 由内容哈希派生，同一份文件重复导入不会产生副本
 // 密级必须由导入的人显式指定——默认成"内部"会把机密文档静默降级
-function importFile(store, filePath, { level, now = () => new Date().toISOString() } = {}) {
+function importBuffer(store, { filename, buffer, level, now = () => new Date().toISOString() } = {}) {
   const safeLevel = normalizeLevel(level);
   if (!safeLevel) throw new Error(`密级必须是 ${LEVELS.join(' / ')}`);
-  const buffer = fs.readFileSync(filePath);
-  const { title, body } = parseFile(filePath);
+  if (!Buffer.isBuffer(buffer)) throw new Error('缺少文件内容');
+  const { title, body } = parseBuffer(buffer, filename);
   const hash = sha256Hex(buffer);
   const doc = {
     id: `IMP-${hash.slice(0, 8)}`,
     title,
     level: safeLevel,
     body,
-    sourcePath: path.resolve(filePath),
+    sourcePath: String(filename || ''),
     sha256: hash,
     importedAt: now(),
   };
   return store.upsert(doc);
+}
+
+function importFile(store, filePath, options = {}) {
+  const buffer = fs.readFileSync(filePath);
+  return importBuffer(store, { ...options, filename: path.resolve(filePath), buffer });
 }
 
 function removeFile(store, docId) {
@@ -198,6 +227,6 @@ function removeFile(store, docId) {
 }
 
 module.exports = {
-  LEVELS, DocumentStore, parseFile, importFile, removeFile,
-  docxToText, readZipEntries, xmlToText,
+  LEVELS, MAX_BYTES, DocumentStore, parseFile, parseBuffer, importFile, importBuffer, removeFile,
+  docxToText, readZipEntries, xmlToText, assertBufferSafe,
 };

@@ -11,7 +11,8 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
-const { DocumentStore } = require('./src/ingest.cjs');
+const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
+const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
 
 // 手机确认端从局域网接入时，只开放这些路径；其余一律 403，避免把整个控制台暴露给会场 Wi-Fi
@@ -195,6 +196,32 @@ function createConsoleServer({
       }
       if (pathname === '/api/commands' && method === 'GET') {
         return sendJson(res, 200, { ok: true, items: service.runs.slice(0, 50) });
+      }
+      // 浏览器上传导入：请求体为 base64，服务端做扩展名白名单 + 魔数/编码嗅探 + 大小上限
+      if (pathname === '/api/documents/import' && method === 'POST') {
+        if (!service.documentsStore) {
+          throw new ConsoleError('CONFLICT', '文档库未启用：请用 npm start 启动（内存模式不接导入）', 409);
+        }
+        const body = await readJson(req, 8 * 1024 * 1024);
+        const filename = typeof body.filename === 'string' ? body.filename : '';
+        const contentBase64 = typeof body.contentBase64 === 'string' ? body.contentBase64 : '';
+        if (!contentBase64) throw new ConsoleError('BAD_REQUEST', '缺少 contentBase64');
+        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(contentBase64)) {
+          throw new ConsoleError('BAD_REQUEST', 'contentBase64 不是合法 base64');
+        }
+        try {
+          const doc = importBuffer(service.documentsStore, {
+            filename, buffer: Buffer.from(contentBase64, 'base64'), level: body.level,
+          });
+          // 立即并入文档视图，不用重启
+          registerDocuments([{ id: doc.id, title: doc.title, level: doc.level, body: doc.body }]);
+          return sendJson(res, 200, {
+            ok: true,
+            document: { id: doc.id, title: doc.title, level: doc.level, bytes: Buffer.byteLength(doc.body, 'utf8') },
+          });
+        } catch (err) {
+          throw new ConsoleError('BAD_REQUEST', err && err.message ? err.message : '导入失败', 400);
+        }
       }
       if (pathname === '/api/documents' && method === 'GET') {
         return sendJson(res, 200, { ok: true, items: service.listDocuments() });
