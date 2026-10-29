@@ -34,17 +34,30 @@ function findEocd(buffer) {
   return -1;
 }
 
+// 压缩炸弹防线：小文件可以解出几百 MB，必须在解压前按"声明大小"卡住
+const ZIP_LIMITS = {
+  entries: 200,
+  entryBytes: 10 * 1024 * 1024,
+  totalBytes: 20 * 1024 * 1024,
+};
+
 // 返回 Map<name, Buffer>：只解压未加密的 stored/deflate 条目
-function readZipEntries(buffer) {
+// only 给定时只解压该条目（docx 只关心 word/document.xml），其余只做限额检查
+function readZipEntries(buffer, { only = null } = {}) {
   const eocd = findEocd(buffer);
   if (eocd < 0) throw new Error('不是合法的 ZIP/docx 文件');
   const count = buffer.readUInt16LE(eocd + 10);
+  if (count > ZIP_LIMITS.entries) {
+    throw new Error(`ZIP 条目过多（${count}），拒绝解析`);
+  }
   let offset = buffer.readUInt32LE(eocd + 16);
+  let declaredTotal = 0;
   const entries = new Map();
   for (let i = 0; i < count; i += 1) {
     if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== SIG_CENTRAL) break;
     const method = buffer.readUInt16LE(offset + 10);
     const compressedSize = buffer.readUInt32LE(offset + 20);
+    const declaredSize = buffer.readUInt32LE(offset + 24);   // 中央目录里声明的解压后大小
     const nameLen = buffer.readUInt16LE(offset + 28);
     const extraLen = buffer.readUInt16LE(offset + 30);
     const commentLen = buffer.readUInt16LE(offset + 32);
@@ -52,14 +65,31 @@ function readZipEntries(buffer) {
     const name = buffer.toString('utf8', offset + 46, offset + 46 + nameLen);
     offset += 46 + nameLen + extraLen + commentLen;
 
+    if (declaredSize > ZIP_LIMITS.entryBytes) {
+      throw new Error(`ZIP 条目「${name}」声明解压后 ${declaredSize} 字节，超出上限，疑似压缩炸弹`);
+    }
+    declaredTotal += declaredSize;
+    if (declaredTotal > ZIP_LIMITS.totalBytes) {
+      throw new Error('ZIP 声明解压总量超出上限，疑似压缩炸弹');
+    }
+    if (only && name !== only) continue;
+
     if (buffer.readUInt32LE(localOffset) !== SIG_LOCAL) continue;
     const localNameLen = buffer.readUInt16LE(localOffset + 26);
     const localExtraLen = buffer.readUInt16LE(localOffset + 28);
     const start = localOffset + 30 + localNameLen + localExtraLen;
     const data = buffer.subarray(start, start + compressedSize);
     try {
-      entries.set(name, method === 0 ? Buffer.from(data) : zlib.inflateRawSync(data));
-    } catch { /* 损坏条目跳过，别让整份文件失败 */ }
+      // 双保险：即使中央目录谎报大小，解压时也会被硬性截断
+      entries.set(name, method === 0
+        ? Buffer.from(data)
+        : zlib.inflateRawSync(data, { maxOutputLength: ZIP_LIMITS.entryBytes }));
+    } catch (err) {
+      if (err && (err.code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError)) {
+        throw new Error(`ZIP 条目「${name}」解压后超出上限，疑似压缩炸弹`);
+      }
+      /* 损坏条目跳过，别让整份文件失败 */
+    }
   }
   return entries;
 }
@@ -87,7 +117,8 @@ function xmlToText(xml) {
 }
 
 function docxToText(buffer) {
-  const entries = readZipEntries(buffer);
+  // 只解压正文条目；其余条目仍经过限额检查，但不会占用内存
+  const entries = readZipEntries(buffer, { only: 'word/document.xml' });
   const main = entries.get('word/document.xml');
   if (!main) throw new Error('docx 里找不到 word/document.xml');
   return xmlToText(main.toString('utf8')).replace(/\n{3,}/g, '\n\n').trim();

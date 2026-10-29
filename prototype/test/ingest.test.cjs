@@ -227,3 +227,28 @@ test('上传：不合规的文件一律 400，且不落库', async (t) => {
   }
   assert.equal(store.list().length, 0, '被拒绝的文件不能落库');
 });
+
+// ---------- 压缩炸弹防线 ----------
+test('压缩炸弹：声明解压后超限 → 拒绝解析', () => {
+  const big = Buffer.alloc(11 * 1024 * 1024, 0x61);
+  const zip = buildZip({ 'word/document.xml': big });
+  assert.throws(() => docxToText(zip), /压缩炸弹/);
+});
+
+test('压缩炸弹：谎报声明大小 → 解压时被硬性截断', () => {
+  const big = Buffer.alloc(11 * 1024 * 1024, 0x61);
+  const zip = buildZip({ 'word/document.xml': big });
+  // 把声明大小改成 100 字节，看解压阶段能不能兜住
+  zip.writeUInt32LE(100, 22);
+  const central = zip.readUInt32LE(zip.length - 22 + 16);
+  zip.writeUInt32LE(100, central + 24);
+
+  assert.throws(() => docxToText(zip), /压缩炸弹|超出上限/);
+});
+
+test('ZIP 条目过多 → 拒绝解析', () => {
+  const files = {};
+  for (let i = 0; i < 201; i += 1) files[`part${i}.xml`] = Buffer.from('<x/>');
+  const zip = buildZip(files);
+  assert.throws(() => docxToText(zip), /条目过多/);
+});
