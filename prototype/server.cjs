@@ -12,6 +12,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
+const { BlobStore } = require('./src/blob-store.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
 
@@ -71,6 +72,16 @@ function sendJson(res, status, payload) {
   res.setHeader('Cache-Control', 'no-store');
   res.statusCode = status;
   res.end(JSON.stringify(payload));
+}
+
+function sendBinary(res, buffer, { filename = 'attachment', mime = 'application/octet-stream' } = {}) {
+  const encoded = encodeURIComponent(filename);
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encoded}`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.statusCode = 200;
+  res.end(buffer);
 }
 
 function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
@@ -255,6 +266,13 @@ function createConsoleServer({
       if (opBody && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getOperationBody(decodeURIComponent(opBody[1])) });
       }
+      const opAttachment = pathname.match(/^\/api\/operations\/([^/]+)\/attachments\/([^/]+)$/);
+      if (opAttachment && method === 'GET') {
+        const file = service.getAttachment(
+          decodeURIComponent(opAttachment[1]), decodeURIComponent(opAttachment[2]),
+        );
+        return sendBinary(res, file.content, { filename: file.name, mime: file.mime });
+      }
       const opChallenge = pathname.match(/^\/api\/operations\/([^/]+)\/challenge$/);
       if (opChallenge && method === 'POST') {
         return sendJson(res, 200, { ok: true, challenge: service.beginChallenge(decodeURIComponent(opChallenge[1])) });
@@ -360,6 +378,7 @@ async function startServer({
   publicDir,
   pairingCode = null,
   documentsStore = null,
+  blobStore = null,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -375,9 +394,10 @@ async function startServer({
         deviceLabel: '手机确认端（演示）',
         pairingCode,
         documentsStore,
+        blobStore,
       });
     } else {
-      instance = new ConsoleService({ documentsStore });
+      instance = new ConsoleService({ documentsStore, blobStore });
     }
   }
   const server = createConsoleServer({ service: instance, publicDir });
@@ -396,6 +416,7 @@ async function startServer({
           server.close(() => {
             instance.close();
             try { if (documentsStore) documentsStore.close(); } catch { /* ignore */ }
+            try { if (blobStore) blobStore.close(); } catch { /* ignore */ }
             done();
           });
         }),
@@ -420,12 +441,22 @@ if (require.main === module) {
   } catch (err) {
     console.warn(`⚠ 文档库打不开（${documentsDb}）：${err.message}；本次只用样例文档`);
   }
+  // 附件内容：默认落在 prototype/data/attachments.db（已 gitignore）
+  const attachmentsDb = process.env.SAFE_OFFICE_ATTACHMENTS_DB
+    || path.join(__dirname, 'data', 'attachments.db');
+  let blobStore = null;
+  try {
+    blobStore = new BlobStore(attachmentsDb);
+  } catch (err) {
+    console.warn(`⚠ 附件库打不开（${attachmentsDb}）：${err.message}；本次不能带附件`);
+  }
   startServer({
     port: Number(process.env.PORT) || 7812,
     host: lan ? '0.0.0.0' : '127.0.0.1',
     allowLan: lan,
     pairingCode,
     documentsStore,
+    blobStore,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);

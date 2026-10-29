@@ -89,6 +89,9 @@
       <div class="op-head"><span class="tag">${esc(op.protocolLabel)}</span><strong>${esc(op.subject)}</strong>${badge(op.state)}${op.expired ? '<span class="badge block">已过期</span>' : ''}</div>
       <div class="op-meta">目标：${esc(op.recipient)} · 密级：${esc(op.level)} · ${confirmationLabel(op)}</div>
       <div class="op-hash">operationHash ${esc(short(op.operationHash, 28))} · ${op.outbox ? `outbox ${esc(statusText[op.outbox.state] || op.outbox.state)}` : '暂无 outbox'}</div>
+      ${op.attachments && op.attachments.length ? `<div class="op-meta">附件（${op.attachments.length}）：${op.attachments.map((a) => (EXPORTABLE.has(op.state)
+        ? `<a href="/api/operations/${encodeURIComponent(op.operationId)}/attachments/${esc(a.sha256)}" download="${esc(a.name)}">${esc(a.name)}</a>`
+        : esc(a.name))).join('、')}</div>` : ''}
       <div class="op-actions">
         ${op.state === 'frozen' ? `<button class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}">发起 WS63 确认</button><button class="btn ghost small" data-op-action="reject" data-id="${esc(op.operationId)}">拒绝</button>` : ''}
         ${op.state === 'confirmed' ? `<button class="btn small" data-op-action="send" data-id="${esc(op.operationId)}">发送/执行</button>` : ''}
@@ -272,6 +275,7 @@
           <div class="full"><label class="label">指令</label><textarea class="textarea" id="cmd-text">${esc(text)}</textarea></div>
           <div class="full"><label class="label">允许工具</label><div class="checks" id="cmd-tools">${b.tools.map((t) => `<label class="check"><input type="checkbox" value="${esc(t.name)}" ${tools.includes(t.name) ? 'checked' : ''}> ${esc(t.name)} <span class="muted">${esc(t.level)}</span></label>`).join('')}</div></div>
           <div class="full"><label class="label">授权文档</label><div class="checks" id="cmd-docs">${b.documents.map((d) => `<label class="check"><input type="checkbox" value="${esc(d.id)}" ${docs.includes(d.id) ? 'checked' : ''}> ${esc(d.id)} ${esc(d.title)} <span class="muted">${esc(d.level)}</span></label>`).join('')}</div></div>
+          <div class="full"><label class="label">附件（最多 5 个，单个 ≤5MB；随外发邮件一起冻结）</label><input type="file" id="cmd-files" multiple /></div>
           <div><label class="label">外部域名（逗号分隔）</label><input class="input" id="cmd-domains" value="${esc(domains)}" placeholder="partner-example.com"></div>
           <div><label class="label">调用上限（空=不限）</label><input class="input" id="cmd-max" type="number" min="1" value="${esc(maxCalls)}"></div>
           <div><label class="label">沙箱</label><select class="select" id="cmd-sandbox"><option value="default" ${sandbox === 'default' ? 'selected' : ''}>默认沙箱（物理通道关闭）</option><option value="physical" ${sandbox === 'physical' ? 'selected' : ''}>开放物理通道</option></select></div>
@@ -300,7 +304,19 @@
       const btn = ev.currentTarget;
       btn.disabled = true;
       try {
-        const run = await c.runCommand(collect());
+        const picked = [...(root.querySelector('#cmd-files').files || [])].slice(0, 5);
+        const attachments = [];
+        for (const file of picked) {
+          if (file.size > 5 * 1024 * 1024) throw new Error(`附件「${file.name}」超过 5MB`);
+          attachments.push({
+            filename: file.name,
+            mime: file.type || 'application/octet-stream',
+            contentBase64: await fileToBase64(file),
+          });
+        }
+        const payload = collect();
+        if (attachments.length) payload.attachments = attachments;
+        const run = await c.runCommand(payload);
         const target = root.querySelector('#cmd-result');
         target.innerHTML = renderRun(run);
         bindOpActions(root, c);

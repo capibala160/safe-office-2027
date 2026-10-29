@@ -24,6 +24,7 @@ const { CAPABILITIES, RISK_LEVELS } = require('./capabilities.cjs');
 const { ToolRegistry } = require('./tool-registry.cjs');
 const { redact } = require('./guard.cjs');
 const { OperationStore } = require('./store.cjs');
+const { BlobStore } = require('./blob-store.cjs');
 const { FulfillmentService } = require('./fulfillment.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer } = require('./mailer.cjs');
@@ -101,6 +102,7 @@ class ConsoleService {
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
     auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
     documentsStore = null,
+    blobStore = null,
   } = {}) {
     this.now = now;
     this.pairingCode = pairingCode ? String(pairingCode) : null;
@@ -108,6 +110,8 @@ class ConsoleService {
     // 模型与持久化：默认全内存（测试/演示不变）；给了路径才落盘
     this._injectedLlm = llm;
     this.documentsStore = documentsStore;   // 导入的真实资料（null = 只有样例）
+    this._ownsBlobStore = !blobStore;
+    this.blobStore = blobStore || new BlobStore(':memory:');  // 附件内容（按 sha256 寻址）
     this.storeFile = storeFile || ':memory:';
     this.auditFile = auditFile || null;
     this.auditCheckpointFile = this.auditFile ? `${this.auditFile}.head` : null;
@@ -531,7 +535,52 @@ class ConsoleService {
       commandLevel: input.commandLevel || '内部',
       nearfieldOnline: !!input.nearfieldOnline,
       sandboxPreset,
+      attachments: this._parseAttachments(input.attachments),
     };
+  }
+
+  // 附件：最多 5 个、单个 ≤5MB、总计 ≤10MB；内容按 sha256 存，冻结记录只留元数据
+  _parseAttachments(list) {
+    if (list === undefined || list === null) return [];
+    if (!Array.isArray(list)) throw new ConsoleError('BAD_REQUEST', 'attachments 必须是数组');
+    if (list.length > 5) throw new ConsoleError('BAD_REQUEST', '附件最多 5 个');
+    let total = 0;
+    return list.map((item, index) => {
+      const name = item && typeof item.filename === 'string' ? item.filename.trim() : '';
+      const base64 = item && typeof item.contentBase64 === 'string' ? item.contentBase64 : '';
+      if (!name) throw new ConsoleError('BAD_REQUEST', `attachments[${index}] 缺少文件名`);
+      if (!base64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
+        throw new ConsoleError('BAD_REQUEST', `attachments[${index}] 的 contentBase64 非法`);
+      }
+      const buffer = Buffer.from(base64, 'base64');
+      total += buffer.length;
+      if (total > 10 * 1024 * 1024) throw new ConsoleError('BAD_REQUEST', '附件总大小超过 10MB');
+      try {
+        return this.blobStore.put(buffer, {
+          name, mime: (item && typeof item.mime === 'string' && item.mime) || 'application/octet-stream',
+        });
+      } catch (err) {
+        throw new ConsoleError('BAD_REQUEST', `attachments[${index}]：${err.message}`);
+      }
+    });
+  }
+
+  // 执行前校验：附件内容必须还在，且哈希与冻结记录一致
+  _assertAttachmentsIntact(operation) {
+    for (const attachment of (operation && operation.attachments) || []) {
+      const blob = this.blobStore.get(attachment.sha256);
+      if (!blob) {
+        throw new ConsoleError('CONFLICT', `附件「${attachment.name}」内容缺失，拒绝执行`, 409);
+      }
+      if (sha256Hex(blob.content) !== attachment.sha256) {
+        throw new ConsoleError('CONFLICT', `附件「${attachment.name}」内容与冻结记录不符，拒绝执行`, 409);
+      }
+    }
+  }
+
+  async _sendChecked(operation, outboxId) {
+    this._assertAttachmentsIntact(operation);
+    return this.fulfillment.send(outboxId);
   }
 
   _issueAgentAndToken({ command, role, tools, documentIds, domains, maxCalls, modelLocation }) {
@@ -603,7 +652,7 @@ class ConsoleService {
 
     const operations = [];
     for (const descriptor of deferred) {
-      const operation = this._freezeDeferred(runId, descriptor, auditStart);
+      const operation = this._freezeDeferred(runId, descriptor, auditStart, options.attachments);
       const autoMode = this._autoDecision(descriptor.action, operation);
       if (autoMode) {
         try {
@@ -612,7 +661,7 @@ class ConsoleService {
             confirmationId: autoMode,
             deviceId: autoMode === 'auto-full' ? 'auto-full' : 'policy-auto-safe',
           });
-          const sent = await this.fulfillment.send(confirmed.outbox.outboxId);
+          const sent = await this._sendChecked(operation, confirmed.outbox.outboxId);
           if (this.toolRegistry.isHighRisk(descriptor.action)) {
             this.risk.observe({ kind: 'executed-high-risk', action: descriptor.action });
           }
@@ -635,7 +684,7 @@ class ConsoleService {
             confirmationId: 'policy-auto',
             deviceId: 'policy-engine',
           });
-          const sent = await this.fulfillment.send(confirmed.outbox.outboxId);
+          const sent = await this._sendChecked(operation, confirmed.outbox.outboxId);
           lines.push(`  〔闭环〕${descriptor.action} ${operation.operationId.slice(0, 8)}… 策略自动确认 → ${sent.state}`);
         } catch (err) {
           lines.push(`  〔闭环〕⛔ ${descriptor.action} 自动确认失败：${err.message}`);
@@ -671,7 +720,7 @@ class ConsoleService {
     return { ok: true, ...run };
   }
 
-  _freezeDeferred(runId, d, auditStart) {
+  _freezeDeferred(runId, d, auditStart, attachments = []) {
     const action = d.action;
     const protocolAction = this.toolRegistry.protocolAction(action);
     if (!protocolAction) {
@@ -701,7 +750,7 @@ class ConsoleService {
       recipient: recipient || '（未指定）',
       subject: subject.slice(0, 160),
       body: body || `（${action}）`,
-      attachments: [],
+      attachments: isEmail ? attachments.map((a) => ({ name: a.name, sha256: a.sha256, size: a.size })) : [],
       sourceDocIds,
       level: d.docLevel || '内部',
       createdAt: this._iso(),
@@ -789,6 +838,26 @@ class ConsoleService {
     };
   }
 
+  // 下载已批准操作的附件：先验冻结记录，再验内容哈希
+  getAttachment(id, sha256) {
+    const operation = this.store.getOperation(id);
+    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+    if (!['confirmed', 'executing', 'executed', 'failed'].includes(operation.state)) {
+      throw new ConsoleError('CONFLICT', '操作尚未批准，不能下载附件', 409);
+    }
+    const check = verifyOperation(operation);
+    if (!check.ok) throw new ConsoleError('CONFLICT', `冻结记录校验失败：${check.reason}`, 409);
+    const target = (operation.attachments || []).find((a) => a.sha256 === String(sha256 || '').toLowerCase());
+    if (!target) throw new ConsoleError('NOT_FOUND', '该操作没有这个附件', 404);
+    const blob = this.blobStore.get(target.sha256);
+    if (!blob) throw new ConsoleError('CONFLICT', '附件内容缺失', 409);
+    if (sha256Hex(blob.content) !== target.sha256) {
+      throw new ConsoleError('CONFLICT', '附件内容与冻结记录不符', 409);
+    }
+    this.audit.append('下载附件', { operationId: id, sha256: target.sha256 });
+    return { name: target.name, mime: blob.mime, size: blob.size, content: blob.content };
+  }
+
   getOperation(id) {
     const operation = this.store.getOperation(id);
     if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
@@ -821,6 +890,7 @@ class ConsoleService {
       subject: operation.subject,
       level: operation.level,
       sourceDocIds: operation.sourceDocIds,
+      attachments: operation.attachments,
       state: operation.state,
       createdAt: operation.createdAt,
       expiresAt: operation.expiresAt,
@@ -866,7 +936,7 @@ class ConsoleService {
     if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
     const outbox = this.store.getOutboxByOperation(id);
     if (!outbox) throw new ConsoleError('CONFLICT', '操作还没有 outbox；请先完成确认', 409);
-    const sent = await this.fulfillment.send(outbox.outboxId);
+    const sent = await this._sendChecked(operation, outbox.outboxId);
     return {
       ok: true,
       send: sent,
@@ -1059,7 +1129,7 @@ class ConsoleService {
         deviceId: this.deviceLabel,
         confirmationId: approval.confirmationId,
       });
-      const sent = await this.fulfillment.send(confirmed.outbox.outboxId);
+      const sent = await this._sendChecked(operation, confirmed.outbox.outboxId);
       if (this.toolRegistry.isHighRisk(operation.action)) {
         this.risk.observe({ kind: 'executed-high-risk', action: operation.action });
       }
@@ -1421,6 +1491,8 @@ class ConsoleService {
   reset() {
     this.generation += 1;  // 工作区换版：在途运行的结果一律作废
     this.close();
+    // close() 关掉了自带的附件库；重置后要重新建一个空的
+    if (this._ownsBlobStore) this.blobStore = new BlobStore(':memory:');
     this._clearPersistentFiles();
     this.seq = 0;
     this.agentSeq = 0;
@@ -1445,6 +1517,9 @@ class ConsoleService {
     this.closed = true;
     this._saveAudit();
     try { this.store.close(); } catch { /* ignore */ }
+    if (this._ownsBlobStore) {
+      try { this.blobStore.close(); } catch { /* ignore */ }
+    }
   }
 }
 
