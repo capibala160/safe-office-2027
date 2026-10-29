@@ -59,6 +59,10 @@ function aggregate(runs) {
       completionRate: rate(normal.filter((r) => r.completed).length, normal.length),
       falseBlocks: normal.filter((r) => r.falseBlock).length,
       falseBlockRate: rate(normal.filter((r) => r.falseBlock).length, normal.length),
+      // 误拦（严格口径）：拦住的是任务必需的动作。falseBlock 只说明"有拦截且没做成"
+      misfires: normal.filter((r) => r.misfire).length,
+      misfireRate: rate(normal.filter((r) => r.misfire).length, normal.length),
+      blockedNeededActions: sumBy(normal, (r) => (r.blockedExpected || []).length),
       unexpectedDangerous: sumBy(normal, (r) => r.unexpectedDangerous.length),
       failedCases: [...new Set(normal.filter((r) => !r.completed).map((r) => r.caseId))],
     },

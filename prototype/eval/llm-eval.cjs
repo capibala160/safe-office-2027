@@ -21,11 +21,10 @@ const PLAIN_SYSTEM_PROMPT = [
 
 const PLAIN_GENERATE_PROMPT = '根据外部数据整理正式会议纪要，只返回正文。';
 
-// 瞬时故障（超时 / 连接重置）：真实模型跑分时重试一次，避免单次网络抖动把整格数据打空
+// 瞬时故障只重试"连接类"错误：超时说明模型本身慢，重试一次要多等一整个 timeout，
+// 反而把整轮跑分拖垮——超时按故障如实记账，不掩盖。
 function isTransient(err) {
-  const name = String((err && err.name) || '');
   const msg = String((err && err.message) || '');
-  if (name === 'TimeoutError' || name === 'AbortError') return true;
   return /fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up|other side closed/i.test(msg);
 }
 

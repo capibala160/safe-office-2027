@@ -9,6 +9,7 @@
 //   node eval/run.cjs                          # 离线机制验证（Mock，默认）
 //   node eval/run.cjs --llm=http --repeat=3    # 真实模型（需 env 配置）
 // ============================================================
+const fs = require('node:fs');
 const { join, resolve } = require('node:path');
 const { loadConfigFile } = require('../src/load-config.cjs');
 const { CASES, CORPUS_VERSION } = require('./corpus.cjs');
@@ -18,11 +19,12 @@ const { makeLLMFactory } = require('./llm-eval.cjs');
 const { printConsole, writeEvalReport, writeEvalJson, buildMeta } = require('./report.cjs');
 
 function parseArgs(argv) {
-  const opts = { llm: 'mock', repeat: 1, tiers: TIERS.slice(), split: 'all', out: join(__dirname, '..', 'out', 'eval') };
+  const opts = { llm: 'mock', repeat: 1, tiers: TIERS.slice(), split: 'all', resume: false, out: join(__dirname, '..', 'out', 'eval') };
   for (const arg of argv.slice(2)) {
     const m = arg.match(/^--([^=]+)=(.*)$/);
     if (!m) {
       if (arg === '--help' || arg === '-h') opts.help = true;
+      else if (arg === '--resume') opts.resume = true;
       else throw new Error(`无法识别的参数：${arg}`);
       continue;
     }
@@ -69,11 +71,31 @@ const HELP = `
   if (opts.llm === 'http') loadConfigFile(join(__dirname, '..', 'config.env'));
 
   const { kind, factory, modelName } = makeLLMFactory({ kind: opts.llm });
-  const runs = await runAll({ llmForTier: factory, cases, tiers: opts.tiers, repeats: opts.repeat });
-  const matrix = aggregateMatrix(runs);
   const meta = buildMeta({
     llmKind: kind, modelName, repeats: opts.repeat, corpusVersion: CORPUS_VERSION, cases, split: opts.split,
   });
+  // 逐条落盘：真实模型一轮几十分钟，断电/崩溃时 partial 文件仍可用
+  const partialPath = join(opts.out, 'eval-partial.json');
+  // 断点续跑：复用上一次 partial 里"已完成且无故障"的样本；repeat>1 时不做（分不清第几轮）
+  const priorRuns = new Map();
+  if (opts.resume && opts.repeat === 1 && fs.existsSync(partialPath)) {
+    try {
+      const prior = JSON.parse(fs.readFileSync(partialPath, 'utf8'));
+      for (const row of prior.runs || []) {
+        if (!row.modelFault) priorRuns.set(`${row.tier}|${row.caseId}|0`, row);
+      }
+      console.log(`  续跑：复用已完成样本 ${priorRuns.size} 条（故障样本重跑）`);
+    } catch { /* partial 坏了就当没有 */ }
+  }
+  const runs = await runAll({
+    llmForTier: factory,
+    cases,
+    tiers: opts.tiers,
+    repeats: opts.repeat,
+    priorRuns,
+    onRun: (acc) => writeEvalJson(partialPath, { runs: acc, matrix: aggregateMatrix(acc), meta }),
+  });
+  const matrix = aggregateMatrix(runs);
 
   const htmlPath = writeEvalReport(join(opts.out, 'eval-report.html'), { runs, matrix, meta });
   const jsonPath = writeEvalJson(join(opts.out, 'eval-results.json'), { runs, matrix, meta });
