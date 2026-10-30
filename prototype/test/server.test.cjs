@@ -39,7 +39,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.29.0');
+  assert.equal(data.version, '0.30.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -356,6 +356,8 @@ test('登录：未登录 401 / 未登录页面 302 / 登录后可访问 / 角色
 
   const authed = await fetch(`${started.url}/api/bootstrap`, { headers: { Cookie: cookie } });
   assert.equal(authed.status, 200);
+  const bootData = await authed.json();
+  assert.deepEqual(bootData.authUser, { username: 'alice', role: '员工' });
 
   const mismatch = await fetch(`${started.url}/api/commands`, {
     method: 'POST',
@@ -417,6 +419,16 @@ test('接口权限：访客不能审批/改模式/复核/重置；员工可发�
     body: JSON.stringify({ outcome: 'clear' }),
   });
   assert.equal(reviewAsVisitor.status, 403);
+
+  // 读取面：访客不能看审计/报告/操作/文档；员工不能看审计/报告；审计员可以
+  for (const path of ['/api/audit', '/api/report', '/api/operations', '/api/documents']) {
+    const r = await fetch(`${started.url}${path}`, { headers: { Cookie: cookie('visitor') } });
+    assert.equal(r.status, 403, `访客不应能读 ${path}`);
+  }
+  assert.equal((await fetch(`${started.url}/api/operations`, { headers: { Cookie: cookie('emp') } })).status, 200);
+  assert.equal((await fetch(`${started.url}/api/audit`, { headers: { Cookie: cookie('emp') } })).status, 403);
+  assert.equal((await fetch(`${started.url}/api/audit`, { headers: { Cookie: cookie('auditor') } })).status, 200);
+  assert.equal((await fetch(`${started.url}/api/report`, { headers: { Cookie: cookie('auditor') } })).status, 200);
 
   const challenge = await fetch(`${started.url}/api/operations/${op.operationId}/challenge`, {
     method: 'POST', headers: { Cookie: cookie('emp') },

@@ -16,6 +16,7 @@ const { CASES, CORPUS_VERSION } = require('./corpus.cjs');
 const { runAll, TIERS } = require('./harness.cjs');
 const { aggregateMatrix } = require('./metrics.cjs');
 const { makeLLMFactory } = require('./llm-eval.cjs');
+const { experimentFingerprint } = require('./fingerprint.cjs');
 const { ABLATION_IDS, parseAblationList, runAblations } = require('./ablation.cjs');
 const { printConsole, writeEvalReport, writeEvalJson, buildMeta } = require('./report.cjs');
 

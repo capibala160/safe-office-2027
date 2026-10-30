@@ -38,6 +38,8 @@ test('UI：登录 → 运行样例 → 打开审批页 → 退出', { timeout: 9
   await page.waitForURL((url) => !url.pathname.endsWith('/login.html'));
   await page.waitForSelector('#current-user:not([hidden])');
   assert.match(await page.textContent('#current-user'), /alice/);
+  assert.equal(await page.locator('#role-select').isDisabled(), true, '登录角色应锁定');
+  assert.equal(await page.inputValue('#role-select'), '员工');
 
   // 工作台一键样例：内网纪要（FakeMailer，不会真发）
   await page.waitForSelector('[data-sample="normal-minutes"]');

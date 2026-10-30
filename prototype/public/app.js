@@ -141,8 +141,13 @@
     const select = document.getElementById('role-select');
     if (!select || !store.bootstrap) return;
     const roles = store.bootstrap.roles || [];
+    const locked = store.bootstrap.authUser || null;
+    if (locked) store.role = locked.role;
     if (!roles.some((r) => r.name === store.role)) store.role = roles[0] ? roles[0].name : '员工';
     select.innerHTML = roles.map((r) => `<option value="${esc(r.name)}" ${r.name === store.role ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
+    // 登录后角色由会话绑定，不能靠下拉切换（服务端也会 403）
+    select.disabled = !!locked;
+    select.title = locked ? `已登录为「${locked.role}」，角色已锁定` : '';
   }
 
   // 顶栏模型状态以服务端实际部署为准（配置了真实模型就不能再显示"本地 Mock"）

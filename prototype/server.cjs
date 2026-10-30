@@ -237,6 +237,8 @@ function createConsoleServer({
   const ROLE_ADMIN = new Set(['管理员']);
   const ROLE_REVIEW = new Set(['管理员', '审计员']);
   const ROLE_DOC_READ = new Set(['员工', '管理员', '审计员']);
+  const ROLE_STAFF = ROLE_DOC_READ;
+  const ROLE_AUDIT = new Set(['管理员', '审计员']);
   function requireRole(req, roles, action) {
     if (!auth) return; // 未启用登录：保持本地演示行为
     if (!req.user) throw new ConsoleError('AUTH_REQUIRED', '请先登录', 401);
@@ -360,10 +362,10 @@ function createConsoleServer({
         });
       }
       if (pathname === '/api/bootstrap' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, ...service.getBootstrap() });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getBootstrap() });
       }
       if (pathname === '/api/state' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, ...service.getState() });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getState() });
       }
       if (pathname === '/api/commands' && method === 'POST') {
         const body = await readJson(req, commandBodyLimit);
@@ -419,30 +421,38 @@ function createConsoleServer({
         }
       }
       if (pathname === '/api/documents' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取文档列表');
         return sendJson(res, 200, { ok: true, items: service.listDocuments() });
       }
       const docMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
+      if (docMatch) requireRole(req, ROLE_STAFF, '读取文档');
       if (docMatch && method === 'GET') {
         return sendJson(res, 200, { ok: true, document: service.getDocument(decodeURIComponent(docMatch[1])) });
       }
       if (pathname === '/api/emails' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取邮件列表');
         return sendJson(res, 200, { ok: true, ...service.listEmails() });
       }
       const outboxMatch = pathname.match(/^\/api\/outbox\/([^/]+)\/reconcile$/);
+      if (outboxMatch) requireRole(req, ROLE_STAFF, '核对发件');
       if (outboxMatch && method === 'POST') {
         const body = await readJson(req);
         return sendJson(res, 200, service.reconcileOutbox(decodeURIComponent(outboxMatch[1]), body));
       }
       if (pathname === '/api/calendar' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取日历');
         return sendJson(res, 200, { ok: true, items: service.listCalendar() });
       }
       if (pathname === '/api/contacts' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取通讯录');
         return sendJson(res, 200, { ok: true, items: service.listContacts() });
       }
       if (pathname === '/api/operations' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取操作列表');
         return sendJson(res, 200, { ok: true, ...service.listOperations({ state: query.get('state') || null }) });
       }
       const opMatch = pathname.match(/^\/api\/operations\/([^/]+)$/);
+      if (opMatch) requireRole(req, ROLE_STAFF, '读取操作详情');
       if (opMatch && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getOperation(decodeURIComponent(opMatch[1])) });
       }
@@ -552,6 +562,7 @@ function createConsoleServer({
         return sendJson(res, 200, service.replayLastDecision());
       }
       if (pathname === '/api/governance' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取治理数据');
         return sendJson(res, 200, { ok: true, ...service.getGovernance() });
       }
       if (pathname === '/api/governance/review' && method === 'POST') {
@@ -564,6 +575,7 @@ function createConsoleServer({
         return sendJson(res, 200, service.auditTamperDemo());
       }
       if (pathname === '/api/audit' && method === 'GET') {
+        requireRole(req, ROLE_AUDIT, '读取审计日志');
         return sendJson(res, 200, service.listAudit({
           after: query.get('after') || 0,
           limit: query.get('limit') || 100,
@@ -571,6 +583,7 @@ function createConsoleServer({
         }));
       }
       if (pathname === '/api/report' && method === 'GET') {
+        requireRole(req, ROLE_AUDIT, '导出治理报告');
         return sendHtml(res, 200, service.getReport());
       }
       if (pathname === '/api/mode' && method === 'POST') {
