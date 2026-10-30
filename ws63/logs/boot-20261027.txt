@@ -1,0 +1,162 @@
+﻿OPEN 21:59:39  COM11 115200
+boot.
+Flash Init Fail! ret = 0x80001341
+verify_public_rootkey secure verify disable!
+verify_params_key_area secure verify disable!
+verify_params_area_info secure verify disable!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+SSB Uart Init Succ!
+SSB Flash Init Succ!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+Flashboot Uart Init Succ!
+Flashboot Malloc Init Succ!
+Flash Init Succ!
+No need to fix SR!
+io level work in hw mode, level[chip]:0x33
+flashboot version : 1.10.102
+[UPG] upgrade init OK!
+No need to upgrade...
+flash_encrypt disable.
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+APP|dbg uart init ok.
+[UPG] upgrade init OK!
+APP|init_sle_mac failed!!! 
+APP|init_dev_addr, mac_addr:0xd2,0x 0,0x73,0x8b,0x**,0x**,
+xo_trim_temp_comp val:0 0
+los_at_plt_cmd_register EXCUTE
+APP|thread[11] func null
+Enter ADC_entry()!
+ID = 10568116, Create Task1_ID is OK!
+cpu 0 entering scheduler
+APP|btc open
+I2C SSD1306 Init succ!
+[RADAR_LOG] alg ctrl read from nv [1][2][0][0][1][1][20]
+device_main_init: 0!
+===hal_initialize_phy===226===
+device_module_init:: succ!
+cali_set_cali_mask:old[0x0] -> new[0x1fa2]
+
+fe_rf_initialize
+cali_offline_cali_entry enter
+cali_set_cali_done_flag:old[0x0] -> new[0x1]
+
+rf cali OK. time cost:22, ret:0
+adc_port_register_irq succeed: 0
+boot.
+Flash Init Fail! ret = 0x80001341
+verify_public_rootkey secure verify disable!
+verify_params_key_area secure verify disable!
+verify_params_area_info secure verify disable!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+SSB Uart Init Succ!
+SSB Flash Init Succ!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+Flashboot Uart Init Succ!
+Flashboot Malloc Init Succ!
+Flash Init Succ!
+No need to fix SR!
+io level work in hw mode, level[chip]:0x33
+flashboot version : 1.10.102
+[UPG] upgrade init OK!
+No need to upgrade...
+flash_encrypt disable.
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+APP|dbg uart init ok.
+[UPG] upgrade init OK!
+APP|init_sle_mac failed!!! 
+APP|init_dev_addr, mac_addr:0x37,0x 0,0x73,0x19,0x**,0x**,
+xo_trim_temp_comp val:0 0
+los_at_plt_cmd_register EXCUTE
+APP|thread[11] func null
+Enter ADC_entry()!
+ID = 10568116, Create Task1_ID is OK!
+cpu 0 entering scheduler
+APP|btc open
+I2C SSD1306 Init succ!
+[RADAR_LOG] alg ctrl read from nv [1][2][0][0][1][1][20]
+device_main_init: 0!
+===hal_initialize_phy===226===
+device_module_init:: succ!
+cali_set_cali_mask:old[0x0] -> new[0x1fa2]
+
+fe_rf_initialize
+cali_offline_cali_entry enter
+cali_set_cali_done_flag:old[0x0] -> new[0x1]
+
+rf cali OK. time cost:22, ret:0
+adc_port_register_irq succeed: 0
+boot.
+Flash Init Fail! ret = 0x80001341
+verify_public_rootkey secure verify disable!
+verify_params_key_area secure verify disable!
+verify_params_area_info secure verify disable!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+SSB Uart Init Succ!
+SSB Flash Init Succ!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+Flashboot Uart Init Succ!
+Flashboot Malloc Init Succ!
+Flash Init Succ!
+No need to fix SR!
+io level work in hw mode, level[chip]:0x33
+flashboot version : 1.10.102
+[UPG] upgrade init OK!
+No need to upgrade...
+flash_encrypt disable.
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+boot.
+Flash Init Fail! ret = 0x80001341
+verify_public_rootkey secure verify disable!
+verify_params_key_area secure verify disable!
+verify_params_area_info secure verify disable!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+SSB Uart Init Succ!
+SSB Flash Init Succ!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+Flashboot Uart Init Succ!
+Flashboot Malloc Init Succ!
+Flash Init Succ!
+No need to fix SR!
+io level work in hw mode, level[chip]:0x33
+flashboot version : 1.10.102
+[UPG] upgrade init OK!
+No need to upgrade...
+flash_encrypt disable.
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+APP|dbg uart init ok.
+[UPG] upgrade init OK!
+APP|init_sle_mac failed!!! 
+APP|init_dev_addr, mac_addr:0xdd,0x 0,0x73,0x53,0x**,0x**,
+xo_trim_temp_comp val:0 0
+los_at_plt_cmd_register EXCUTE
+APP|thread[11] func null
+Enter ADC_entry()!
+ID = 10568116, Create Task1_ID is OK!
+cpu 0 entering scheduler
+APP|btc open
+I2C SSD1306 Init succ!
+[RADAR_LOG] alg ctrl read from nv [1][2][0][0][1][1][20]
+device_main_init: 0!
+===hal_initialize_phy===226===
+device_module_init:: succ!
+cali_set_cali_mask:old[0x0] -> new[0x1fa2]
+
+fe_rf_initialize
+cali_offline_cali_entry enter
+cali_set_cali_done_flag:old[0x0] -> new[0x1]
+
+rf cali OK. time cost:22, ret:0
+adc_port_register_irq succeed: 0
+xo update temp:3,diff:0,xo:0x3083c
