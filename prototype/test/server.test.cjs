@@ -455,6 +455,9 @@ test('虚拟批准入口：allowVirtualConfirm=false 时设备助手也拿 409',
     body: JSON.stringify({ decision: 'approve' }),
   });
   assert.equal(res.status, 409);
+  const boot = await fetch(`${started.url}/api/bootstrap`, { headers: { Cookie: `sfc_session=${token}` } });
+  assert.equal(boot.status, 200);
+  assert.equal((await boot.json()).virtualConfirm, false, '前端应能感知虚拟批准已关闭');
 });
 
 test('坏 Cookie：不崩溃，返回 401/200', async (t) => {

@@ -360,10 +360,10 @@ function createConsoleServer({
         });
       }
       if (pathname === '/api/bootstrap' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.getBootstrap() });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, ...service.getBootstrap() });
       }
       if (pathname === '/api/state' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.getState() });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, ...service.getState() });
       }
       if (pathname === '/api/commands' && method === 'POST') {
         const body = await readJson(req, commandBodyLimit);
@@ -706,6 +706,10 @@ if (require.main === module) {
   } catch (err) {
     console.warn(`⚠ SMTP 配置不完整：${err.message}；本次使用模拟发送`);
   }
+  // 启用真实动作（SMTP / 真实打印机）时默认关闭虚拟设备批准入口
+  const allowVirtualConfirm = String(process.env.SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM || '').toLowerCase() === '1'
+    ? true
+    : !(smtpMailer || process.env.SAFE_OFFICE_PRINTER);
   let documentsStore = null;
   try {
     documentsStore = new DocumentStore(documentsDb);
@@ -733,10 +737,7 @@ if (require.main === module) {
     auditFile,
     mailer: smtpMailer || new FakeMailer(),
     auth,
-    // 启用真实动作（SMTP / 真实打印机）时默认关闭虚拟设备批准入口
-    allowVirtualConfirm: String(process.env.SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM || '').toLowerCase() === '1'
-      ? true
-      : !(smtpMailer || process.env.SAFE_OFFICE_PRINTER),
+    allowVirtualConfirm,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);
@@ -745,6 +746,11 @@ if (require.main === module) {
     if (smtpMailer) console.log('  邮件：SMTP 真实发送（收件人白名单已启用）');
     if (auth) console.log(`  登录：已启用（${auth.users.size} 个用户，${usersFile}）`);
     else console.log('  登录：未启用（本地演示；可用 add-user.cjs 建用户）');
+    if (!allowVirtualConfirm) {
+      console.log('  虚拟批准：已关闭（检测到真实动作）');
+      console.log('    高危确认请用手机确认端（npm run start:lan）');
+      console.log('    本机演示可显式打开：SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM=1 npm start');
+    }
     if (configInfo.loaded > 0) console.log(`  配置：config.env（${configInfo.loaded} 项）`);
     else if (!model.model) console.log('  提示：没有 config.env；想用真实模型，复制 config.env.example 再填');
     if (service.storeFile !== ':memory:') {
