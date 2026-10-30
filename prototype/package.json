@@ -1,6 +1,6 @@
 {
   "name": "safe-office-prototype",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "private": true,
   "description": "安全智慧办公 · Agent 安全运行机制核心原型 + 办公套件控制台（平台无关；上板时平移 ArkTS）",
   "scripts": {

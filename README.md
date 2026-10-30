@@ -1,5 +1,6 @@
 # 安全智慧办公（OpenHarmony × Agent 安全防护与治理）
 
+> **v0.27 MCP 真实联调（2026-10-30）**：仓库内新增 `mcp-server.cjs`（JSON-RPC，initialize/tools/list/tools/call，wordCount/echo，可选 token），现有 `McpClient` 走真实 HTTP 完成联调，并注册进 `ToolRegistry`（必须显式 sandbox + 角色策略）。**297 项 Node 测试全绿**。详见 [MCP 真实联调](docs/27-MCP真实联调.md)。
 > **v0.26 审计检查点签名（2026-10-30）**：审计检查点加 **HMAC-SHA256**（`SAFE_OFFICE_AUDIT_KEY`），并支持 `SAFE_OFFICE_AUDIT_CHECKPOINT` 放到独立路径/另一块盘；改 count/head、换链、丢 key 都会拒绝恢复（从新链开始并留痕）。**294 项 Node 测试全绿**。详见 [审计检查点签名](docs/26-审计检查点签名.md)。
 > **v0.25 登录 / 多用户（2026-10-30）**：控制台加用户名密码登录（scrypt 哈希、HttpOnly + SameSite=Strict 会话、8 小时滑动过期、登录 5 次/分钟限流）；登录角色绑定会话，命令里改角色会被 403；每条命令审计 `操作者`。用户表 `data/users.json`（gitignore），用 `add-user.cjs` 管理；本机已建 `alice`（员工）/`auditor`（审计员），初始密码在 `data/initial-users.txt`。**共享工作区，租户隔离未做**。**293 项 Node 测试全绿**。详见 [登录与多用户](docs/25-登录与多用户.md)。
 > **v0.24 附件安全（2026-10-30）**：附件上传/导入加**扩展名+魔数白名单**（拒可执行文件，改名也按魔数拦）、可选 **ClamAV**（off/auto/required，required 下无扫描器直接拒绝）、附件内容 **AES-256-GCM 落盘加密**（`SAFE_OFFICE_BLOB_KEY`，旧明文兼容）。**288 项 Node 测试全绿**。详见 [附件安全](docs/24-附件安全.md)。
@@ -30,7 +31,7 @@
 
 > **项目定位（2026-10-17 起）**：**4C 2027 物联网应用类（主参赛）+ 毕设**；以华为命题为设计参考，**不参加国创赛 2027**。原“小组任务协同 + 智能排期引擎”保留为 4C 备选。底座不再锁定 6.0.0.1：默认 **OpenHarmony 4.x/5.x 标准系统**；6.0.0.1 仅在借到对应板卡时作为可选上板目标。主线 = Node 参考实现 + 安全机制 + 评测 + **WS63 近场确认**；RK3568 主设备为可选项，不强制购买。
 > **底座（默认）**：OpenHarmony 4.x/5.x 标准系统（可选 6.0.0.1，以实际板卡/镜像为准）+ WS63 星闪节点（OH 轻量系统）
-> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.18 已跑通**：**294 测试全绿**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
+> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.18 已跑通**：**297 测试全绿**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
 
 ---
 
@@ -126,7 +127,7 @@
     │                                           console-service 控制台服务 / demo-executor 假执行器 /
     │                                           tool-registry 工具注册表 / mcp-adapter MCP 骨架 /
     │                                           faults 模型故障分类 / model-boundary 模型出口（目标占位符）/ perf 时延度量 / report 可视化 / scenario 场景
-    └── test/                                ← 294 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
+    └── test/                                ← 297 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
 ```
 
 ## 口径纪律
