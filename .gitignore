@@ -2,6 +2,7 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+/out/
 prototype/out/
 # 导入的真实资料（本地库，绝不入库）
 prototype/data/
