@@ -222,6 +222,11 @@ class DocumentStore {
     };
   }
 
+  delete(docId) {
+    const info = this.db.prepare('DELETE FROM documents WHERE doc_id = ?').run(String(docId));
+    return info.changes > 0;
+  }
+
   close() {
     try { this.db.close(); } catch { /* ignore */ }
   }

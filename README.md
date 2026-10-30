@@ -1,5 +1,6 @@
 # 安全智慧办公（OpenHarmony × Agent 安全防护与治理）
 
+> **v0.22 真实打印 + 真删除（2026-10-30）**：打印不再只是记录——`print-adapter.cjs` 通过 PowerShell `Out-Printer` 把冻结的正文送到 `SAFE_OFFICE_PRINTER`（本机 HP LaserJet，测试页已入队 Job Id 2），未配置则明确标 `simulated`；导入资料删除改为真删 `DocumentStore`，重启不复活。门锁/设备控制仍等 WS63。**282 项 Node 测试全绿**。详见 [真实动作适配器](docs/23-真实动作适配器.md)。
 > **v0.21 真实 SMTP 发送（2026-10-30）**：新增 `SMTPMailer`（nodemailer）+ `createSmtpMailerFromEnv`——**收件人白名单 fail-closed**、附件发送前按 sha256 取回内容、SMTP 错误按 rejected/unknown 分类（unknown 禁止自动重试）；`npm start` 检测到 SMTP 配置即切真实发送，否则仍用 FakeMailer。附 `send-test-mail.cjs` 连通性测试与 `config.env.example` 配置模板。**2026-10-30 已完成真实发送验证**：QQ 邮箱连通性测试 + 完整审批链带附件发送均成功（授权码只在本机 gitignore 的 `config.env`）。**276 项 Node 测试全绿**。详见 [真实 SMTP 发送](docs/22-真实SMTP发送.md)。
 > **v0.20 审计增量落盘 + 控制台默认落盘（2026-10-30）**：审计文件从“每次全量重写”改为 **JSONL 增量追加**（一条 append 一行 + 小检查点，O(1)；旧整体 JSON 首次写入自动迁移）；`npm start` 默认把操作库与审计落到 `prototype/data/operations.db`、`audit.jsonl`（已 gitignore），显式 `SAFE_OFFICE_STORE_FILE=:memory:` 可回内存模式。**270 项 Node 测试全绿**。详见 [持久化与模型注入](docs/15-持久化与模型注入.md)。
 > **v0.19 真实模型规划增强（2026-10-30）**：工具目录补**用途/参数示例/前置依赖**（打印前读、发信前摘要生成稿）；本次令牌的**工具与文档/录音/图片清单**写进模型上下文；计划缺前置 `readDoc` 时自动补一步（仅限授权文档）；云侧计划被拦时**最多修正 1 次**，修正反馈只含错误码/动作/字段（不回传模型编造的值），重走令牌/溯源/依赖校验、不扩大授权。开发集 14 条真实跑分（glm-5.3-flash）：**正常完成 3/6 → 6/6（100%）**，误拦 2/6 → **0/6**，攻击 0/8 得手（主动拦截 4 · 未尝试 4 · 故障 0），计划修正 1 次请求 1 次采纳（D-N5）。**268 项 Node 测试全绿**。详见 [真实模型规划增强](docs/20-真实模型规划增强.md)。
@@ -25,7 +26,7 @@
 
 > **项目定位（2026-10-17 起）**：**4C 2027 物联网应用类（主参赛）+ 毕设**；以华为命题为设计参考，**不参加国创赛 2027**。原“小组任务协同 + 智能排期引擎”保留为 4C 备选。底座不再锁定 6.0.0.1：默认 **OpenHarmony 4.x/5.x 标准系统**；6.0.0.1 仅在借到对应板卡时作为可选上板目标。主线 = Node 参考实现 + 安全机制 + 评测 + **WS63 近场确认**；RK3568 主设备为可选项，不强制购买。
 > **底座（默认）**：OpenHarmony 4.x/5.x 标准系统（可选 6.0.0.1，以实际板卡/镜像为准）+ WS63 星闪节点（OH 轻量系统）
-> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.18 已跑通**：**276 测试全绿**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
+> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.18 已跑通**：**282 测试全绿**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
 
 ---
 
@@ -121,7 +122,7 @@
     │                                           console-service 控制台服务 / demo-executor 假执行器 /
     │                                           tool-registry 工具注册表 / mcp-adapter MCP 骨架 /
     │                                           faults 模型故障分类 / model-boundary 模型出口（目标占位符）/ perf 时延度量 / report 可视化 / scenario 场景
-    └── test/                                ← 276 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
+    └── test/                                ← 282 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
 ```
 
 ## 口径纪律

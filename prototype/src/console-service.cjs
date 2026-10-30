@@ -18,7 +18,7 @@ const { AgentRuntime } = require('./runtime.cjs');
 const { DEFAULT_SANDBOX } = require('./sandbox.cjs');
 const { defineAgent, issueToken, ROLE_DEFS, ROLE_DOC_IDS, roleDocIds } = require('./agents.cjs');
 const {
-  IMAGES, AUDIOS, CONTACTS, allDocuments, getDocumentById, registerDocuments,
+  IMAGES, AUDIOS, CONTACTS, allDocuments, getDocumentById, registerDocuments, unregisterDocument,
 } = require('./scenario.cjs');
 const { CAPABILITIES, RISK_LEVELS } = require('./capabilities.cjs');
 const { ToolRegistry } = require('./tool-registry.cjs');
@@ -27,14 +27,15 @@ const { OperationStore } = require('./store.cjs');
 const { BlobStore, MAX_BLOB_BYTES } = require('./blob-store.cjs');
 const { FulfillmentService } = require('./fulfillment.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
-const { FakeMailer } = require('./mailer.cjs');
+const { FakeMailer, MailerError } = require('./mailer.cjs');
+const { printText } = require('./print-adapter.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
 } = require('./nearfield-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.21.0';
+const VERSION = '0.22.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -109,6 +110,8 @@ class ConsoleService {
     auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
     documentsStore = null,
     blobStore = null,
+    printer = process.env.SAFE_OFFICE_PRINTER || null,
+    printAdapter = printText,
   } = {}) {
     this.now = now;
     this.pairingCode = pairingCode ? String(pairingCode) : null;
@@ -124,6 +127,8 @@ class ConsoleService {
     this.generation = 0;          // 工作区版本：reset 时自增，用于丢弃在途旧结果
     this.recoveredInFlight = 0;
     this._auditRestoreError = null;
+    this.printer = printer || null;          // null = 打印保持模拟
+    this.printAdapter = typeof printAdapter === 'function' ? printAdapter : printText;
     this.key = Buffer.from(nearfieldKey);
     this.deviceId = deviceId;
     this.deviceLabel = deviceLabel;
@@ -973,7 +978,11 @@ class ConsoleService {
       : isDevice
         ? `设备控制：${recipient} ${d.args.op || ''}`.trim()
         : `${PROTOCOL_ACTIONS[protocolAction] || action}：${d.docTitle || recipient}`;
-    const body = isEmail ? String(d.payload || '') : JSON.stringify(d.args);
+    // 打印：把正文冻进操作记录，保证确认/重启后都能打印同一份内容
+    const printTextBody = !isEmail && action === 'printDoc'
+      ? String((this.runtime.knowledge && this.runtime.knowledge[d.args.id] && this.runtime.knowledge[d.args.id].cleaned) || '')
+      : '';
+    const body = isEmail ? String(d.payload || '') : (action === 'printDoc' ? printTextBody : JSON.stringify(d.args));
     const sourceDocIds = d.sourceDocIds && d.sourceDocIds.length
       ? d.sourceDocIds
       : (d.docId ? [d.docId] : []);
@@ -1826,16 +1835,31 @@ class ConsoleService {
   // ---------- 业务副作用（模拟） ----------
   async _applyBusinessAction(operation) {
     if (operation.protocolAction === 2) {
+      // 真删除：导入库里的资料要真正删除，否则重启后会“复活”
+      if (this.documentsStore) this.documentsStore.delete(operation.recipient);
+      unregisterDocument(operation.recipient);
       this.business.deletedDocIds.add(operation.recipient);
       delete this.runtime.knowledge[operation.recipient];
       return;
     }
     if (operation.protocolAction === 3) {
+      const doc = this.runtime.knowledge[operation.recipient];
+      const result = await this.printAdapter({
+        text: operation.body || '',
+        title: doc ? doc.title : (operation.subject || ''),
+        printer: this.printer,
+      });
+      if (result.mode === 'failed') {
+        throw new MailerError(result.rejected ? 'rejected' : 'unknown',
+          `打印失败：${result.error || '未知错误'}`);
+      }
       this.business.printJobs.push({
         operationId: operation.operationId,
         docId: operation.recipient,
         subject: operation.subject,
         at: this._iso(),
+        mode: result.mode,               // printed = 已提交打印队列；simulated = 未配置打印机
+        printer: result.printer || null,
       });
       return;
     }

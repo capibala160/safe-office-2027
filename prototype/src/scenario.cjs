@@ -46,6 +46,10 @@ function clearIngestedDocuments() {
   INGESTED_DOCS.clear();
 }
 
+function unregisterDocument(id) {
+  return INGESTED_DOCS.delete(id);
+}
+
 function allDocuments() {
   return { ...DOCS, ...Object.fromEntries(INGESTED_DOCS) };
 }
@@ -102,6 +106,7 @@ function extractEmbeddedInstruction(doc) {
 }
 
 module.exports = {
+  unregisterDocument,
   DOCS, CONTACTS, AUDIOS, IMAGES, extractEmbeddedInstruction,
   registerDocuments, clearIngestedDocuments, allDocuments, getDocumentById,
 };
