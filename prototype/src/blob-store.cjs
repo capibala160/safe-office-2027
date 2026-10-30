@@ -59,6 +59,14 @@ class BlobStore {
     return this.get(sha256) !== null;
   }
 
+  // 只删指定内容（按内容寻址）。调用方必须自己确认没有操作还引用它。
+  delete(sha256) {
+    const key = String(sha256 || '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(key)) return false;
+    const info = this.db.prepare('DELETE FROM blobs WHERE sha256 = ?').run(key);
+    return info.changes > 0;
+  }
+
   close() {
     try { this.db.close(); } catch { /* ignore */ }
   }

@@ -53,14 +53,32 @@ test('冻结：邮件操作带上附件元数据，且哈希进入冻结记录',
   assert.equal(verifyOperation(tampered).ok, false);
 });
 
-test('冻结：非邮件操作不带附件', async (t) => {
-  const { service } = setup(t);
+test('冻结：非邮件操作不带附件，也不留下孤儿内容', async (t) => {
+  const { service, blobStore } = setup(t);
   const item = sample(service, 'bulk-delete');
   const run = await service.runCommand({ ...item, role: item.role, attachments: [ATTACHMENT] });
   assert.ok(run.operations.length > 0);
   for (const operation of run.operations) {
     assert.deepEqual(operation.attachments, [], `${operation.action} 不该带附件`);
   }
+  const blobs = blobStore.db.prepare('SELECT COUNT(*) AS n FROM blobs').get().n;
+  assert.equal(blobs, 0, '没有邮件动作时附件不应落库');
+  assert.ok(run.lines.some((line) => line.includes('未落库')), '应明确告知附件未使用');
+  assert.ok(service.audit.entries.some((e) => e.kind === '附件未使用'));
+});
+
+test('附件校验失败：不写库、不留孤儿', async (t) => {
+  const { service, blobStore } = setup(t);
+  const item = sample(service, 'external-confirm');
+  await assert.rejects(
+    () => service.runCommand({
+      ...item, role: item.role,
+      attachments: [{ filename: '坏文件.pdf', mime: 'application/pdf', contentBase64: '!!!' }],
+    }),
+    /contentBase64 非法/,
+  );
+  const blobs = blobStore.db.prepare('SELECT COUNT(*) AS n FROM blobs').get().n;
+  assert.equal(blobs, 0);
 });
 
 test('执行：附件内容被篡改 → 拒绝发送', async (t) => {

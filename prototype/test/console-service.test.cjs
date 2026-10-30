@@ -491,6 +491,14 @@ test('重启恢复：操作来源、运行历史、风险计量、业务状态�
   assert.equal(b.risk.frozen, true, '风险冻结状态要能恢复');
   assert.ok(b.getState().counts.operations >= 1);
   assert.equal(b.getOperation(opId).operation.state, 'frozen');
+
+  // 任务编号必须接着历史最大号：否则重启后的 RUN-1 会与已落库的 RUN-1 撞车
+  const seqOf = (id) => Number(String(id).replace(/^RUN-/, ''));
+  const next = await b.runCommand({
+    command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+  });
+  assert.ok(seqOf(next.runId) > seqOf(run.runId), `新任务编号应大于 ${run.runId}，实际 ${next.runId}`);
+  assert.ok(b.seq >= seqOf(next.runId));
 });
 
 test('手机确认端：详情带收件人/正文预览/附件，目标哈希与操作一致', async (t) => {

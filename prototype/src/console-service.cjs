@@ -24,7 +24,7 @@ const { CAPABILITIES, RISK_LEVELS } = require('./capabilities.cjs');
 const { ToolRegistry } = require('./tool-registry.cjs');
 const { redact } = require('./guard.cjs');
 const { OperationStore } = require('./store.cjs');
-const { BlobStore } = require('./blob-store.cjs');
+const { BlobStore, MAX_BLOB_BYTES } = require('./blob-store.cjs');
 const { FulfillmentService } = require('./fulfillment.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer } = require('./mailer.cjs');
@@ -69,6 +69,12 @@ function uniqueStrings(list) {
     if (typeof v === 'string' && v.trim() && !out.includes(v)) out.push(v);
   }
   return out;
+}
+
+// 任务编号只认 RUN-<n>；解析失败按 0（不猜、不递推）
+function runSeqOf(id) {
+  const m = /^RUN-(\d+)$/.exec(String(id || ''));
+  return m ? Number(m[1]) : 0;
 }
 
 function hashAuditEntries(entries) {
@@ -242,6 +248,13 @@ class ConsoleService {
         if (Array.isArray(saved.runs)) this.runs = saved.runs.slice(0, 50);
         if (saved.autoMode) this.autoMode = saved.autoMode;
       }
+      // 重启后 seq 从历史最大编号继续：否则新的 RUN-1 会和已落库的 RUN-1 撞车，
+      // 连带 taskId / planHash 一起复用（v0.18 修复）。
+      let maxSeq = this.seq;
+      for (const r of this.runs) maxSeq = Math.max(maxSeq, runSeqOf(r.runId));
+      for (const meta of this.operationMeta.values()) maxSeq = Math.max(maxSeq, runSeqOf(meta && meta.runId));
+      for (const op of this.store.listOperations()) maxSeq = Math.max(maxSeq, runSeqOf(op.taskId));
+      this.seq = maxSeq;
       this.recoveryInfo = {
         operationMeta: this.operationMeta.size,
         runs: this.runs.length,
@@ -710,7 +723,9 @@ class ConsoleService {
     };
   }
 
-  // 附件：最多 5 个、单个 ≤5MB、总计 ≤10MB；内容按 sha256 存，冻结记录只留元数据
+  // 附件：最多 5 个、单个 ≤5MB、总计 ≤10MB。
+  // 这里**只校验、不落库**——命令可能因参数/规划失败，或最终没有邮件动作；
+  // 提前落库会留下一批没人引用的孤儿内容（v0.18 修复）。真正入库在 _freezeDeferred。
   _parseAttachments(list) {
     if (list === undefined || list === null) return [];
     if (!Array.isArray(list)) throw new ConsoleError('BAD_REQUEST', 'attachments 必须是数组');
@@ -724,16 +739,29 @@ class ConsoleService {
         throw new ConsoleError('BAD_REQUEST', `attachments[${index}] 的 contentBase64 非法`);
       }
       const buffer = Buffer.from(base64, 'base64');
+      if (buffer.length === 0) throw new ConsoleError('BAD_REQUEST', `attachments[${index}] 是空文件`);
+      if (buffer.length > MAX_BLOB_BYTES) {
+        throw new ConsoleError('BAD_REQUEST', `attachments[${index}] 超过 ${MAX_BLOB_BYTES / 1024 / 1024}MB`);
+      }
       total += buffer.length;
       if (total > 10 * 1024 * 1024) throw new ConsoleError('BAD_REQUEST', '附件总大小超过 10MB');
-      try {
-        return this.blobStore.put(buffer, {
-          name, mime: (item && typeof item.mime === 'string' && item.mime) || 'application/octet-stream',
-        });
-      } catch (err) {
-        throw new ConsoleError('BAD_REQUEST', `attachments[${index}]：${err.message}`);
-      }
+      return {
+        filename: name,
+        mime: (item && typeof item.mime === 'string' && item.mime) || 'application/octet-stream',
+        buffer,
+      };
     });
+  }
+
+  // 落库放在冻结邮件操作时：没有邮件动作就一个字节都不存
+  _storeAttachments(list) {
+    return (list || []).map((a) => this.blobStore.put(a.buffer, { name: a.filename, mime: a.mime }));
+  }
+
+  // 内容是否已被任一操作引用（内容寻址 → 同一份文件可能被多条操作共用，不能盲删）
+  _blobReferenced(sha256) {
+    return this.store.listOperations().some((op) =>
+      (op.attachments || []).some((a) => a.sha256 === sha256));
   }
 
   // 执行前校验：附件内容必须还在，且哈希与冻结记录一致
@@ -868,6 +896,13 @@ class ConsoleService {
       operations.push(this._operationView(this.store.getOperation(operation.operationId)));
     }
 
+    // 附件传了但本次没有任何邮件动作：明确告知，而不是静默丢掉
+    if ((options.attachments || []).length > 0 && !operations.some((o) => (o.attachments || []).length > 0)) {
+      const names = options.attachments.map((a) => a.filename).join('、');
+      this.audit.append('附件未使用', { runId, names, reason: '本次指令没有邮件外发动作' });
+      lines.push(`  〔附件〕${names} 未随任何邮件操作冻结（本次动作不发邮件），未落库`);
+    }
+
     const auditEnd = this.audit.entries.length;
     for (const [operationId, meta] of this.operationMeta.entries()) {
       if (meta.runId === runId && meta.auditTo === null) {
@@ -919,22 +954,33 @@ class ConsoleService {
     const sourceDocIds = d.sourceDocIds && d.sourceDocIds.length
       ? d.sourceDocIds
       : (d.docId ? [d.docId] : []);
-    const operation = this.fulfillment.prepare({
-      taskId: runId,
-      action,
-      protocolAction,
-      tool: action,
-      recipient: recipient || '（未指定）',
-      subject: subject.slice(0, 160),
-      body: body || `（${action}）`,
-      attachments: isEmail ? attachments.map((a) => ({ name: a.name, sha256: a.sha256, size: a.size })) : [],
-      sourceDocIds,
-      level: d.docLevel || '内部',
-      createdAt: this._iso(),
-      expiresAt: this._iso(this.now() + this.operationTtlMs),
-      modelId: this._modelInfo().model || this._modelInfo().name,
-      planHash: sha256Hex(`${runId}|${d.stepNumber}|${action}`),
-    });
+    // 只有邮件动作才把附件落库；非邮件动作一个字节都不存（避免静默丢弃 + 孤儿）
+    const storedAttachments = isEmail ? this._storeAttachments(attachments) : [];
+    let operation;
+    try {
+      operation = this.fulfillment.prepare({
+        taskId: runId,
+        action,
+        protocolAction,
+        tool: action,
+        recipient: recipient || '（未指定）',
+        subject: subject.slice(0, 160),
+        body: body || `（${action}）`,
+        attachments: storedAttachments.map((a) => ({ name: a.name, sha256: a.sha256, size: a.size })),
+        sourceDocIds,
+        level: d.docLevel || '内部',
+        createdAt: this._iso(),
+        expiresAt: this._iso(this.now() + this.operationTtlMs),
+        modelId: this._modelInfo().model || this._modelInfo().name,
+        planHash: sha256Hex(`${runId}|${d.stepNumber}|${action}`),
+      });
+    } catch (err) {
+      // 冻结失败：刚写进去的附件内容没有操作引用，回滚掉（共用内容不动）
+      for (const a of storedAttachments) {
+        if (!this._blobReferenced(a.sha256)) this.blobStore.delete(a.sha256);
+      }
+      throw err;
+    }
     const meta = {
       runId,
       stepNumber: d.stepNumber,
