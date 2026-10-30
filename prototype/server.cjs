@@ -415,6 +415,8 @@ async function startServer({
   documentsStore = null,
   blobStore = null,
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
+  storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
+  auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -431,9 +433,11 @@ async function startServer({
         pairingCode,
         documentsStore,
         blobStore,
+        storeFile,
+        auditFile,
       });
     } else {
-      instance = new ConsoleService({ documentsStore, blobStore });
+      instance = new ConsoleService({ documentsStore, blobStore, storeFile, auditFile });
     }
   }
   const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit });
@@ -471,6 +475,12 @@ if (require.main === module) {
     ? codeArg.slice('--code='.length)
     : process.env.SAFE_OFFICE_PHONE_CODE || (lan ? randomPairingCode() : null);
   // 导入的真实资料：默认落在 prototype/data/documents.db（已 gitignore）
+  // 控制台默认落盘：操作/审计都在 prototype/data 下（已 gitignore）。
+  // 显式设 SAFE_OFFICE_STORE_FILE=:memory: 可回到内存模式（测试/一次性演示）。
+  const storeFile = process.env.SAFE_OFFICE_STORE_FILE
+    || path.join(__dirname, 'data', 'operations.db');
+  const auditFile = process.env.SAFE_OFFICE_AUDIT_FILE
+    || path.join(__dirname, 'data', 'audit.jsonl');
   const documentsDb = process.env.SAFE_OFFICE_DOCS_DB
     || path.join(__dirname, 'data', 'documents.db');
   let documentsStore = null;
@@ -495,6 +505,8 @@ if (require.main === module) {
     pairingCode,
     documentsStore,
     blobStore,
+    storeFile,
+    auditFile,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);

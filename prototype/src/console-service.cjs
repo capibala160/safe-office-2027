@@ -147,7 +147,7 @@ class ConsoleService {
   _initWorkspace() {
     this.policy = new PolicyEngine();
     this.audit = this._restoreAudit();
-    this.audit.onAppend = () => this._saveAudit();
+    this.audit.onAppend = (rec) => this._appendAudit(rec);
     // 导入的真实资料并入文档视图（样例文档保持静态）
     if (this.documentsStore) {
       registerDocuments(this.documentsStore.list().map((doc) => ({
@@ -295,6 +295,7 @@ class ConsoleService {
   // ---------- 审计落盘 ----------
   // 审计链 + 独立检查点是两份文件：同一磁盘上不抵抗篡改，只保证"整链替换会被发现"。
   _restoreAudit() {
+    this._auditJsonl = true;
     if (!this.auditFile) return new AuditLog();
     if (!fs.existsSync(this.auditFile)) return new AuditLog();
     if (!fs.existsSync(this.auditCheckpointFile)) {
@@ -303,20 +304,40 @@ class ConsoleService {
       return new AuditLog();
     }
     try {
+      this._auditJsonl = AuditLog.isJsonlFile(this.auditFile); // 旧格式是整体 JSON；新格式一行一条
       const checkpoint = JSON.parse(fs.readFileSync(this.auditCheckpointFile, 'utf8'));
       return AuditLog.load(this.auditFile, checkpoint);
     } catch (err) {
+      this._auditJsonl = true;
       this._auditRestoreError = err && err.message ? err.message : String(err);
       return new AuditLog();
     }
   }
 
-  _saveAudit() {
+  // 每条审计只追加一行 + 重写小检查点（O(1)）；旧整体 JSON 在第一次写时迁移
+  _appendAudit(rec) {
     if (!this.auditFile) return;
     try {
       fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
-      const checkpoint = this.audit.save(this.auditFile);
-      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
+      if (!this._auditJsonl) {
+        AuditLog.writeLines(this.auditFile, this.audit.entries);
+        this._auditJsonl = true;
+      } else {
+        AuditLog.appendLine(this.auditFile, rec);
+      }
+      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(this.audit.checkpoint()), { encoding: 'utf8', mode: 0o600 });
+    } catch { /* 落盘失败不打断运行；下一条 append 会重试 */ }
+  }
+
+  // 全量快照：仅迁移/关闭/reset 等少数场景使用
+  _saveAudit() {
+    if (!this.auditFile) return;
+    try {
+      if (!this.audit.verify()) return;
+      fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
+      AuditLog.writeLines(this.auditFile, this.audit.entries);
+      this._auditJsonl = true;
+      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(this.audit.checkpoint()), { encoding: 'utf8', mode: 0o600 });
     } catch { /* 落盘失败不打断运行；下一条 append 会重试 */ }
   }
 

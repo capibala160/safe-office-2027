@@ -109,11 +109,45 @@ class AuditLog {
     fs.writeFileSync(file, JSON.stringify({ entries: this.entries, checkpoint }), { encoding: 'utf8', mode: 0o600 });
     return checkpoint;
   }
+  // 读取审计文件：兼容旧的整体 JSON 与新的 JSONL（一行一条）
+  static readFile(file) {
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    if (!raw) return [];
+    // JSONL 每条也以 '{' 开头，不能靠首字符判断；多行 = JSONL
+    if (raw.includes('\n')) {
+      return raw.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    }
+    const data = JSON.parse(raw);
+    if (data && Array.isArray(data.entries)) return data.entries; // 旧格式
+    return [data]; // 只有一条记录的 JSONL
+  }
+
+  static isJsonlFile(file) {
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    if (!raw || raw.includes('\n')) return true;
+    try {
+      const data = JSON.parse(raw);
+      return !(data && Array.isArray(data.entries));
+    } catch {
+      return true;
+    }
+  }
+
+  // 增量落盘：一行一条，append 是 O(1)，不再每次重写全量
+  static appendLine(file, rec) {
+    fs.appendFileSync(file, `${JSON.stringify(rec)}\n`, { encoding: 'utf8', mode: 0o600 });
+  }
+
+  // 全量重写（迁移旧格式 / reset 清盘用）
+  static writeLines(file, entries) {
+    const body = entries.length > 0 ? `${entries.map((e) => JSON.stringify(e)).join('\n')}\n` : '';
+    fs.writeFileSync(file, body, { encoding: 'utf8', mode: 0o600 });
+  }
+
   static load(file, trustedCheckpoint) {
     if (!trustedCheckpoint) throw new Error('恢复审计需要独立可信检查点');
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     const log = new AuditLog();
-    log.entries = data.entries;
+    log.entries = AuditLog.readFile(file);
     log.prevHash = trustedCheckpoint.head;
     if (!log.verify(trustedCheckpoint)) throw new Error('审计恢复校验失败');
     return log;

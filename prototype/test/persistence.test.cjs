@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { ConsoleService } = require('../src/console-service.cjs');
+const { AuditLog } = require('../src/governance.cjs');
 const { createLlmFromEnv, MockLLM, HttpLLM } = require('../src/llm.cjs');
 
 const EXTERNAL = {
@@ -67,9 +68,11 @@ test('审计篡改：检查点不匹配 → 拒绝恢复，从新链开始并留
   await first.runCommand(EXTERNAL);
   first.close();
 
-  const saved = JSON.parse(fs.readFileSync(ws.files.audit, 'utf8'));
-  saved.entries[0].detail = { ...saved.entries[0].detail, tampered: true };
-  fs.writeFileSync(ws.files.audit, JSON.stringify(saved), 'utf8');
+  // 新格式为 JSONL：一行一条；篡改第一条后检查点必然对不上
+  const lines = fs.readFileSync(ws.files.audit, 'utf8').trim().split('\n');
+  const entries = lines.map((line) => JSON.parse(line));
+  entries[0].detail = { ...entries[0].detail, tampered: true };
+  fs.writeFileSync(ws.files.audit, `${entries.map((e) => JSON.stringify(e)).join('\n')}\n`, 'utf8');
 
   const second = ws.open();
   assert.equal(second.audit.entries.length, 1);
@@ -187,4 +190,42 @@ test('模型选择：没配端点密钥退回 MockLLM，配了就走 HttpLLM', (
     SAFE_OFFICE_LLM_TIMEOUT_MS: '9000',
   });
   assert.equal(timed.timeoutMs, 9000, '超时可用环境变量覆盖');
+});
+
+test('审计增量落盘：新事件只追加，不改写已有内容', async (t) => {
+  const ws = workspace(t);
+  const service = ws.open();
+  await service.runCommand({
+    command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+  });
+  const before = fs.readFileSync(ws.files.audit, 'utf8');
+  await service.runCommand({
+    command: '查一下李娜的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+  });
+  const after = fs.readFileSync(ws.files.audit, 'utf8');
+  assert.ok(after.startsWith(before), '已有审计内容不能被重写');
+  const lines = after.trim().split('\n').length;
+  assert.equal(lines, service.audit.entries.length, '一行一条，与内存条目一致');
+});
+
+test('旧版整体 JSON 审计：首次写入迁移为 JSONL 且不丢历史', async (t) => {
+  const ws = workspace(t);
+  const legacy = new AuditLog();
+  legacy.append('历史事件', { note: 'legacy' });
+  const checkpoint = legacy.save(ws.files.audit);
+  fs.writeFileSync(`${ws.files.audit}.head`, JSON.stringify(checkpoint), 'utf8');
+
+  const service = ws.open();
+  await service.runCommand({
+    command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+  });
+  service.close();
+
+  const raw = fs.readFileSync(ws.files.audit, 'utf8');
+  assert.ok(!raw.trim().startsWith('{"entries"'), '应已迁移为 JSONL');
+  const entries = AuditLog.readFile(ws.files.audit);
+  assert.equal(entries[0].kind, '历史事件');
+  assert.ok(entries.length > 1, '新事件应追加在后面');
+  const reopened = ws.open();
+  assert.ok(reopened.audit.entries.some((e) => e.kind === '历史事件'), '重启后历史仍在');
 });
