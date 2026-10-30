@@ -18,7 +18,10 @@ const REQUIRED_ARGS = Object.fromEntries(
 // 私有内置注册表：2 参调用不受全局 defaultRegistry 污染
 const BUILTIN_REGISTRY = createRegistry();
 
-function validatePlan(rawSteps, { command = '', docs = [], delegation = null, delegationVerifier = null, registry = BUILTIN_REGISTRY } = {}) {
+function validatePlan(rawSteps, {
+  command = '', docs = [], delegation = null, delegationVerifier = null, registry = BUILTIN_REGISTRY,
+  authorizedTools = null, enforceToolAuthorization = false,
+} = {}) {
   const reg = registry || null;
   const hasTool = (name) => (reg ? reg.has(name) : KNOWN_TOOLS.has(name));
   const requiredOf = (name) => (reg ? reg.requiredArgs(name) : (REQUIRED_ARGS[name] || []));
@@ -26,6 +29,9 @@ function validatePlan(rawSteps, { command = '', docs = [], delegation = null, de
   const findings = [];
   const notes = [];
   const externalText = docs.map((d) => d.body).join('\n');
+  const authorizedDocIds = new Set((docs || []).map((d) => d.id));
+  const readIds = new Set();        // 计划中已读入的文档（按执行顺序）
+  const summarizedSoFar = new Set(); // 计划中已生成过的源文档（按执行顺序）
   const delegationIntent = /(以|用).{1,10}名义|代为?(发送|群发|发信)/.test(command);
   // 生成稿绑定：同一计划里总结过 X，就必须发 draft_X——不能让模型把源文档直接发出去
   const summarizedSources = new Set();
@@ -104,6 +110,49 @@ function validatePlan(rawSteps, { command = '', docs = [], delegation = null, de
       });
       continue;
     }
+    // —— 工具授权（计划层预检）——
+    // 令牌不允许的工具在运行时也会被闸2拒绝；这里提前给出 finding，
+    // 让云侧“计划修正”有机会改对（例如令牌没有 summarize 时不要生成摘要）。
+    if (enforceToolAuthorization && Array.isArray(authorizedTools) && !authorizedTools.includes(s.action)) {
+      findings.push({
+        level: 'block',
+        reason: `动作「${s.action}」不在本次授权工具内，已移除`,
+        step: s,
+      });
+      continue;
+    }
+
+    // —— 步骤依赖（按执行顺序）——
+    // 需要"先读入"的动作若缺少前置 readDoc：仅在文档已授权时自动补一步；
+    // 未授权的文档不补，直接移除并记 finding（不能靠补步骤绕过授权）。
+    // 调用方没传 docs（纯结构校验）时跳过依赖检查，保持 validatePlan 的旧契约。
+    const needRead = authorizedDocIds.size > 0 ? [] : null;
+    if (needRead) {
+    if (s.action === 'summarize' && s.args && s.args.of) needRead.push(s.args.of);
+    if ((s.action === 'printDoc' || s.action === 'deleteDoc') && s.args && s.args.id) needRead.push(s.args.id);
+    if (['sendInternalEmail', 'sendExternalEmail'].includes(s.action) && s.args && s.args.docId
+      && !String(s.args.docId).startsWith('draft_')) needRead.push(s.args.docId);
+    const canRead = !Array.isArray(authorizedTools) || authorizedTools.includes('readDoc');
+    for (const id of needRead) {
+      if (!canRead || readIds.has(id) || !authorizedDocIds.has(id)) continue;
+      steps.push({ action: 'readDoc', args: { id }, reason: '自动补前置读取' });
+      readIds.add(id);
+      notes.push({ level: 'info', reason: `已补前置 readDoc(${id})` });
+    }
+    // 发送生成稿：必须在本计划中先 summarize 过源文档（按执行顺序）
+    if (['sendInternalEmail', 'sendExternalEmail'].includes(s.action) && s.args && s.args.docId
+      && String(s.args.docId).startsWith('draft_')) {
+      const source = String(s.args.docId).slice('draft_'.length);
+      if (!summarizedSoFar.has(source)) {
+        findings.push({
+          level: 'block',
+          reason: `步骤 ${s.action} 发送 draft_${source} 前缺少 summarize(${source})，已移除`,
+          step: s,
+        });
+        continue;
+      }
+    }
+    }
     if (delegationAllowed) {
       notes.push({
         level: 'info',
@@ -111,20 +160,37 @@ function validatePlan(rawSteps, { command = '', docs = [], delegation = null, de
       });
     }
     steps.push(s);
+    if (s.action === 'readDoc' && s.args && s.args.id) readIds.add(s.args.id);
+    if (s.action === 'summarize' && s.args && s.args.of) summarizedSoFar.add(s.args.of);
   }
   return { steps, findings, notes };
 }
 
 class GuardedPlanner {
-  constructor({ llm, audit, risk, registry = BUILTIN_REGISTRY }) {
+  // disabledLayers：仅评测消融用（如 ['plan']）。默认空集合，行为与之前完全一致。
+  // maxPlanRepairs：模型计划被校验拦下后，最多让模型修正几次。只对云侧真实模型生效，
+  //   且修正过程不改变授权边界（令牌、收件人溯源、目标回填全部按原指令重跑）。
+  constructor({ llm, audit, risk, registry = BUILTIN_REGISTRY, disabledLayers = [], maxPlanRepairs = 1 }) {
     this.llm = llm;
     this.audit = audit;
     this.risk = risk;
     this.registry = registry;
+    this.disabledLayers = new Set(disabledLayers);
+    this.maxPlanRepairs = Math.max(0, Number(maxPlanRepairs) || 0);
   }
 
-  async makePlan(command, { docs = [], modelLocation, commandLevel, delegation = null, delegationVerifier = null } = {}) {
-    const prepared = prepareModelInput(this.llm, command, docs, { modelLocation, commandLevel });
+  _ablate(layer) {
+    return this.disabledLayers.has(layer);
+  }
+
+  async makePlan(command, {
+    docs = [], modelLocation, commandLevel, delegation = null, delegationVerifier = null,
+    authorizedTools = null, authorizedDocs = null,
+  } = {}) {
+    // gate1 关停：外部资料不经消毒直接进提示词（消融实验专用）
+    const prepared = prepareModelInput(this.llm, command, docs, {
+      modelLocation, commandLevel, sanitize: !this._ablate('gate1'),
+    });
     modelLocation = prepared.location;
     const contextBlocks = prepared.blocks;
     const contextInfo = {
@@ -142,16 +208,86 @@ class GuardedPlanner {
       targetPlaceholders: targetPlaceholders.length > 0 ? targetPlaceholders : undefined,
     });
 
-    // 2) 模型出计划
-    const raw = await this.llm.plan(prepared.command, contextBlocks);
+    // 2) 本次实际授权：只作提示词上下文，执行期仍按令牌/溯源/闸门校验
+    const hasAuth = Array.isArray(authorizedTools);
+    const authNote = hasAuth
+      ? `【本次实际授权】可用工具：${authorizedTools.join('、') || '无'}；可读文档：${(authorizedDocs || []).join('、') || '无'}。`
+        + '只能使用这里列出的工具与文档；未列出的不要调用，也不要编造文档 id。'
+      : '';
+    if (hasAuth) {
+      this.audit.append('规划授权', { tools: authorizedTools, docs: authorizedDocs || [] });
+    }
 
-    // 2.5) 目标占位符回填：规划层用真值做溯源，模型本身从未见过真值（F-05）
-    const resolved = resolveTargets(raw, prepared.targets);
+    // 2.5) 模型出计划
+    const raw = await this.llm.plan(prepared.command, contextBlocks, { authNote });
+
+    // 2.6) 目标占位符回填：规划层用真值做溯源，模型本身从未见过真值（F-05）
+    let resolved = resolveTargets(raw, prepared.targets);
+
+    // 2.9) 消融：计划校验整层关停（结构/溯源/委托/生成稿绑定全部不生效）
+    //      仅评测用；默认不走到这里。
+    if (this._ablate('plan')) {
+      this.audit.append('消融', { layer: 'plan', reason: '计划校验关闭（评测消融）' });
+      return {
+        steps: Array.isArray(resolved) ? resolved : [],
+        findings: [], notes: [], contextInfo, ablated: ['plan'],
+      };
+    }
 
     // 3) 计划校验（出模型后的第一道保险）
-    const { steps, findings, notes } = validatePlan(resolved, {
-      command, docs, delegation, delegationVerifier, registry: this.registry,
+    const validate = (stepsIn) => validatePlan(stepsIn, {
+      command, docs, delegation, delegationVerifier, registry: this.registry, authorizedTools,
+      enforceToolAuthorization: prepared.location === 'cloud',
     });
+    let outcome = validate(resolved);
+    const blockCount = (r) => r.findings.filter((f) => f.level === 'block').length;
+
+    // 3.5) 有限次计划修正：仅云侧真实模型；修正不扩大授权（仍按原指令/原令牌重验）
+    //      触发条件：有计划被拦，或模型直接返回空计划（后者常见于“模型没敢动手”）。
+    //      Mock 是 local，不触发；修正失败或没变好就保留第一次的校验结果。
+    const isEmptyPlan = !Array.isArray(resolved) || resolved.length === 0;
+    if ((blockCount(outcome) > 0 || isEmptyPlan) && this.maxPlanRepairs > 0 && prepared.location === 'cloud') {
+      const before = blockCount(outcome);
+      const reason = isEmptyPlan ? 'empty-plan' : 'blocked-steps';
+      this.audit.append('计划修正请求', {
+        attempt: 1,
+        reason,
+        blockFindings: outcome.findings.filter((f) => f.level === 'block').map((f) => f.reason),
+      });
+      try {
+        const feedback = isEmptyPlan
+          ? [
+              '上一次没有输出任何可执行步骤（空数组或全部被移除）。',
+              '请只输出修正后的完整 JSON 数组；至少给出完成用户指令所需的步骤；',
+              '不要调用未授权的工具、不要编造收件人/链接，不要解释。',
+            ].join('\n')
+          : [
+              `上一次计划有 ${before} 个步骤被校验拦下：`,
+              ...outcome.findings.filter((f) => f.level === 'block').map((f) => `- ${f.reason}`),
+              '请只输出修正后的完整 JSON 数组；不要新增未授权工具、收件人或链接，不要解释。',
+            ].join('\n');
+        const raw2 = await this.llm.plan(prepared.command, contextBlocks, { authNote, feedback });
+        const resolved2 = resolveTargets(raw2, prepared.targets);
+        const second = validate(resolved2);
+        const after = blockCount(second);
+        // 空计划不是“修正”，是模型放弃：除非第一次也没有可执行步骤，否则不采纳，
+        // 避免把正常任务的可用步骤一起丢掉（只对攻击样本“有利”的假提升）。
+        // 空计划修正：只有在“有步骤且没有再被拦”时才采纳。
+        const adopted = isEmptyPlan
+          ? (second.steps.length > 0 && after === 0)
+          : (after < before && (second.steps.length > 0 || outcome.steps.length === 0));
+        if (adopted) {
+          outcome = second;
+          resolved = resolved2;
+        }
+        this.audit.append('计划修正结果', { reason, before, after, adopted, steps: adopted ? resolved2.length : resolved.length });
+      } catch (err) {
+        // 修正失败不回滚第一次的校验结果：已有的坏步骤已经被移除，执行是安全的
+        this.audit.append('计划修正失败', { reason: err && err.message ? err.message : String(err) });
+      }
+    }
+
+    const { steps, findings, notes } = outcome;
     for (const f of findings) {
       this.audit.append('计划校验', { level: f.level, reason: f.reason, step: f.step });
       this.risk.add(f.level === 'block' ? 25 : 5, `计划校验${f.level === 'block' ? '拦截' : '提示'}：${f.reason}`);

@@ -38,7 +38,7 @@ function resolveTargets(rawSteps, targets = {}) {
 }
 
 // local 必须由受信任的适配器声明；调用参数只能收紧，不能放宽。
-function prepareModelInput(llm, command, docs, { modelLocation, commandLevel = '内部' } = {}) {
+function prepareModelInput(llm, command, docs, { modelLocation, commandLevel = '内部', sanitize = true } = {}) {
   const location = llm.deployment === 'local' && modelLocation !== 'cloud' ? 'local' : 'cloud';
   let targets = {};
   if (location === 'cloud') {
@@ -52,8 +52,14 @@ function prepareModelInput(llm, command, docs, { modelLocation, commandLevel = '
   }
   const blocks = docs.map(d => {
     const withheld = location === 'cloud' && !['公开', '内部'].includes(d.level);
-    return { id: d.id, level: d.level, withheld, sanitized: sanitizeInput(d.body).safe,
-      text: withheld ? '【正文已分流，不送云】' : (location === 'cloud' ? redact(sanitizeInput(d.body).cleaned) : sanitizeInput(d.body).cleaned) };
+    // sanitize=false 仅用于消融实验：原样把外部资料送进提示词，不隔离注入内容。
+    const san = sanitize ? sanitizeInput(d.body) : null;
+    const body = san ? san.cleaned : d.body;
+    return {
+      id: d.id, level: d.level, withheld,
+      sanitized: san ? san.safe : null,
+      text: withheld ? '【正文已分流，不送云】' : (location === 'cloud' ? redact(body) : body),
+    };
   });
   return { command, blocks, location, targets };
 }

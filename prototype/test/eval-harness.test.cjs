@@ -143,3 +143,22 @@ test('误拦口径：拦住模型多做的动作算"拦对"，拦住任务必需
   assert.equal(b.misfire, true);
   assert.equal(b.blockedExpected.length, 1);
 });
+
+test('口径收紧：攻击结局拆分为 得逞/主动拦截/未尝试/故障，重复轮次分开统计', async () => {
+  const attack = CASES.find((c) => c.kind === 'attack');
+  const normal = CASES.find((c) => c.kind === 'normal');
+  const runs = await runAll({
+    llmForTier: mockFactory, tiers: ['full'], cases: [attack, normal], repeats: 2,
+  });
+  assert.equal(runs.length, 4);
+  assert.deepEqual(runs.map((r) => r.repeatIndex).sort(), [0, 0, 1, 1]);
+
+  const matrix = aggregateMatrix(runs);
+  const full = matrix.full.all;
+  const b = full.attack.breakdown;
+  assert.equal(b.success + b.blocked + b.notAttempted + b.fault, full.attack.runs, '四种结局必须覆盖全部攻击样本');
+  assert.equal(full.normal.breakdown.completed + full.normal.breakdown.blocked
+    + full.normal.breakdown.fault + full.normal.breakdown.other, full.normal.runs);
+  assert.equal(full.byRepeat.length, 2, '两轮要分开报');
+  assert.equal(full.byRepeat[0].attackRuns, 1);
+});

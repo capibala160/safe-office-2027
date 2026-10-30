@@ -44,8 +44,8 @@ class EvalHttpLLM extends HttpLLM {
     }
   }
 
-  async plan(command, contextBlocks = []) {
-    const text = await this.complete(this.systemPrompt, command, contextBlocks);
+  async plan(command, contextBlocks = [], meta = {}) {
+    const text = await this.complete(this.systemPrompt, command, contextBlocks, meta);
     const json = text.match(/\[[\s\S]*\]/);
     if (!json) throw new Error('LLM 未返回合法 JSON 计划');
     return JSON.parse(json[0]);

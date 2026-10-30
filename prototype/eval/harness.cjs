@@ -118,11 +118,15 @@ function summarizeAudit(audit, perf) {
   const blocks = [];
   let detections = 0;
   const confirmations = { requested: 0, approved: 0, rejected: 0 };
+  const repairs = { requested: 0, adopted: 0, failed: 0 };
   let modelFault = null;
   for (const e of audit.entries) {
     const layer = BLOCK_LAYERS[e.kind];
     if (layer) blocks.push({ layer, kind: e.kind, reason: detailReason(e.detail), action: blockAction(e) });
     if (e.kind === '闸1触发') detections += 1;
+    if (e.kind === '计划修正请求') repairs.requested += 1;
+    if (e.kind === '计划修正结果' && e.detail && e.detail.adopted) repairs.adopted += 1;
+    if (e.kind === '计划修正失败') repairs.failed += 1;
     if (e.kind === '闸4确认') confirmations.approved += 1;
     if (e.kind === '闸4拒绝') confirmations.rejected += 1;
     if ((e.kind === '规划失败' || e.kind === '任务中止') && !modelFault) {
@@ -131,30 +135,34 @@ function summarizeAudit(audit, perf) {
   }
   confirmations.requested = confirmations.approved + confirmations.rejected;
   const span = perf ? perf.report().find((s) => s.label === '闸4 高危确认') : null;
-  return { effects: effectsFromAudit(audit), blocks, detections, confirmations, modelFault, confirmMs: span ? span.totalMs : 0 };
+  return { effects: effectsFromAudit(audit), blocks, detections, confirmations, repairs, modelFault, confirmMs: span ? span.totalMs : 0 };
 }
 
-async function runCase(def, tier, llm) {
+async function runCase(def, tier, llm, { disabledLayers = [] } = {}) {
   const acc = { modelMs: 0 };
   const wrapped = wrapLLM(llm, acc);
   const t0 = performance.now();
+  // 消融档位命名 abl:<layer>；未知档位按 full 之外处理会静默变成 none，故显式判定。
+  const isGatewayTier = tier === 'full' || tier.startsWith('abl:');
+  const layers = disabledLayers.length > 0 ? disabledLayers : (tier.startsWith('abl:') ? [tier.slice(4)] : []);
 
   let audit = null;
   let perf = null;
   let harnessError = null;
   let summary = {
     effects: [], blocks: [], detections: 0,
-    confirmations: { requested: 0, approved: 0, rejected: 0 }, modelFault: null, confirmMs: 0,
+    confirmations: { requested: 0, approved: 0, rejected: 0 },
+    repairs: { requested: 0, adopted: 0, failed: 0 }, modelFault: null, confirmMs: 0,
   };
 
   try {
-    if (tier === 'full') {
+    if (isGatewayTier) {
       audit = new AuditLog();
       const risk = new RiskMeter(60, { onEvent: (kind, detail) => audit.append(kind, detail) });
       const policy = new PolicyEngine();
       perf = new PerfMeter();
-      const planner = new GuardedPlanner({ llm: wrapped, audit, risk });
-      const rt = new AgentRuntime({ policy, audit, risk, planner, perf });
+      const planner = new GuardedPlanner({ llm: wrapped, audit, risk, disabledLayers: layers });
+      const rt = new AgentRuntime({ policy, audit, risk, planner, perf, disabledLayers: layers });
       const token = new CapabilityToken({
         tools: def.token.tools,
         documentIds: ALL_DOC_IDS,
@@ -190,11 +198,13 @@ async function runCase(def, tier, llm) {
     desc: def.desc,
     command: def.command,
     tier,
+    ablation: layers.length > 0 ? layers.slice() : null,
     expectCore: def.expectCore || null,
     effects: summary.effects,
     blocks: summary.blocks,
     detections: summary.detections,
     confirmations: summary.confirmations,
+    repairs: summary.repairs,
     modelFault: summary.modelFault,
     modelMs: acc.modelMs,
     securityMs: Math.max(0, totalMs - acc.modelMs),
@@ -214,11 +224,13 @@ async function runAll({ llmForTier, cases = CASES, tiers = TIERS, repeats = 1, o
         // 断点续跑：已完成且无故障的样本直接复用（故障样本一律重跑，避免把噪声当结论）
         const prior = priorRuns ? priorRuns.get(`${tier}|${def.id}|${i}`) : null;
         if (prior) {
+          prior.repeatIndex = i;
           runs.push(prior);
           if (onRun) { try { onRun(runs); } catch { /* ignore */ } }
           continue;
         }
         const run = await runCaseSafe(def, tier, llmForTier(tier));
+        run.repeatIndex = i;
         runs.push(run);
         // 每跑完一条就回调一次：真实模型一轮几十分钟，断电/崩溃不能把已有结果一起带走
         if (onRun) {
