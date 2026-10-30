@@ -4,6 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { startServer, DEFAULT_COMMAND_BODY_LIMIT } = require('../server.cjs');
+const { AuthService, hashPassword } = require('../src/auth.cjs');
 
 async function boot(t) {
   const started = await startServer({ port: 0 });
@@ -38,7 +39,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.24.0');
+  assert.equal(data.version, '0.25.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -329,4 +330,43 @@ test('手机确认端：配对失败 5 次后第 6 次返回 429', async (t) => 
   const limited = await post(`${started.url}/api/phone/pair`, { code: 'BAD6' });
   assert.equal(limited.res.status, 429);
   assert.equal(limited.data.error.code, 'RATE_LIMITED');
+});
+
+test('登录：未登录 401 / 未登录页面 302 / 登录后可访问 / 角色不可提权 / 登出', async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'alice', role: '员工', salt, hash }] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+
+  const unauth = await fetch(`${started.url}/api/bootstrap`);
+  assert.equal(unauth.status, 401);
+  assert.equal((await unauth.json()).error.code, 'AUTH_REQUIRED');
+
+  const page = await fetch(`${started.url}/`, { redirect: 'manual' });
+  assert.equal(page.status, 302);
+  assert.equal(page.headers.get('location'), '/login.html');
+
+  const bad = await post(`${started.url}/api/login`, { username: 'alice', password: 'wrong' });
+  assert.equal(bad.res.status, 401);
+
+  const login = await post(`${started.url}/api/login`, { username: 'alice', password: 'password123' });
+  assert.equal(login.res.status, 200);
+  const cookie = String(login.res.headers.get('set-cookie')).split(';')[0];
+  assert.match(cookie, /^sfc_session=/);
+
+  const authed = await fetch(`${started.url}/api/bootstrap`, { headers: { Cookie: cookie } });
+  assert.equal(authed.status, 200);
+
+  const mismatch = await fetch(`${started.url}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ command: '查一下张伟的联系方式', role: '管理员', tools: ['readContact'], documentIds: [] }),
+  });
+  assert.equal(mismatch.status, 403);
+  assert.equal((await mismatch.json()).error.code, 'FORBIDDEN');
+
+  const logout = await fetch(`${started.url}/api/logout`, { method: 'POST', headers: { Cookie: cookie } });
+  assert.equal(logout.status, 200);
+  const after = await fetch(`${started.url}/api/me`, { headers: { Cookie: cookie } });
+  assert.equal(after.status, 401);
 });

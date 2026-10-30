@@ -275,6 +275,19 @@
     document.getElementById('model-select').addEventListener('change', (e) => { store.modelLocation = e.currentTarget.value; renderChrome(); });
     document.getElementById('nearfield-toggle').addEventListener('change', (e) => { store.nearfieldOnline = e.currentTarget.checked; });
     document.getElementById('btn-reset').addEventListener('click', resetDemo);
+    // 顶部显示登录用户（未启用登录时隐藏）
+    document.getElementById('btn-logout').addEventListener('click', async () => {
+      try { await fetch('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
+      location.href = '/login.html';
+    });
+    fetch('/api/me', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((data) => {
+      if (data && data.user) {
+        const label = document.getElementById('current-user');
+        label.textContent = `${data.user.username}（${data.user.role}）`;
+        label.hidden = false;
+        document.getElementById('btn-logout').hidden = false;
+      }
+    }).catch(() => { /* ignore */ });
   }
 
   async function boot() {

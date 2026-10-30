@@ -16,6 +16,7 @@ const { BlobStore, parseKey } = require('./src/blob-store.cjs');
 const { FakeMailer } = require('./src/mailer.cjs');
 const { createSmtpMailerFromEnv } = require('./src/smtp-mailer.cjs');
 const { scanAttachment } = require('./src/file-scan.cjs');
+const { AuthService, createAuthFromFile } = require('./src/auth.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
@@ -188,11 +189,47 @@ function parsePath(reqUrl) {
 // 命令请求上限：附件原始总量 10MB，base64 约 13.4MB，再留 JSON 余量。
 const DEFAULT_COMMAND_BODY_LIMIT = 16 * 1024 * 1024;
 
+function parseCookie(header, name) {
+  for (const part of String(header || '').split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return decodeURIComponent(rest.join('='));
+  }
+  return null;
+}
+
+function setSessionCookie(req, res, token, ttlMs) {
+  const attrs = ['Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${Math.floor(ttlMs / 1000)}`];
+  if (req.socket && req.socket.encrypted) attrs.push('Secure');
+  res.setHeader('Set-Cookie', `sfc_session=${encodeURIComponent(token)}; ${attrs.join('; ')}`);
+}
+
+function clearSessionCookie(req, res) {
+  setSessionCookie(req, res, '', 0);
+}
+
+// 登录用户只能用自己的角色执行命令，不能靠改 body 提权
+function applyUserToCommand(req, body) {
+  if (!req.user) return;
+  if (body.role && body.role !== req.user.role) {
+    throw new ConsoleError('FORBIDDEN', `当前登录角色是「${req.user.role}」，不能以「${body.role}」执行`, 403);
+  }
+  body.role = req.user.role;
+  body.operator = req.user.username;
+}
+
 function createConsoleServer({
   service = new ConsoleService(),
   publicDir = path.join(__dirname, 'public'),
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
+  auth = null,
 } = {}) {
+  const AUTH_PUBLIC = new Set([
+    '/login.html', '/api/login', '/api/logout', '/api/me', '/api/health',
+    '/confirm.html', '/confirm.js', '/confirm.css', '/sfc1-browser.js',
+    '/api/phone/pair', '/api/phone/state', '/api/phone/decision',
+  ]);
+  const loginAttempts = new Map();
+  const loginRateLimited = (key) => rateLimited(loginAttempts, key, 5, 60 * 1000);
   // —— 手机确认端配对会话 ——
   // 配了配对码时，state/decision 必须带 X-Phone-Session；否则局域网任何人都能读待确认详情。
   const phoneSessions = new Map();          // token → { expiresAt }
@@ -232,6 +269,52 @@ function createConsoleServer({
     const { pathname, query } = parsePath(req.url || '/');
     const method = req.method || 'GET';
 
+    // —— 登录（可选；未配置用户时 auth=null，保持旧的本地演示行为）——
+    try {
+    const cookieToken = parseCookie(req.headers.cookie, 'sfc_session');
+    if (pathname === '/api/login' && method === 'POST') {
+      if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+      if (loginRateLimited(clientIp(req))) {
+        throw new ConsoleError('RATE_LIMITED', '登录尝试过多，请 1 分钟后再试', 429);
+      }
+      const body = await readJson(req);
+      const result = auth.login(body.username, body.password);
+      if (!result) throw new ConsoleError('INVALID_CREDENTIALS', '用户名或密码不正确', 401);
+      setSessionCookie(req, res, result.token, auth.ttlMs);
+      return sendJson(res, 200, { ok: true, user: result.user, expiresAt: new Date(result.expiresAt).toISOString() });
+    }
+    if (pathname === '/api/logout' && method === 'POST') {
+      if (auth && cookieToken) auth.logout(cookieToken);
+      clearSessionCookie(req, res);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (pathname === '/api/me' && method === 'GET') {
+      if (!auth) return sendJson(res, 200, { ok: true, authEnabled: false, user: null });
+      const session = auth.verify(cookieToken);
+      if (!session) throw new ConsoleError('AUTH_REQUIRED', '未登录', 401);
+      return sendJson(res, 200, { ok: true, authEnabled: true, user: { username: session.username, role: session.role }, expiresAt: new Date(session.expiresAt).toISOString() });
+    }
+    if (auth && !AUTH_PUBLIC.has(pathname)) {
+      const session = auth.verify(cookieToken);
+      if (!session) {
+        if (pathname.startsWith('/api/')) {
+          throw new ConsoleError('AUTH_REQUIRED', '请先登录', 401);
+        }
+        res.statusCode = 302;
+        res.setHeader('Location', '/login.html');
+        return res.end();
+      }
+      req.user = session;
+    }
+    } catch (err) {
+      if (err instanceof ConsoleError) {
+        return sendJson(res, err.status || 400, {
+          ok: false, error: { code: err.code, message: err.message, detail: err.detail },
+        });
+      }
+      throw err;
+    }
+
     // 局域网来源只允许确认端相关路径
     if (!isLoopbackReq(req) && !PHONE_ALLOWLIST.has(pathname)) {
       return sendJson(res, 403, {
@@ -255,6 +338,7 @@ function createConsoleServer({
       }
       if (pathname === '/api/commands' && method === 'POST') {
         const body = await readJson(req, commandBodyLimit);
+        applyUserToCommand(req, body);
         return sendJson(res, 200, await service.runCommand(body));
       }
       if (pathname === '/api/commands' && method === 'GET') {
@@ -263,6 +347,7 @@ function createConsoleServer({
       // 异步任务：起跑即返回 runId；轮询进度 / 取消
       if (pathname === '/api/commands/async' && method === 'POST') {
         const body = await readJson(req, commandBodyLimit);
+        applyUserToCommand(req, body);
         return sendJson(res, 202, { ok: true, ...service.startCommand(body) });
       }
       const runMatch = pathname.match(/^\/api\/commands\/([^/]+)$/);
@@ -482,6 +567,7 @@ async function startServer({
   storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
   auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
   mailer = null,
+  auth = null,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -506,7 +592,7 @@ async function startServer({
       instance = new ConsoleService({ documentsStore, blobStore, storeFile, auditFile, mailer: mailer || new FakeMailer() });
     }
   }
-  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit });
+  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
@@ -549,6 +635,18 @@ if (require.main === module) {
     || path.join(__dirname, 'data', 'audit.jsonl');
   const documentsDb = process.env.SAFE_OFFICE_DOCS_DB
     || path.join(__dirname, 'data', 'documents.db');
+  const usersFile = process.env.SAFE_OFFICE_USERS_FILE || path.join(__dirname, 'data', 'users.json');
+  let auth = null;
+  try {
+    auth = createAuthFromFile(usersFile);
+  } catch (err) {
+    console.error(`✗ 用户表加载失败（${usersFile}）：${err.message}`);
+    process.exit(1);
+  }
+  if (process.env.SAFE_OFFICE_AUTH === 'required' && !auth) {
+    console.error(`✗ SAFE_OFFICE_AUTH=required 但没有用户：${usersFile}（用 add-user.cjs 添加）`);
+    process.exit(1);
+  }
   let smtpMailer = null;
   try {
     smtpMailer = createSmtpMailerFromEnv();
@@ -581,12 +679,15 @@ if (require.main === module) {
     storeFile,
     auditFile,
     mailer: smtpMailer || new FakeMailer(),
+    auth,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);
     const model = service.getState().model;
     console.log(`  模型：${model.mode}${model.model ? ` / ${model.model}` : ''}`);
     if (smtpMailer) console.log('  邮件：SMTP 真实发送（收件人白名单已启用）');
+    if (auth) console.log(`  登录：已启用（${auth.users.size} 个用户，${usersFile}）`);
+    else console.log('  登录：未启用（本地演示；可用 add-user.cjs 建用户）');
     if (configInfo.loaded > 0) console.log(`  配置：config.env（${configInfo.loaded} 项）`);
     else if (!model.model) console.log('  提示：没有 config.env；想用真实模型，复制 config.env.example 再填');
     if (service.storeFile !== ':memory:') {

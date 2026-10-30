@@ -36,7 +36,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.24.0';
+const VERSION = '0.25.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -849,7 +849,9 @@ class ConsoleService {
     const generation = this.generation;
     const runId = presetRunId || `RUN-${++this.seq}`;
     const startedAt = this.now();
+    const operator = input.operator ? String(input.operator).slice(0, 64) : null;
     const auditStart = this.audit.entries.length;
+    if (operator) this.audit.append('操作者', { operator, runId });
     const { agent, token, deniedTools, deniedDocs } = this._issueAgentAndToken({ ...options, command: options.command });
     const deferred = [];
     const sandbox = options.sandboxPreset === 'physical'
@@ -945,6 +947,7 @@ class ConsoleService {
     }
     const run = {
       runId,
+      operator,
       command: options.command,
       role: agent.role,
       tools: token.tools,

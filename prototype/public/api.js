@@ -20,6 +20,9 @@
     } catch {
       data = null;
     }
+    if (res.status === 401 && !location.pathname.endsWith('/login.html')) {
+      location.href = '/login.html';
+    }
     if (!res.ok || !data || data.ok === false) {
       const info = (data && data.error) || {};
       const err = new Error(info.message || `HTTP ${res.status}`);
