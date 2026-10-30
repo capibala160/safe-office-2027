@@ -184,6 +184,13 @@ class AgentRuntime {
             // 把"本次实际授权"告诉模型（只作提示，执行期仍按令牌校验）
             authorizedTools: token ? [...token.tools] : null,
             authorizedDocs: token ? token.documentIds.slice() : null,
+            // 媒体清单：模型只知道"这段录音"时，需要看到可转写的 id 与标题
+            authorizedAudios: token
+              ? Object.values(AUDIOS).filter((a) => token.documentIds.includes(a.id)).map((a) => `${a.id}（${a.title}）`)
+              : null,
+            authorizedImages: token
+              ? Object.values(IMAGES).filter((i) => token.documentIds.includes(i.id)).map((i) => `${i.id}（${i.title}）`)
+              : null,
           }),
         );
       } catch (err) {

@@ -98,26 +98,26 @@ test('修正返回空计划：不采纳（空计划是模型放弃，不是修�
   assert.equal(repaired.detail.adopted, false);
 });
 
-test('空计划：云侧给一次重试机会，有步骤且无拦截才采纳', async () => {
+test('空计划不触发修正：实测 0 采纳，不再为它多打一次模型', async () => {
   const llm = scripted([[], VALID], 'cloud');
   const { planner, audit } = mk(llm);
   const plan = await planner.makePlan('把 M2 发给 team@corp.internal', { docs: [DOCS.M2] });
 
-  assert.equal(llm.calls.length, 2, '空计划也应触发一次修正');
-  assert.match(llm.calls[1].meta.feedback, /没有输出任何可执行步骤/);
-  assert.ok(plan.steps.length >= 1, '修正后应有可执行步骤');
-  const repaired = audit.entries.find((e) => e.kind === '计划修正结果');
-  assert.equal(repaired.detail.reason, 'empty-plan');
-  assert.equal(repaired.detail.adopted, true);
+  assert.equal(llm.calls.length, 1);
+  assert.equal(plan.steps.length, 0);
+  assert.ok(!audit.entries.some((e) => e.kind === '计划修正请求'));
 });
 
-test('空计划修正仍为空：不采纳，保持零步骤（安全）', async () => {
-  const llm = scripted([[], []], 'cloud');
-  const { planner, audit } = mk(llm);
-  const plan = await planner.makePlan('把 M2 发给 team@corp.internal', { docs: [DOCS.M2] });
-  assert.equal(plan.steps.length, 0);
-  const repaired = audit.entries.find((e) => e.kind === '计划修正结果');
-  assert.equal(repaired.detail.adopted, false);
+test('媒体清单进入授权提示（录音/图片 id + 标题）', async () => {
+  const llm = scripted([VALID], 'cloud');
+  const { planner } = mk(llm);
+  await planner.makePlan('转写这段外部厂商来电录音', {
+    docs: [DOCS.M2], authorizedTools: ['transcribeAudio'], authorizedDocs: ['A1', 'A2'],
+    authorizedAudios: ['A1（产品评审会录音）', 'A2（外部厂商来电录音）'],
+    authorizedImages: ['I1（会议白板照片）'],
+  });
+  assert.match(llm.calls[0].meta.authNote, /A2（外部厂商来电录音）/);
+  assert.match(llm.calls[0].meta.authNote, /可识别图片/);
 });
 
 test('云侧计划用了未授权工具：计划层给 finding，修正后按授权工具重出', async () => {

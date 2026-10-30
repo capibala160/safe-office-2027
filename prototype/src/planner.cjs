@@ -186,6 +186,7 @@ class GuardedPlanner {
   async makePlan(command, {
     docs = [], modelLocation, commandLevel, delegation = null, delegationVerifier = null,
     authorizedTools = null, authorizedDocs = null,
+    authorizedAudios = null, authorizedImages = null,
   } = {}) {
     // gate1 关停：外部资料不经消毒直接进提示词（消融实验专用）
     const prepared = prepareModelInput(this.llm, command, docs, {
@@ -210,9 +211,14 @@ class GuardedPlanner {
 
     // 2) 本次实际授权：只作提示词上下文，执行期仍按令牌/溯源/闸门校验
     const hasAuth = Array.isArray(authorizedTools);
+    const media = [
+      (authorizedAudios || []).length ? `可转写录音：${authorizedAudios.join('、')}` : '',
+      (authorizedImages || []).length ? `可识别图片：${authorizedImages.join('、')}` : '',
+    ].filter(Boolean).join('；');
     const authNote = hasAuth
       ? `【本次实际授权】可用工具：${authorizedTools.join('、') || '无'}；可读文档：${(authorizedDocs || []).join('、') || '无'}。`
-        + '只能使用这里列出的工具与文档；未列出的不要调用，也不要编造文档 id。'
+        + (media ? `\n本次可处理的媒体：${media}。` : '')
+        + '只能使用这里列出的工具与文档；未列出的不要调用，也不要编造 id。'
       : '';
     if (hasAuth) {
       this.audit.append('规划授权', { tools: authorizedTools, docs: authorizedDocs || [] });
@@ -243,44 +249,33 @@ class GuardedPlanner {
     const blockCount = (r) => r.findings.filter((f) => f.level === 'block').length;
 
     // 3.5) 有限次计划修正：仅云侧真实模型；修正不扩大授权（仍按原指令/原令牌重验）
-    //      触发条件：有计划被拦，或模型直接返回空计划（后者常见于“模型没敢动手”）。
+    //      只对“有计划步骤被拦”触发。空计划不触发——实测（v0.19 开发集）5 次空计划修正
+    //      全部仍为空、0 次采纳，还带来一次 180s 超时；空计划更适合靠授权/媒体清单解决。
     //      Mock 是 local，不触发；修正失败或没变好就保留第一次的校验结果。
-    const isEmptyPlan = !Array.isArray(resolved) || resolved.length === 0;
-    if ((blockCount(outcome) > 0 || isEmptyPlan) && this.maxPlanRepairs > 0 && prepared.location === 'cloud') {
+    if (blockCount(outcome) > 0 && this.maxPlanRepairs > 0 && prepared.location === 'cloud') {
       const before = blockCount(outcome);
-      const reason = isEmptyPlan ? 'empty-plan' : 'blocked-steps';
       this.audit.append('计划修正请求', {
         attempt: 1,
-        reason,
+        reason: 'blocked-steps',
         blockFindings: outcome.findings.filter((f) => f.level === 'block').map((f) => f.reason),
       });
       try {
-        const feedback = isEmptyPlan
-          ? [
-              '上一次没有输出任何可执行步骤（空数组或全部被移除）。',
-              '请只输出修正后的完整 JSON 数组；至少给出完成用户指令所需的步骤；',
-              '不要调用未授权的工具、不要编造收件人/链接，不要解释。',
-            ].join('\n')
-          : [
-              `上一次计划有 ${before} 个步骤被校验拦下：`,
-              ...outcome.findings.filter((f) => f.level === 'block').map((f) => `- ${f.reason}`),
-              '请只输出修正后的完整 JSON 数组；不要新增未授权工具、收件人或链接，不要解释。',
-            ].join('\n');
+        const feedback = [
+          `上一次计划有 ${before} 个步骤被校验拦下：`,
+          ...outcome.findings.filter((f) => f.level === 'block').map((f) => `- ${f.reason}`),
+          '请只输出修正后的完整 JSON 数组；不要新增未授权工具、收件人或链接，不要解释。',
+        ].join('\n');
         const raw2 = await this.llm.plan(prepared.command, contextBlocks, { authNote, feedback });
         const resolved2 = resolveTargets(raw2, prepared.targets);
         const second = validate(resolved2);
         const after = blockCount(second);
-        // 空计划不是“修正”，是模型放弃：除非第一次也没有可执行步骤，否则不采纳，
-        // 避免把正常任务的可用步骤一起丢掉（只对攻击样本“有利”的假提升）。
-        // 空计划修正：只有在“有步骤且没有再被拦”时才采纳。
-        const adopted = isEmptyPlan
-          ? (second.steps.length > 0 && after === 0)
-          : (after < before && (second.steps.length > 0 || outcome.steps.length === 0));
+        // 空计划不是“修正”，是模型放弃：不采纳，避免把可用步骤一起丢掉。
+        const adopted = after < before && second.steps.length > 0;
         if (adopted) {
           outcome = second;
           resolved = resolved2;
         }
-        this.audit.append('计划修正结果', { reason, before, after, adopted, steps: adopted ? resolved2.length : resolved.length });
+        this.audit.append('计划修正结果', { before, after, adopted, steps: adopted ? resolved2.length : resolved.length });
       } catch (err) {
         // 修正失败不回滚第一次的校验结果：已有的坏步骤已经被移除，执行是安全的
         this.audit.append('计划修正失败', { reason: err && err.message ? err.message : String(err) });
