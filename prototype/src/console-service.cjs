@@ -29,13 +29,14 @@ const { FulfillmentService } = require('./fulfillment.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer, MailerError } = require('./mailer.cjs');
 const { printText } = require('./print-adapter.cjs');
+const { scanAttachment } = require('./file-scan.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
 } = require('./nearfield-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.23.0';
+const VERSION = '0.24.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -112,6 +113,7 @@ class ConsoleService {
     blobStore = null,
     printer = process.env.SAFE_OFFICE_PRINTER || null,
     printAdapter = printText,
+    blobKey = process.env.SAFE_OFFICE_BLOB_KEY || null,
   } = {}) {
     this.now = now;
     this.pairingCode = pairingCode ? String(pairingCode) : null;
@@ -120,7 +122,8 @@ class ConsoleService {
     this._injectedLlm = llm;
     this.documentsStore = documentsStore;   // 导入的真实资料（null = 只有样例）
     this._ownsBlobStore = !blobStore;
-    this.blobStore = blobStore || new BlobStore(':memory:');  // 附件内容（按 sha256 寻址）
+    this.blobKey = blobKey;  // 有密钥则新附件 AES-256-GCM 加密；旧明文仍可读
+    this.blobStore = blobStore || new BlobStore(':memory:', { key: this.blobKey });  // 附件内容（按 sha256 寻址）
     this.storeFile = storeFile || ':memory:';
     this.auditFile = auditFile || null;
     this.auditCheckpointFile = this.auditFile ? `${this.auditFile}.head` : null;
@@ -768,6 +771,8 @@ class ConsoleService {
       }
       const buffer = Buffer.from(base64, 'base64');
       if (buffer.length === 0) throw new ConsoleError('BAD_REQUEST', `attachments[${index}] 是空文件`);
+      const scan = scanAttachment(buffer, { filename: name });
+      if (!scan.ok) throw new ConsoleError('BAD_REQUEST', `attachments[${index}]：${scan.reason}`);
       if (buffer.length > MAX_BLOB_BYTES) {
         throw new ConsoleError('BAD_REQUEST', `attachments[${index}] 超过 ${MAX_BLOB_BYTES / 1024 / 1024}MB`);
       }
@@ -1881,7 +1886,7 @@ class ConsoleService {
     this.generation += 1;  // 工作区换版：在途运行的结果一律作废
     this.close();
     // close() 关掉了自带的附件库；重置后要重新建一个空的
-    if (this._ownsBlobStore) this.blobStore = new BlobStore(':memory:');
+    if (this._ownsBlobStore) this.blobStore = new BlobStore(':memory:', { key: this.blobKey });
     this._clearPersistentFiles();
     this.seq = 0;
     this.agentSeq = 0;

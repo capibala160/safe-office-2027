@@ -1,5 +1,6 @@
 # 安全智慧办公（OpenHarmony × Agent 安全防护与治理）
 
+> **v0.24 附件安全（2026-10-30）**：附件上传/导入加**扩展名+魔数白名单**（拒可执行文件，改名也按魔数拦）、可选 **ClamAV**（off/auto/required，required 下无扫描器直接拒绝）、附件内容 **AES-256-GCM 落盘加密**（`SAFE_OFFICE_BLOB_KEY`，旧明文兼容）。**288 项 Node 测试全绿**。详见 [附件安全](docs/24-附件安全.md)。
 > **v0.23 手机确认端配对会话（2026-10-30）**：`--lan` 下 `state/decision` 不再裸奔——先用配对码 `POST /api/phone/pair` 换 10 分钟滑动会话 token（常数时间比较），之后请求必须带 `X-Phone-Session`；配对 5 次/分钟/IP、提交 10 次/分钟/IP，超限 429；确认页 401 自动回配对。仍是对称 PSK，不构成“证明本人在场”。**284 项 Node 测试全绿**。详见 [手机确认端](docs/14-手机确认端.md)。
 > **v0.22 真实打印 + 真删除（2026-10-30）**：打印不再只是记录——`print-adapter.cjs` 通过 PowerShell `Out-Printer` 把冻结的正文送到 `SAFE_OFFICE_PRINTER`（本机 HP LaserJet，测试页已入队 Job Id 2），未配置则明确标 `simulated`；导入资料删除改为真删 `DocumentStore`，重启不复活。门锁/设备控制仍等 WS63。**282 项 Node 测试全绿**。详见 [真实动作适配器](docs/23-真实动作适配器.md)。
 > **v0.21 真实 SMTP 发送（2026-10-30）**：新增 `SMTPMailer`（nodemailer）+ `createSmtpMailerFromEnv`——**收件人白名单 fail-closed**、附件发送前按 sha256 取回内容、SMTP 错误按 rejected/unknown 分类（unknown 禁止自动重试）；`npm start` 检测到 SMTP 配置即切真实发送，否则仍用 FakeMailer。附 `send-test-mail.cjs` 连通性测试与 `config.env.example` 配置模板。**2026-10-30 已完成真实发送验证**：QQ 邮箱连通性测试 + 完整审批链带附件发送均成功（授权码只在本机 gitignore 的 `config.env`）。**276 项 Node 测试全绿**。详见 [真实 SMTP 发送](docs/22-真实SMTP发送.md)。
@@ -27,7 +28,7 @@
 
 > **项目定位（2026-10-17 起）**：**4C 2027 物联网应用类（主参赛）+ 毕设**；以华为命题为设计参考，**不参加国创赛 2027**。原“小组任务协同 + 智能排期引擎”保留为 4C 备选。底座不再锁定 6.0.0.1：默认 **OpenHarmony 4.x/5.x 标准系统**；6.0.0.1 仅在借到对应板卡时作为可选上板目标。主线 = Node 参考实现 + 安全机制 + 评测 + **WS63 近场确认**；RK3568 主设备为可选项，不强制购买。
 > **底座（默认）**：OpenHarmony 4.x/5.x 标准系统（可选 6.0.0.1，以实际板卡/镜像为准）+ WS63 星闪节点（OH 轻量系统）
-> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.18 已跑通**：**284 测试全绿**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
+> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.18 已跑通**：**288 测试全绿**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
 
 ---
 
@@ -123,7 +124,7 @@
     │                                           console-service 控制台服务 / demo-executor 假执行器 /
     │                                           tool-registry 工具注册表 / mcp-adapter MCP 骨架 /
     │                                           faults 模型故障分类 / model-boundary 模型出口（目标占位符）/ perf 时延度量 / report 可视化 / scenario 场景
-    └── test/                                ← 284 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
+    └── test/                                ← 288 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
 ```
 
 ## 口径纪律

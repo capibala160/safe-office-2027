@@ -3,7 +3,8 @@
 // 附件内容存储（v0.16）
 //   按内容 sha256 寻址：同一份文件重复上传只存一份
 //   冻结记录里只存 {name, sha256, size}；执行前用这里的内容重算哈希比对
-// 边界：明文存本地 SQLite；不做加密与访问控制（本地单用户演示）
+// 边界：默认明文存本地 SQLite；配置 SAFE_OFFICE_BLOB_KEY 后新内容 AES-256-GCM 加密；
+//       仍不做按用户/租户的访问控制（本地单用户演示）
 // ============================================================
 const fs = require('node:fs');
 const path = require('node:path');
@@ -11,14 +12,31 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const MAX_BLOB_BYTES = 5 * 1024 * 1024;
+const ENC_MAGIC = Buffer.from('SFE1');
+const NONCE_LEN = 12;
+const TAG_LEN = 16;
+
+function parseKey(key) {
+  if (!key) return null;
+  if (Buffer.isBuffer(key)) {
+    if (key.length !== 32) throw new Error('附件加密密钥必须是 32 字节');
+    return key;
+  }
+  const text = String(key).trim();
+  if (/^[0-9a-fA-F]{64}$/.test(text)) return Buffer.from(text, 'hex');
+  const buf = Buffer.from(text, 'base64');
+  if (buf.length !== 32) throw new Error('附件加密密钥必须是 32 字节（base64 或 hex）');
+  return buf;
+}
 
 function sha256Hex(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
 class BlobStore {
-  constructor(file = ':memory:') {
+  constructor(file = ':memory:', { key = null } = {}) {
     if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
+    this.key = parseKey(key);
     this.db = new DatabaseSync(file);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS blobs (
@@ -39,11 +57,18 @@ class BlobStore {
     const sha256 = sha256Hex(buffer);
     const safeName = String(name || 'attachment').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120) || 'attachment';
     const safeMime = String(mime || 'application/octet-stream').slice(0, 80);
+    let stored = buffer;
+    if (this.key) {
+      const nonce = crypto.randomBytes(NONCE_LEN);
+      const cipher = crypto.createCipheriv('aes-256-gcm', this.key, nonce);
+      const ciphertext = Buffer.concat([cipher.update(buffer), cipher.final()]);
+      stored = Buffer.concat([ENC_MAGIC, nonce, cipher.getAuthTag(), ciphertext]);
+    }
     this.db.prepare(`
       INSERT INTO blobs (sha256, name, mime, size, content, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(sha256) DO UPDATE SET name = excluded.name, mime = excluded.mime
-    `).run(sha256, safeName, safeMime, buffer.length, buffer, now());
+    `).run(sha256, safeName, safeMime, buffer.length, stored, now());
     return { name: safeName, sha256, size: buffer.length, mime: safeMime };
   }
 
@@ -52,7 +77,17 @@ class BlobStore {
     if (!/^[0-9a-f]{64}$/.test(key)) return null;
     const row = this.db.prepare('SELECT name, mime, size, content FROM blobs WHERE sha256 = ?').get(key);
     if (!row) return null;
-    return { name: row.name, mime: row.mime, size: row.size, content: Buffer.from(row.content) };
+    let content = Buffer.from(row.content);
+    if (content.subarray(0, 4).equals(ENC_MAGIC)) {
+      if (!this.key) throw new Error('附件已加密，但未提供 SAFE_OFFICE_BLOB_KEY');
+      const nonce = content.subarray(4, 4 + NONCE_LEN);
+      const tag = content.subarray(4 + NONCE_LEN, 4 + NONCE_LEN + TAG_LEN);
+      const ciphertext = content.subarray(4 + NONCE_LEN + TAG_LEN);
+      const decipher = crypto.createDecipheriv('aes-256-gcm', this.key, nonce);
+      decipher.setAuthTag(tag);
+      content = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    }
+    return { name: row.name, mime: row.mime, size: row.size, content };
   }
 
   has(sha256) {
@@ -72,4 +107,4 @@ class BlobStore {
   }
 }
 
-module.exports = { BlobStore, MAX_BLOB_BYTES, sha256Hex };
+module.exports = { BlobStore, MAX_BLOB_BYTES, sha256Hex, parseKey };

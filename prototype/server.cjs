@@ -12,9 +12,10 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
-const { BlobStore } = require('./src/blob-store.cjs');
+const { BlobStore, parseKey } = require('./src/blob-store.cjs');
 const { FakeMailer } = require('./src/mailer.cjs');
 const { createSmtpMailerFromEnv } = require('./src/smtp-mailer.cjs');
+const { scanAttachment } = require('./src/file-scan.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
@@ -285,9 +286,13 @@ function createConsoleServer({
           throw new ConsoleError('BAD_REQUEST', 'contentBase64 不是合法 base64');
         }
         try {
-          const doc = importBuffer(service.documentsStore, {
-            filename, buffer: Buffer.from(contentBase64, 'base64'), level: body.level,
-          });
+          const buffer = Buffer.from(contentBase64, 'base64');
+          // 只对导入支持的文档类型做附件安全检查；扩展名不支持时交给 importBuffer 报错
+          if (['.txt', '.md', '.docx'].includes(path.extname(filename).toLowerCase())) {
+            const scan = scanAttachment(buffer, { filename });
+            if (!scan.ok) throw new ConsoleError('BAD_REQUEST', scan.reason);
+          }
+          const doc = importBuffer(service.documentsStore, { filename, buffer, level: body.level });
           // 立即并入文档视图，不用重启
           registerDocuments([{ id: doc.id, title: doc.title, level: doc.level, body: doc.body }]);
           return sendJson(res, 200, {
@@ -561,7 +566,8 @@ if (require.main === module) {
     || path.join(__dirname, 'data', 'attachments.db');
   let blobStore = null;
   try {
-    blobStore = new BlobStore(attachmentsDb);
+    const blobKey = parseKey(process.env.SAFE_OFFICE_BLOB_KEY || null);
+    blobStore = new BlobStore(attachmentsDb, { key: blobKey });
   } catch (err) {
     console.warn(`⚠ 附件库打不开（${attachmentsDb}）：${err.message}；本次不能带附件`);
   }
