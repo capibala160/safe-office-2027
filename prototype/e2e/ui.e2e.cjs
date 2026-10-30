@@ -47,6 +47,11 @@ test('UI：登录 → 运行样例 → 打开审批页 → 退出', { timeout: 9
   await page.waitForSelector('#toast.show');
   assert.match(await page.textContent('#toast'), /样例执行完成/);
 
+  // 治理页：员工不能读完整审计，但页面不能报错
+  await page.goto(`${started.url}/#/governance`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#view');
+  assert.match(await page.textContent('body'), /需要审计员/);
+
   // 审批页
   await page.goto(`${started.url}/#/approvals`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#view');

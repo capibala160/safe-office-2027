@@ -875,7 +875,12 @@
   // ---------- 治理 ----------
   async function governance(root, c) {
     const gov = await API.get('/api/governance');
-    const audit = await API.get('/api/audit?limit=50');
+    const authUser = c.store.bootstrap && c.store.bootstrap.authUser;
+    const roleName = authUser ? authUser.role : null;
+    const canReview = !authUser || ['管理员', '审计员'].includes(roleName);
+    const canAdmin = !authUser || roleName === '管理员';
+    const canReport = !authUser || ['管理员', '审计员'].includes(roleName);
+    const audit = canReport ? await API.get('/api/audit?limit=50').catch(() => null) : null;
     const risk = gov.risk;
     const policy = gov.policy || {};
     const roles = Object.keys(policy);
@@ -886,7 +891,7 @@
       <div class="grid-2">
         <section class="card">
           <div class="card-head"><h2>风险</h2>${risk.frozen ? badge('frozen') : badge('pass')}</div>
-          <div class="spread"><div class="risk-num">${esc(risk.score)}<span class="sub"> / ${esc(risk.threshold)}</span></div><div class="btn-row"><button class="btn small" id="gov-clear">复核 clear</button><button class="btn ghost small" id="gov-escalate">escalate</button></div></div>
+          <div class="spread"><div class="risk-num">${esc(risk.score)}<span class="sub"> / ${esc(risk.threshold)}</span></div><div class="btn-row">${canReview ? '<button class="btn small" id="gov-clear">复核 clear</button><button class="btn ghost small" id="gov-escalate">escalate</button>' : '<span class="sub">仅审计员/管理员可复核</span>'}</div></div>
           <div class="risk-bar mt8"><span data-risk-width="${Math.min(100, Math.round((risk.score / risk.threshold) * 100))}"></span></div>
           <div class="event-list mt12">${(risk.events || []).slice().reverse().slice(0, 6).map((e) => `<div class="event warn"><div><div class="kind">+${esc(e.points)} ${esc(e.reason)}</div></div><div class="seq">${esc(e.score)}</div></div>`).join('') || '<div class="empty">无风险事件</div>'}</div>
         </section>
@@ -895,7 +900,7 @@
           <div class="stack">
             <div class="spread"><span>审计链</span>${badge(gov.audit.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.audit.count)} 条</span></div>
             <div class="spread"><span>事件链（SQLite）</span>${badge(gov.events.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.events.count)} 条</span></div>
-            <div class="btn-row"><button class="btn small" id="gov-tamper">篡改链演示</button><button class="btn ghost small" id="gov-report">生成治理报告</button><button class="btn ghost small" id="gov-reset">重置演示</button></div>
+            <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
           </div>
           <div id="gov-tamper-result" class="mt12"></div>
         </section>
@@ -904,7 +909,7 @@
       <section class="card"><div class="card-head"><h2>办公能力分级</h2><span class="sub">${gov.capabilities.length} 类</span></div><div class="table-wrap"><table class="table"><thead><tr><th>能力</th><th>级别</th><th>工具</th><th>约束</th></tr></thead><tbody>${gov.capabilities.map((cap) => `<tr><td>${esc(cap.name)}</td><td>${badge(cap.level)}</td><td class="mono">${esc(cap.tools.join(', '))}</td><td>${esc(cap.constraints)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>工具注册表</h2><span class="sub">${(gov.tools || []).length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>工具</th><th>能力</th><th>级别</th><th>高危</th><th>转交</th><th>来源</th></tr></thead><tbody>${(gov.tools || []).map((tool) => `<tr><td class="mono">${esc(tool.name)}</td><td>${esc(tool.capability)}</td><td>${badge(tool.level)}</td><td>${tool.highRisk ? '是' : '否'}</td><td>${tool.deferred ? '是' : '否'}</td><td>${esc(tool.source)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>时延</h2></div><div class="table-wrap"><table class="table"><thead><tr><th>阶段</th><th>次数</th><th>合计</th><th>均值</th><th>峰值</th></tr></thead><tbody>${gov.perf.map((p) => `<tr><td>${esc(p.label)}</td><td>${esc(p.count)}</td><td>${esc(Number(p.totalMs).toFixed(2))} ms</td><td>${esc(Number(p.avgMs).toFixed(3))} ms</td><td>${esc(Number(p.maxMs).toFixed(3))} ms</td></tr>`).join('')}</tbody></table></div></section>
-      <section class="card"><div class="card-head"><h2>审计时间线</h2><span class="sub">最近 ${audit.items.length} 条</span></div><div class="event-list">${audit.items.slice().reverse().map(eventItem).join('') || '<div class="empty">暂无审计</div>'}</div></section>`;
+      <section class="card"><div class="card-head"><h2>审计时间线</h2>${audit ? `<span class="sub">最近 ${audit.items.length} 条</span>` : '<span class="sub">需要审计员/管理员权限</span>'}</div>${audit ? `<div class="event-list">${audit.items.slice().reverse().map(eventItem).join('') || '<div class="empty">暂无审计</div>'}</div>` : '<div class="notice block">当前角色不可读取完整审计日志。</div>'}</section>`;
 
     const bar = root.querySelector('[data-risk-width]');
     if (bar) bar.style.width = `${bar.dataset.riskWidth}%`;
@@ -917,18 +922,18 @@
         c.rerender();
       } catch (err) { toast(c.errorText(err), 'error'); }
     };
-    root.querySelector('#gov-clear').addEventListener('click', () => review('clear'));
-    root.querySelector('#gov-escalate').addEventListener('click', () => review('escalate'));
-    root.querySelector('#gov-tamper').addEventListener('click', async () => {
+    root.querySelector('#gov-clear')?.addEventListener('click', () => review('clear'));
+    root.querySelector('#gov-escalate')?.addEventListener('click', () => review('escalate'));
+    root.querySelector('#gov-tamper')?.addEventListener('click', async () => {
       try {
         const res = await API.post('/api/governance/audit-tamper-demo', {});
         root.querySelector('#gov-tamper-result').innerHTML = `<div class="notice ${res.tampered ? 'info' : 'block'}">原链校验：${res.original ? '通过' : '断裂'}；克隆链篡改后：${res.tampered ? '通过（异常）' : '断裂（预期）'}。<div class="sub-text mt8">${esc(res.note || '')}</div></div>`;
       } catch (err) { toast(c.errorText(err), 'error'); }
     });
-    root.querySelector('#gov-report').addEventListener('click', () => {
+    root.querySelector('#gov-report')?.addEventListener('click', () => {
       window.open('/api/report', '_blank', 'noopener');
     });
-    root.querySelector('#gov-reset').addEventListener('click', async () => {
+    root.querySelector('#gov-reset')?.addEventListener('click', async () => {
       if (!window.confirm('重置演示会清空审计、操作和风险，确定吗？')) return;
       try {
         await API.post('/api/reset', {});
