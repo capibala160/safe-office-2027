@@ -1,5 +1,6 @@
 # 安全智慧办公（OpenHarmony × Agent 安全防护与治理）
 
+> **v0.29 接口权限 + Cookie 容错 + 审计落盘状态（2026-10-30）**：补接口级角色权限——访客不能再审批/改模式/复核/重置，员工发起、设备助手批准、管理员管理；启用真实动作时默认关闭虚拟批准入口（409，改走手机/WS63）。坏 Cookie 不再打崩进程（安全解码 + 全局 catch）。审计检查点父目录自动创建，并区分「链有效」与「落盘失败」。评测 `--resume` 增加实验配置指纹（模型/提示词/语料/档位/轮数/消融层），不一致不复用。**303 项 Node 测试 + E2E 全绿**。详见 [接口权限与恢复可靠性](docs/29-接口权限与恢复可靠性.md)。
 > **v0.28 浏览器 E2E（2026-10-30）**：新增 Playwright E2E（`npm run e2e`）：未登录跳转 → 登录 → 工作台一键样例 → 审批页 → 退出；并修掉登录页被 CSP 拦截导致**密码进入 URL**的缺陷（内联 CSS/JS 拆成同源外链、按钮改 type=button）。**297 项 Node 测试 + 1 项浏览器 E2E 全绿**。详见 [浏览器 E2E](docs/28-浏览器E2E.md)。
 > **v0.27 MCP 真实联调（2026-10-30）**：仓库内新增 `mcp-server.cjs`（JSON-RPC，initialize/tools/list/tools/call，wordCount/echo，可选 token），现有 `McpClient` 走真实 HTTP 完成联调，并注册进 `ToolRegistry`（必须显式 sandbox + 角色策略）。**297 项 Node 测试全绿**。详见 [MCP 真实联调](docs/27-MCP真实联调.md)。
 > **v0.26 审计检查点签名（2026-10-30）**：审计检查点加 **HMAC-SHA256**（`SAFE_OFFICE_AUDIT_KEY`），并支持 `SAFE_OFFICE_AUDIT_CHECKPOINT` 放到独立路径/另一块盘；改 count/head、换链、丢 key 都会拒绝恢复（从新链开始并留痕）。**294 项 Node 测试全绿**。详见 [审计检查点签名](docs/26-审计检查点签名.md)。
@@ -32,7 +33,7 @@
 
 > **项目定位（2026-10-17 起）**：**4C 2027 物联网应用类（主参赛）+ 毕设**；以华为命题为设计参考，**不参加国创赛 2027**。原“小组任务协同 + 智能排期引擎”保留为 4C 备选。底座不再锁定 6.0.0.1：默认 **OpenHarmony 4.x/5.x 标准系统**；6.0.0.1 仅在借到对应板卡时作为可选上板目标。主线 = Node 参考实现 + 安全机制 + 评测 + **WS63 近场确认**；RK3568 主设备为可选项，不强制购买。
 > **底座（默认）**：OpenHarmony 4.x/5.x 标准系统（可选 6.0.0.1，以实际板卡/镜像为准）+ WS63 星闪节点（OH 轻量系统）
-> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.18 已跑通**：**297 测试全绿 + 1 项浏览器 E2E**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
+> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.29 已跑通**：**303 测试全绿 + 1 项浏览器 E2E**、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
 
 ---
 
@@ -128,7 +129,7 @@
     │                                           console-service 控制台服务 / demo-executor 假执行器 /
     │                                           tool-registry 工具注册表 / mcp-adapter MCP 骨架 /
     │                                           faults 模型故障分类 / model-boundary 模型出口（目标占位符）/ perf 时延度量 / report 可视化 / scenario 场景
-    └── test/                                ← 297 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
+    └── test/                                ← 303 项测试（npm test，全绿）；attacks=点名攻击样例库；resilience=假端点健壮性；agents=角色/清单/令牌/委托；ws63-protocol=SFC1 编解码与 Node/C 固定向量；fulfillment=操作记录/发送状态机；nearfield-confirm=WS63 适配器 6 类场景；console-service/server=办公套件控制台 10 页/HTTP；tool-registry=注册表/MCP；eval-harness=评测自身回归；ablation=单层消融开关
 ```
 
 ## 口径纪律

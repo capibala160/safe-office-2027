@@ -263,3 +263,26 @@ test('审计检查点：HMAC 签名 + 独立路径；篡改签名/换密钥都�
   assert.equal(third.audit.entries[0].kind, '审计恢复失败');
   third.close();
 });
+
+test('审计检查点：父目录不存在时自动创建，状态显示 persisted=true', async (t) => {
+  const crypto = require('node:crypto');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-audit-dir-'));
+  const store = path.join(dir, 'ops.db');
+  const audit = path.join(dir, 'audit.jsonl');
+  const checkpoint = path.join(dir, 'nested', 'deep', 'audit.head');
+  const key = crypto.randomBytes(32).toString('base64');
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  const service = new ConsoleService({ storeFile: store, auditFile: audit, auditCheckpointFile: checkpoint, auditKey: key });
+  await service.runCommand({ command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [] });
+  const state = service.getState();
+  assert.equal(fs.existsSync(checkpoint), true, '检查点父目录应自动创建');
+  assert.equal(state.audit.persisted, true);
+  assert.equal(state.audit.persistError, null);
+  service.close();
+
+  const reopened = new ConsoleService({ storeFile: store, auditFile: audit, auditCheckpointFile: checkpoint, auditKey: key });
+  assert.ok(reopened.audit.entries.length > 1);
+  assert.equal(reopened.getState().audit.restoreError, null);
+  reopened.close();
+});

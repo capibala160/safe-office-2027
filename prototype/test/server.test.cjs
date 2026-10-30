@@ -39,7 +39,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.28.0');
+  assert.equal(data.version, '0.29.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -369,4 +369,105 @@ test('登录：未登录 401 / 未登录页面 302 / 登录后可访问 / 角色
   assert.equal(logout.status, 200);
   const after = await fetch(`${started.url}/api/me`, { headers: { Cookie: cookie } });
   assert.equal(after.status, 401);
+});
+
+test('接口权限：访客不能审批/改模式/复核/重置；员工可发起，设备助手可批准，管理员可改模式', async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const users = [
+    mk('emp', '员工'), mk('visitor', '访客'), mk('device', '设备助手'),
+    mk('admin', '管理员'), mk('auditor', '审计员'),
+  ];
+  const auth = new AuthService({ users });
+  const started = await startServer({ port: 0, auth, allowVirtualConfirm: true });
+  t.after(() => started.close());
+  const cookie = (name) => `sfc_session=${auth.login(name, 'password123').token}`;
+
+  const run = await fetch(`${started.url}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('emp') },
+    body: JSON.stringify({
+      command: '把周例会纪要发给外部参会方 partner@partner-example.com',
+      role: '员工', tools: ['readDoc', 'sendExternalEmail'], documentIds: ['M2'],
+      domains: ['partner-example.com'],
+    }),
+  });
+  assert.equal(run.status, 200);
+  const op = (await run.json()).operations[0];
+  assert.ok(op);
+
+  const challengeAsVisitor = await fetch(`${started.url}/api/operations/${op.operationId}/challenge`, {
+    method: 'POST', headers: { Cookie: cookie('visitor') },
+  });
+  assert.equal(challengeAsVisitor.status, 403);
+
+  const modeAsVisitor = await fetch(`${started.url}/api/mode`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie('visitor') },
+    body: JSON.stringify({ mode: 'auto-full' }),
+  });
+  assert.equal(modeAsVisitor.status, 403);
+
+  const resetAsVisitor = await fetch(`${started.url}/api/reset`, { method: 'POST', headers: { Cookie: cookie('visitor') } });
+  assert.equal(resetAsVisitor.status, 403);
+
+  const reviewAsVisitor = await fetch(`${started.url}/api/governance/review`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie('visitor') },
+    body: JSON.stringify({ outcome: 'clear' }),
+  });
+  assert.equal(reviewAsVisitor.status, 403);
+
+  const challenge = await fetch(`${started.url}/api/operations/${op.operationId}/challenge`, {
+    method: 'POST', headers: { Cookie: cookie('emp') },
+  });
+  assert.equal(challenge.status, 200);
+  const { challenge: ch } = await challenge.json();
+
+  // 员工不能冒充设备批准
+  const decideAsEmp = await fetch(`${started.url}/api/device/challenges/${ch.challengeId}/decide`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie('emp') },
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+  assert.equal(decideAsEmp.status, 403);
+
+  const decideAsDevice = await fetch(`${started.url}/api/device/challenges/${ch.challengeId}/decide`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie('device') },
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+  assert.equal(decideAsDevice.status, 200);
+
+  const modeAsAdmin = await fetch(`${started.url}/api/mode`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie('admin') },
+    body: JSON.stringify({ mode: 'manual' }),
+  });
+  assert.equal(modeAsAdmin.status, 200);
+});
+
+test('虚拟批准入口：allowVirtualConfirm=false 时设备助手也拿 409', async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'device', role: '设备助手', salt, hash }] });
+  const started = await startServer({ port: 0, auth, allowVirtualConfirm: false });
+  t.after(() => started.close());
+  const token = auth.login('device', 'password123').token;
+  const res = await fetch(`${started.url}/api/device/challenges/whatever/decide`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: `sfc_session=${token}` },
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+  assert.equal(res.status, 409);
+});
+
+test('坏 Cookie：不崩溃，返回 401/200', async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'alice', role: '员工', salt, hash }] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+
+  const health = await fetch(`${started.url}/api/health`, { headers: { Cookie: 'sfc_session=%ZZ' } });
+  assert.equal(health.status, 200);
+  const boot = await fetch(`${started.url}/api/bootstrap`, { headers: { Cookie: 'sfc_session=%ZZ' } });
+  assert.equal(boot.status, 401);
+  // 进程仍存活
+  const again = await fetch(`${started.url}/api/health`);
+  assert.equal(again.status, 200);
 });

@@ -85,6 +85,10 @@ const HELP = `
   const meta = buildMeta({
     llmKind: kind, modelName, repeats: opts.repeat, corpusVersion: CORPUS_VERSION, cases, split: opts.split,
   });
+  meta.fingerprint = experimentFingerprint({
+    modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: opts.split,
+    tiers, repeats: opts.repeat,
+  });
   // 逐条落盘：真实模型一轮几十分钟，断电/崩溃时 partial 文件仍可用
   const partialPath = join(opts.out, 'eval-partial.json');
   // 断点续跑：复用上一次 partial 里"已完成且无故障"的样本；repeat>1 时不做（分不清第几轮）
@@ -92,10 +96,14 @@ const HELP = `
   if (opts.resume && opts.repeat === 1 && fs.existsSync(partialPath)) {
     try {
       const prior = JSON.parse(fs.readFileSync(partialPath, 'utf8'));
-      for (const row of prior.runs || []) {
-        if (!row.modelFault) priorRuns.set(`${row.tier}|${row.caseId}|0`, row);
+      if (!prior.meta || prior.meta.fingerprint !== meta.fingerprint) {
+        console.log('  续跑：配置指纹不一致（模型/提示词/语料/档位/轮数变了），忽略旧样本');
+      } else {
+        for (const row of prior.runs || []) {
+          if (!row.modelFault) priorRuns.set(`${row.tier}|${row.caseId}|0`, row);
+        }
+        console.log(`  续跑：复用已完成样本 ${priorRuns.size} 条（故障样本重跑）`);
       }
-      console.log(`  续跑：复用已完成样本 ${priorRuns.size} 条（故障样本重跑）`);
     } catch { /* partial 坏了就当没有 */ }
   }
   const runs = await runAll({
@@ -112,14 +120,22 @@ const HELP = `
   let ablationRuns = null;
   if (ablationLayers.length > 0) {
     console.log(`  单层消融：${ablationLayers.map((l) => l.label).join('、')}（每层 × ${cases.length} 条 × ${opts.repeat} 轮）`);
-    const ablationMeta = { ...meta, ablation: ablationLayers.map((l) => l.id) };
+    const ablationIds = ablationLayers.map((l) => l.id);
+    const ablationMeta = {
+      ...meta,
+      ablation: ablationIds,
+      fingerprint: experimentFingerprint({
+        modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: opts.split,
+        tiers: ['full'], repeats: opts.repeat, ablation: ablationIds,
+      }),
+    };
     const ablationPartialPath = join(opts.out, 'ablation-partial.json');
     // 续跑：只复用“同轮数、同层、无故障”的样本
     const ablationPrior = new Map();
     if (opts.resume && fs.existsSync(ablationPartialPath)) {
       try {
         const prior = JSON.parse(fs.readFileSync(ablationPartialPath, 'utf8'));
-        if (prior.meta && prior.meta.repeats === opts.repeat) {
+        if (prior.meta && prior.meta.fingerprint === ablationMeta.fingerprint) {
           for (const row of prior.runs || []) {
             if (row.modelFault || !Array.isArray(row.ablation) || row.ablation.length !== 1) continue;
             ablationPrior.set(`${row.ablation[0]}|${row.caseId}|${row.repeatIndex ?? 0}`, row);

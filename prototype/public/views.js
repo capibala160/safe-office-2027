@@ -198,7 +198,7 @@
         ${stat('文档 / 图片 / 录音', (counts.documents || 0) + (counts.images || 0) + (counts.audios || 0), '演示数据')}
         ${stat('待确认操作', counts.pendingOperations || 0, '冻结记录')}
         ${stat('风险分', `${risk.score || 0} / ${risk.threshold || 60}`, risk.frozen ? '已冻结' : '正常')}
-        ${stat('审计条目', counts.audit || 0, state.audit && state.audit.verified ? '链校验通过' : '链校验异常')}
+        ${stat('审计条目', counts.audit || 0, state.audit && !state.audit.verified ? '链校验异常' : (state.audit && state.audit.persisted === false ? '链有效 · 落盘失败' : '链校验通过'))}
       </div>
       <div class="two-col">
         <section class="card">

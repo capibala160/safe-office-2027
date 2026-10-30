@@ -192,7 +192,8 @@ const DEFAULT_COMMAND_BODY_LIMIT = 16 * 1024 * 1024;
 function parseCookie(header, name) {
   for (const part of String(header || '').split(';')) {
     const [key, ...rest] = part.trim().split('=');
-    if (key === name) return decodeURIComponent(rest.join('='));
+    if (key !== name) continue;
+    try { return decodeURIComponent(rest.join('=')); } catch { return null; }
   }
   return null;
 }
@@ -222,6 +223,7 @@ function createConsoleServer({
   publicDir = path.join(__dirname, 'public'),
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
   auth = null,
+  allowVirtualConfirm = true,
 } = {}) {
   const AUTH_PUBLIC = new Set([
     '/login.html', '/login.css', '/login.js', '/api/login', '/api/logout', '/api/me', '/api/health',
@@ -230,6 +232,18 @@ function createConsoleServer({
   ]);
   const loginAttempts = new Map();
   const loginRateLimited = (key) => rateLimited(loginAttempts, key, 5, 60 * 1000);
+  const ROLE_APPROVE = new Set(['员工', '管理员']);
+  const ROLE_DEVICE = new Set(['设备助手', '管理员']);
+  const ROLE_ADMIN = new Set(['管理员']);
+  const ROLE_REVIEW = new Set(['管理员', '审计员']);
+  const ROLE_DOC_READ = new Set(['员工', '管理员', '审计员']);
+  function requireRole(req, roles, action) {
+    if (!auth) return; // 未启用登录：保持本地演示行为
+    if (!req.user) throw new ConsoleError('AUTH_REQUIRED', '请先登录', 401);
+    if (!roles.has(req.user.role)) {
+      throw new ConsoleError('FORBIDDEN', '角色「' + req.user.role + '」无权' + action, 403);
+    }
+  }
   // —— 手机确认端配对会话 ——
   // 配了配对码时，state/decision 必须带 X-Phone-Session；否则局域网任何人都能读待确认详情。
   const phoneSessions = new Map();          // token → { expiresAt }
@@ -265,7 +279,22 @@ function createConsoleServer({
     session.expiresAt = Date.now() + SESSION_TTL_MS; // 滑动续期
   }
 
-  const server = http.createServer(async (req, res) => {
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res).catch((err) => {
+      console.error('[console] unhandled', err);
+      try {
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ ok: false, error: { code: 'INTERNAL', message: '服务内部错误' } }));
+        } else {
+          res.destroy();
+        }
+      } catch { /* ignore */ }
+    });
+  });
+
+  async function handleRequest(req, res) {
     const { pathname, query } = parsePath(req.url || '/');
     const method = req.method || 'GET';
 
@@ -360,6 +389,7 @@ function createConsoleServer({
       }
       // 浏览器上传导入：请求体为 base64，服务端做扩展名白名单 + 魔数/编码嗅探 + 大小上限
       if (pathname === '/api/documents/import' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '导入资料');
         if (!service.documentsStore) {
           throw new ConsoleError('CONFLICT', '文档库未启用：请用 npm start 启动（内存模式不接导入）', 409);
         }
@@ -417,6 +447,7 @@ function createConsoleServer({
         return sendJson(res, 200, { ok: true, ...service.getOperation(decodeURIComponent(opMatch[1])) });
       }
       const opBody = pathname.match(/^\/api\/operations\/([^/]+)\/body$/);
+      if (opBody) requireRole(req, ROLE_DOC_READ, '读取操作正文');
       if (opBody && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getOperationBody(decodeURIComponent(opBody[1])) });
       }
@@ -425,10 +456,12 @@ function createConsoleServer({
         return sendJson(res, 200, service.editOperationBody(decodeURIComponent(opBody[1]), body));
       }
       const opRevisions = pathname.match(/^\/api\/operations\/([^/]+)\/revisions$/);
+      if (opRevisions) requireRole(req, ROLE_DOC_READ, '读取操作历史');
       if (opRevisions && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.listOperationRevisions(decodeURIComponent(opRevisions[1])) });
       }
       const opAttachment = pathname.match(/^\/api\/operations\/([^/]+)\/attachments\/([^/]+)$/);
+      if (opAttachment) requireRole(req, ROLE_DOC_READ, '下载附件');
       if (opAttachment && method === 'GET') {
         const file = service.getAttachment(
           decodeURIComponent(opAttachment[1]), decodeURIComponent(opAttachment[2]),
@@ -436,22 +469,27 @@ function createConsoleServer({
         return sendBinary(res, file.content, { filename: file.name, mime: file.mime });
       }
       const opChallenge = pathname.match(/^\/api\/operations\/([^/]+)\/challenge$/);
+      if (opChallenge) requireRole(req, ROLE_APPROVE, '发起确认');
       if (opChallenge && method === 'POST') {
         return sendJson(res, 200, { ok: true, challenge: service.beginChallenge(decodeURIComponent(opChallenge[1])) });
       }
       const opReject = pathname.match(/^\/api\/operations\/([^/]+)\/reject$/);
+      if (opReject) requireRole(req, ROLE_APPROVE, '驳回操作');
       if (opReject && method === 'POST') {
         return sendJson(res, 200, service.rejectOperation(decodeURIComponent(opReject[1])));
       }
       const opTamper = pathname.match(/^\/api\/operations\/([^/]+)\/verify-tamper$/);
+      if (opTamper) requireRole(req, ROLE_APPROVE, '校验操作');
       if (opTamper && method === 'POST') {
         return sendJson(res, 200, service.verifyTamper(decodeURIComponent(opTamper[1])));
       }
       const opSend = pathname.match(/^\/api\/operations\/([^/]+)\/send$/);
+      if (opSend) requireRole(req, ROLE_APPROVE, '执行操作');
       if (opSend && method === 'POST') {
         return sendJson(res, 200, await service.sendOperation(decodeURIComponent(opSend[1])));
       }
       if (pathname === '/api/rollback' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '回滚');
         const body = await readJson(req);
         return sendJson(res, 200, service.rollback(body.seq));
       }
@@ -488,29 +526,41 @@ function createConsoleServer({
         return sendJson(res, 200, await service.submitPhoneDecision(body.challengeId, body.frame));
       }
       const decideMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/decide$/);
+      if (decideMatch) requireRole(req, ROLE_DEVICE, '虚拟设备批准');
       if (decideMatch && method === 'POST') {
+        if (!allowVirtualConfirm) {
+          throw new ConsoleError('CONFLICT', '已启用真实动作，虚拟设备批准入口已关闭；请用手机/WS63 确认', 409);
+        }
         const body = await readJson(req);
         return sendJson(res, 200, await service.decideChallenge(decodeURIComponent(decideMatch[1]), body.decision));
       }
       const expireMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/expire$/);
+      if (expireMatch) requireRole(req, ROLE_DEVICE, '模拟确认超时');
       if (expireMatch && method === 'POST') {
         return sendJson(res, 200, service.expireChallenge(decodeURIComponent(expireMatch[1])));
       }
       const tamperMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/tamper$/);
+      if (tamperMatch) requireRole(req, ROLE_DEVICE, '篡改确认帧');
       if (tamperMatch && method === 'POST') {
         return sendJson(res, 200, await service.tamperChallenge(decodeURIComponent(tamperMatch[1])));
       }
       if (pathname === '/api/device/replay' && method === 'POST') {
+        requireRole(req, ROLE_DEVICE, '重放确认');
+        if (!allowVirtualConfirm) {
+          throw new ConsoleError('CONFLICT', '已启用真实动作，虚拟设备入口已关闭', 409);
+        }
         return sendJson(res, 200, service.replayLastDecision());
       }
       if (pathname === '/api/governance' && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getGovernance() });
       }
       if (pathname === '/api/governance/review' && method === 'POST') {
+        requireRole(req, ROLE_REVIEW, '风险复核');
         const body = await readJson(req);
         return sendJson(res, 200, service.reviewRisk(body));
       }
       if (pathname === '/api/governance/audit-tamper-demo' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '审计篡改演示');
         return sendJson(res, 200, service.auditTamperDemo());
       }
       if (pathname === '/api/audit' && method === 'GET') {
@@ -524,10 +574,12 @@ function createConsoleServer({
         return sendHtml(res, 200, service.getReport());
       }
       if (pathname === '/api/mode' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '修改自动模式');
         const body = await readJson(req);
         return sendJson(res, 200, service.setAutoMode(body.mode));
       }
       if (pathname === '/api/reset' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '重置工作区');
         return sendJson(res, 200, { ok: true, state: service.reset() });
       }
       if (pathname.startsWith('/api/')) {
@@ -549,7 +601,7 @@ function createConsoleServer({
       console.error('[console]', err);
       return sendJson(res, 500, { ok: false, error: { code: 'INTERNAL', message: '服务内部错误' } });
     }
-  });
+  }
   server.consoleService = service;
   return server;
 }
@@ -568,6 +620,7 @@ async function startServer({
   auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
   mailer = null,
   auth = null,
+  allowVirtualConfirm = true,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -592,7 +645,7 @@ async function startServer({
       instance = new ConsoleService({ documentsStore, blobStore, storeFile, auditFile, mailer: mailer || new FakeMailer() });
     }
   }
-  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth });
+  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
@@ -680,6 +733,10 @@ if (require.main === module) {
     auditFile,
     mailer: smtpMailer || new FakeMailer(),
     auth,
+    // 启用真实动作（SMTP / 真实打印机）时默认关闭虚拟设备批准入口
+    allowVirtualConfirm: String(process.env.SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM || '').toLowerCase() === '1'
+      ? true
+      : !(smtpMailer || process.env.SAFE_OFFICE_PRINTER),
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);

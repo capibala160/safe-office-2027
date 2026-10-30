@@ -36,7 +36,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.28.0';
+const VERSION = '0.29.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -131,6 +131,7 @@ class ConsoleService {
     this.auditCheckpointFile = auditCheckpointFile || (this.auditFile ? `${this.auditFile}.head` : null);
     this.auditKey = auditKey ? Buffer.from(String(auditKey), /^[0-9a-fA-F]{64}$/.test(String(auditKey)) ? 'hex' : 'base64') : null;
     if (this.auditKey && this.auditKey.length < 16) throw new Error('SAFE_OFFICE_AUDIT_KEY 至少 16 字节');
+    this.auditPersist = { enabled: !!this.auditFile, ok: true, error: null };
     this.generation = 0;          // 工作区版本：reset 时自增，用于丢弃在途旧结果
     this.recoveredInFlight = 0;
     this._auditRestoreError = null;
@@ -335,6 +336,7 @@ class ConsoleService {
     if (!this.auditFile) return;
     try {
       fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
+      fs.mkdirSync(path.dirname(this.auditCheckpointFile), { recursive: true });
       if (!this._auditJsonl) {
         AuditLog.writeLines(this.auditFile, this.audit.entries);
         this._auditJsonl = true;
@@ -343,7 +345,13 @@ class ConsoleService {
       }
       const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
       fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
-    } catch { /* 落盘失败不打断运行；下一条 append 会重试 */ }
+      this.auditPersist.ok = true;
+      this.auditPersist.error = null;
+    } catch (err) {
+      // 内存链仍可用，但必须如实暴露“没有落盘”
+      this.auditPersist.ok = false;
+      this.auditPersist.error = err && err.message ? err.message : String(err);
+    }
   }
 
   // 全量快照：仅迁移/关闭/reset 等少数场景使用
@@ -352,11 +360,18 @@ class ConsoleService {
     try {
       if (!this.audit.verify()) return;
       fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
+      fs.mkdirSync(path.dirname(this.auditCheckpointFile), { recursive: true });
       AuditLog.writeLines(this.auditFile, this.audit.entries);
       this._auditJsonl = true;
       const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
       fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
-    } catch { /* 落盘失败不打断运行；下一条 append 会重试 */ }
+      this.auditPersist.ok = true;
+      this.auditPersist.error = null;
+    } catch (err) {
+      // 内存链仍可用，但必须如实暴露“没有落盘”
+      this.auditPersist.ok = false;
+      this.auditPersist.error = err && err.message ? err.message : String(err);
+    }
   }
 
   // 模型信息要如实反映实际用的实现，不能对真实模型还标"MockLLM（演示）"
@@ -431,6 +446,10 @@ class ConsoleService {
       },
       audit: {
         verified: this.audit.verify(),
+        persisted: this.auditPersist.ok,
+        persistError: this.auditPersist.error,
+        restoreError: this._auditRestoreError || null,
+        checkpointFile: this.auditCheckpointFile || null,
         checkpoint: this.audit.checkpoint(),
         recent: this.audit.entries.slice(-8).map((e) => ({
           seq: e.seq, kind: e.kind, ts: e.ts, detail: e.detail,
