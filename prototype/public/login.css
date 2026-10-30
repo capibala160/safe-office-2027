@@ -1,0 +1,15 @@
+:root { --ink:#1a2028; --sub:#5b6b7c; --line:#e3e8ee; --bg:#f6f8fa; --card:#fff; --info:#345d9d; --bad:#c0392b; }
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink);
+       font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+.card { width:min(380px, 92vw); background:var(--card); border:1px solid var(--line); border-radius:12px; padding:28px 28px 22px;
+        box-shadow:0 8px 30px rgba(20,40,70,.06); }
+h1 { margin:0 0 2px; font-size:20px; }
+.sub { color:var(--sub); font-size:12px; margin-bottom:18px; }
+label { display:block; font-size:12px; color:var(--sub); margin:10px 0 4px; }
+input { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+button { width:100%; margin-top:16px; padding:10px; border:0; border-radius:8px; background:var(--info); color:#fff;
+         font:inherit; cursor:pointer; }
+button:disabled { opacity:.6; cursor:default; }
+.err { color:var(--bad); font-size:12px; min-height:18px; margin-top:8px; }
+.hint { color:var(--sub); font-size:12px; margin-top:14px; }

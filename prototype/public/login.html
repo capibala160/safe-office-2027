@@ -4,23 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · 安全智慧办公</title>
-<style>
-  :root { --ink:#1a2028; --sub:#5b6b7c; --line:#e3e8ee; --bg:#f6f8fa; --card:#fff; --info:#345d9d; --bad:#c0392b; }
-  * { box-sizing: border-box; }
-  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink);
-         font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
-  .card { width:min(380px, 92vw); background:var(--card); border:1px solid var(--line); border-radius:12px; padding:28px 28px 22px;
-          box-shadow:0 8px 30px rgba(20,40,70,.06); }
-  h1 { margin:0 0 2px; font-size:20px; }
-  .sub { color:var(--sub); font-size:12px; margin-bottom:18px; }
-  label { display:block; font-size:12px; color:var(--sub); margin:10px 0 4px; }
-  input { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
-  button { width:100%; margin-top:16px; padding:10px; border:0; border-radius:8px; background:var(--info); color:#fff;
-           font:inherit; cursor:pointer; }
-  button:disabled { opacity:.6; cursor:default; }
-  .err { color:var(--bad); font-size:12px; min-height:18px; margin-top:8px; }
-  .hint { color:var(--sub); font-size:12px; margin-top:14px; }
-</style>
+<link rel="stylesheet" href="/login.css">
 </head>
 <body>
   <form class="card" id="login-form">
@@ -30,52 +14,10 @@
     <input id="username" name="username" autocomplete="username" required>
     <label for="password">密码</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required>
-    <button id="submit" type="submit">登录</button>
+    <button id="submit" type="button">登录</button>
     <div class="err" id="err" role="alert"></div>
     <div class="hint" id="hint"></div>
   </form>
-<script>
-(function () {
-  const form = document.getElementById('login-form');
-  const err = document.getElementById('err');
-  const hint = document.getElementById('hint');
-  const submit = document.getElementById('submit');
-
-  fetch('/api/me', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((data) => {
-    if (data && data.user) { location.href = '/'; return; }
-    if (data && data.authEnabled === false) {
-      hint.textContent = '本机未启用登录（没有用户表），可直接进入控制台。';
-      const go = document.createElement('button');
-      go.textContent = '进入控制台';
-      go.type = 'button';
-      go.addEventListener('click', () => { location.href = '/'; });
-      go.style.marginTop = '10px';
-      form.appendChild(go);
-    }
-  }).catch(() => {});
-
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    err.textContent = '';
-    submit.disabled = true;
-    try {
-      const res = await fetch('/api/login', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: document.getElementById('username').value,
-          password: document.getElementById('password').value,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data.error && data.error.message) || `HTTP ${res.status}`);
-      location.href = '/';
-    } catch (e) {
-      err.textContent = e.message;
-    } finally {
-      submit.disabled = false;
-    }
-  });
-})();
-</script>
+<script src="/login.js" defer></script>
 </body>
 </html>

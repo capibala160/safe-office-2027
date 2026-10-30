@@ -224,7 +224,7 @@ function createConsoleServer({
   auth = null,
 } = {}) {
   const AUTH_PUBLIC = new Set([
-    '/login.html', '/api/login', '/api/logout', '/api/me', '/api/health',
+    '/login.html', '/login.css', '/login.js', '/api/login', '/api/logout', '/api/me', '/api/health',
     '/confirm.html', '/confirm.js', '/confirm.css', '/sfc1-browser.js',
     '/api/phone/pair', '/api/phone/state', '/api/phone/decision',
   ]);
