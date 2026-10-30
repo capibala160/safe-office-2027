@@ -229,3 +229,37 @@ test('旧版整体 JSON 审计：首次写入迁移为 JSONL 且不丢历史', a
   const reopened = ws.open();
   assert.ok(reopened.audit.entries.some((e) => e.kind === '历史事件'), '重启后历史仍在');
 });
+
+test('审计检查点：HMAC 签名 + 独立路径；篡改签名/换密钥都拒绝恢复', async (t) => {
+  const crypto = require('node:crypto');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-audit-'));
+  const store = path.join(dir, 'ops.db');
+  const audit = path.join(dir, 'audit.jsonl');
+  const checkpointDir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-head-'));
+  const checkpoint = path.join(checkpointDir, 'audit.head');
+  const key = crypto.randomBytes(32).toString('base64');
+  t.after(() => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.rmSync(checkpointDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  const first = new ConsoleService({ storeFile: store, auditFile: audit, auditCheckpointFile: checkpoint, auditKey: key });
+  await first.runCommand({ command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [] });
+  const count = first.audit.entries.length;
+  first.close();
+  const saved = JSON.parse(fs.readFileSync(checkpoint, 'utf8'));
+  assert.equal(saved.alg, 'HMAC-SHA256');
+  assert.ok(saved.mac);
+
+  const second = new ConsoleService({ storeFile: store, auditFile: audit, auditCheckpointFile: checkpoint, auditKey: key });
+  assert.equal(second.audit.entries.length, count);
+  second.close();
+
+  // 改检查点 head → 签名失效
+  saved.head = 'f'.repeat(64);
+  fs.writeFileSync(checkpoint, JSON.stringify(saved), 'utf8');
+  const third = new ConsoleService({ storeFile: store, auditFile: audit, auditCheckpointFile: checkpoint, auditKey: key });
+  assert.equal(third.audit.entries.length, 1);
+  assert.equal(third.audit.entries[0].kind, '审计恢复失败');
+  third.close();
+});

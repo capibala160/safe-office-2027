@@ -10,7 +10,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { PolicyEngine, AuditLog, RiskMeter } = require('./governance.cjs');
+const { PolicyEngine, AuditLog, RiskMeter, signCheckpoint, verifyCheckpoint } = require('./governance.cjs');
 const { GuardedPlanner } = require('./planner.cjs');
 const { createLlmFromEnv } = require('./llm.cjs');
 const { PerfMeter } = require('./perf.cjs');
@@ -36,7 +36,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.25.0';
+const VERSION = '0.26.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -109,6 +109,8 @@ class ConsoleService {
     llm = null,
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
     auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
+    auditCheckpointFile = process.env.SAFE_OFFICE_AUDIT_CHECKPOINT || null,
+    auditKey = process.env.SAFE_OFFICE_AUDIT_KEY || null,
     documentsStore = null,
     blobStore = null,
     printer = process.env.SAFE_OFFICE_PRINTER || null,
@@ -126,7 +128,9 @@ class ConsoleService {
     this.blobStore = blobStore || new BlobStore(':memory:', { key: this.blobKey });  // 附件内容（按 sha256 寻址）
     this.storeFile = storeFile || ':memory:';
     this.auditFile = auditFile || null;
-    this.auditCheckpointFile = this.auditFile ? `${this.auditFile}.head` : null;
+    this.auditCheckpointFile = auditCheckpointFile || (this.auditFile ? `${this.auditFile}.head` : null);
+    this.auditKey = auditKey ? Buffer.from(String(auditKey), /^[0-9a-fA-F]{64}$/.test(String(auditKey)) ? 'hex' : 'base64') : null;
+    if (this.auditKey && this.auditKey.length < 16) throw new Error('SAFE_OFFICE_AUDIT_KEY 至少 16 字节');
     this.generation = 0;          // 工作区版本：reset 时自增，用于丢弃在途旧结果
     this.recoveredInFlight = 0;
     this._auditRestoreError = null;
@@ -316,6 +320,8 @@ class ConsoleService {
     try {
       this._auditJsonl = AuditLog.isJsonlFile(this.auditFile); // 旧格式是整体 JSON；新格式一行一条
       const checkpoint = JSON.parse(fs.readFileSync(this.auditCheckpointFile, 'utf8'));
+      if (checkpoint.alg && !this.auditKey) throw new Error('检查点已签名，但未配置 SAFE_OFFICE_AUDIT_KEY');
+      if (this.auditKey && !verifyCheckpoint(checkpoint, this.auditKey)) throw new Error('检查点签名无效');
       return AuditLog.load(this.auditFile, checkpoint);
     } catch (err) {
       this._auditJsonl = true;
@@ -335,7 +341,8 @@ class ConsoleService {
       } else {
         AuditLog.appendLine(this.auditFile, rec);
       }
-      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(this.audit.checkpoint()), { encoding: 'utf8', mode: 0o600 });
+      const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
+      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
     } catch { /* 落盘失败不打断运行；下一条 append 会重试 */ }
   }
 
@@ -347,7 +354,8 @@ class ConsoleService {
       fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
       AuditLog.writeLines(this.auditFile, this.audit.entries);
       this._auditJsonl = true;
-      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(this.audit.checkpoint()), { encoding: 'utf8', mode: 0o600 });
+      const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
+      fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
     } catch { /* 落盘失败不打断运行；下一条 append 会重试 */ }
   }
 

@@ -102,6 +102,23 @@ class AuditLog {
   }
   // 全链校验：任何一条被改动 / 顺序被换 → false
   checkpoint() { return { count: this.entries.length, head: this.prevHash }; }
+
+  // 检查点签名：key 配置后，改 count/head 但没有 key 就无法伪造
+  static signCheckpoint(checkpoint, key) {
+    if (!key) return checkpoint;
+    const body = JSON.stringify({ count: checkpoint.count, head: checkpoint.head });
+    const mac = crypto.createHmac('sha256', key).update(body).digest('hex');
+    return { ...checkpoint, alg: 'HMAC-SHA256', mac };
+  }
+
+  static verifyCheckpoint(checkpoint, key) {
+    if (!key) return !!checkpoint;
+    if (!checkpoint || checkpoint.alg !== 'HMAC-SHA256' || typeof checkpoint.mac !== 'string') return false;
+    const body = JSON.stringify({ count: checkpoint.count, head: checkpoint.head });
+    const expected = Buffer.from(crypto.createHmac('sha256', key).update(body).digest('hex'), 'hex');
+    const actual = Buffer.from(checkpoint.mac, 'hex');
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  }
   // checkpoint 必须由调用者独立保存或签名；与日志放在一起不能抵抗整链替换。
   save(file) {
     if (!this.verify()) throw new Error('拒绝持久化损坏的审计链');
@@ -246,4 +263,6 @@ class RiskMeter {
   }
 }
 
-module.exports = { PolicyEngine, AuditLog, RiskMeter, DEFAULT_POLICIES };
+module.exports = {
+  signCheckpoint: AuditLog.signCheckpoint,
+  verifyCheckpoint: AuditLog.verifyCheckpoint, PolicyEngine, AuditLog, RiskMeter, DEFAULT_POLICIES };
