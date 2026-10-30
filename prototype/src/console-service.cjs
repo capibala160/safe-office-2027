@@ -34,7 +34,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.17.0';
+const VERSION = '0.21.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -186,6 +186,8 @@ class ConsoleService {
       mailer: this.mailer,
       now: this.now,
       onBusinessAction: async ({ operation }) => this._applyBusinessAction(operation),
+      // 真实发送时按 sha256 取附件内容；FakeMailer 不读它
+      attachmentLoader: (sha256) => this.blobStore.get(sha256),
     });
     this.fulfillment = new FulfillmentService({ store: this.store, mailer: this.executor, now: this.now });
     // 重启恢复：上次进程中断时还在 sending 的结果未知 → 统一转 unknown，等人工核对

@@ -13,6 +13,8 @@ const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
 const { BlobStore } = require('./src/blob-store.cjs');
+const { FakeMailer } = require('./src/mailer.cjs');
+const { createSmtpMailerFromEnv } = require('./src/smtp-mailer.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
@@ -417,6 +419,7 @@ async function startServer({
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
   storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
   auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
+  mailer = null,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -435,9 +438,10 @@ async function startServer({
         blobStore,
         storeFile,
         auditFile,
+        mailer: mailer || new FakeMailer(),
       });
     } else {
-      instance = new ConsoleService({ documentsStore, blobStore, storeFile, auditFile });
+      instance = new ConsoleService({ documentsStore, blobStore, storeFile, auditFile, mailer: mailer || new FakeMailer() });
     }
   }
   const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit });
@@ -483,6 +487,12 @@ if (require.main === module) {
     || path.join(__dirname, 'data', 'audit.jsonl');
   const documentsDb = process.env.SAFE_OFFICE_DOCS_DB
     || path.join(__dirname, 'data', 'documents.db');
+  let smtpMailer = null;
+  try {
+    smtpMailer = createSmtpMailerFromEnv();
+  } catch (err) {
+    console.warn(`⚠ SMTP 配置不完整：${err.message}；本次使用模拟发送`);
+  }
   let documentsStore = null;
   try {
     documentsStore = new DocumentStore(documentsDb);
@@ -507,11 +517,13 @@ if (require.main === module) {
     blobStore,
     storeFile,
     auditFile,
+    mailer: smtpMailer || new FakeMailer(),
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);
     const model = service.getState().model;
     console.log(`  模型：${model.mode}${model.model ? ` / ${model.model}` : ''}`);
+    if (smtpMailer) console.log('  邮件：SMTP 真实发送（收件人白名单已启用）');
     if (configInfo.loaded > 0) console.log(`  配置：config.env（${configInfo.loaded} 项）`);
     else if (!model.model) console.log('  提示：没有 config.env；想用真实模型，复制 config.env.example 再填');
     if (service.storeFile !== ':memory:') {
