@@ -335,7 +335,8 @@ test('角色裁剪：实习生外发工具被令牌拒绝', async (t) => {
   });
   assert.equal(run.operations.length, 0);
   assert.ok(run.deniedTools.includes('sendExternalEmail'));
-  assert.ok(run.lines.some((l) => l.includes('拒绝')));
+  // v0.19 起计划层预检会先移除未授权工具；运行时闸2 仍兜底其他路径
+  assert.ok(run.lines.some((l) => l.includes('不在本次授权工具内') || l.includes('拒绝')));
 });
 
 test('导出正文：冻结时拒绝，批准后返回与冻结记录一致的正文', async (t) => {

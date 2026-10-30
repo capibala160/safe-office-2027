@@ -18,9 +18,19 @@ const REQUIRED_ARGS = Object.fromEntries(
 // 私有内置注册表：2 参调用不受全局 defaultRegistry 污染
 const BUILTIN_REGISTRY = createRegistry();
 
+// 给云侧模型的修正反馈只能用“错误类型 + 动作名 + 字段名”，绝不能回传 finding.reason
+// 里的具体值（收件人/链接可能是模型从机密材料里编出来的，再送出端侧就是二次泄露）。
+function safeFeedbackLine(f) {
+  const raw = f && f.step && typeof f.step.action === 'string' ? f.step.action : '';
+  // 非法动作名本身是模型生成的，可能夹带敏感串；只对“已知工具名”回显动作
+  const action = (f && f.code) === 'UNKNOWN_TOOL' || !raw ? '未知动作' : raw;
+  const field = f && f.field ? `，字段 ${f.field}` : '';
+  return `- 动作 ${action} 未通过校验：${(f && f.code) || 'RULE_BLOCKED'}${field}`;
+}
+
 function validatePlan(rawSteps, {
   command = '', docs = [], delegation = null, delegationVerifier = null, registry = BUILTIN_REGISTRY,
-  authorizedTools = null, enforceToolAuthorization = false,
+  authorizedTools = null, enforceToolAuthorization = true,
 } = {}) {
   const reg = registry || null;
   const hasTool = (name) => (reg ? reg.has(name) : KNOWN_TOOLS.has(name));
@@ -39,13 +49,13 @@ function validatePlan(rawSteps, {
     if (s && s.action === 'summarize' && s.args && typeof s.args.of === 'string') summarizedSources.add(s.args.of);
   }
   if (!Array.isArray(rawSteps) || rawSteps.length > 64) {
-    return { steps: [], findings: [{ level: 'block', reason: '计划必须是至多 64 步的数组' }], notes: [] };
+    return { steps: [], findings: [{ level: 'block', code: 'PLAN_SHAPE', field: 'plan', reason: '计划必须是至多 64 步的数组' }], notes: [] };
   }
 
   for (const s of Array.isArray(rawSteps) ? rawSteps : []) {
     // 结构校验：动作必须在工具目录内
     if (!s || typeof s.action !== 'string' || !hasTool(s.action)) {
-      findings.push({ level: 'block', reason: `非法动作「${(s && s.action) || '(空)'}」不在工具目录内，已移除`, step: s });
+      findings.push({ level: 'block', code: 'UNKNOWN_TOOL', field: 'action', reason: `非法动作「${(s && s.action) || '(空)'}」不在工具目录内，已移除`, step: s });
       continue;
     }
     // 结构校验：必需参数齐全
@@ -53,7 +63,7 @@ function validatePlan(rawSteps, {
       (k) => !s.args || typeof s.args[k] !== 'string' || !s.args[k].trim() || s.args[k].length > 2048,
     );
     if (missing.length > 0) {
-      findings.push({ level: 'block', reason: `步骤 ${s.action} 缺少必需参数 [${missing.join(', ')}]，已移除`, step: s });
+      findings.push({ level: 'block', code: 'MISSING_ARGS', field: missing.join(','), reason: `步骤 ${s.action} 缺少必需参数 [${missing.join(', ')}]，已移除`, step: s });
       continue;
     }
     // 身份治理：代发他人身份（以X名义 / 代发）需持有效委托令牌；无令牌/令牌不匹配 → 默认拒绝
@@ -66,7 +76,7 @@ function validatePlan(rawSteps, {
         : { allow: false, reason: '未持委托令牌' };
       if (!verdict.allow) {
         findings.push({
-          level: 'block',
+          level: 'block', code: 'DELEGATION_REQUIRED', field: 'to',
           reason: `代发语义（以他人名义发送）且${verdict.reason} → 默认拒绝（身份治理）`,
           step: s,
         });
@@ -80,7 +90,7 @@ function validatePlan(rawSteps, {
       const fromExternal = externalText.includes(s.args.to);
       if (!fromCommand) {
         findings.push({
-          level: 'block',
+          level: 'block', code: 'RECIPIENT_UNAUTHORIZED', field: 'to',
           reason: `收件人「${s.args.to}」${fromExternal ? '仅出现于外部材料' : '来源未授权'}，已移除该步骤`,
           step: s,
         });
@@ -92,7 +102,7 @@ function validatePlan(rawSteps, {
       const fromExternal = externalText.includes(s.args.url);
       if (!fromCommand) {
         findings.push({
-          level: 'block',
+          level: 'block', code: 'URL_UNAUTHORIZED', field: 'url',
           reason: `上传地址「${s.args.url}」${fromExternal ? '仅出现于外部材料' : '来源未授权'}，已移除该步骤`,
           step: s,
         });
@@ -104,7 +114,7 @@ function validatePlan(rawSteps, {
     if (['sendInternalEmail', 'sendExternalEmail'].includes(s.action) && s.args && s.args.docId
       && summarizedSources.has(s.args.docId)) {
       findings.push({
-        level: 'block',
+        level: 'block', code: 'SOURCE_DOC_SEND', field: 'docId',
         reason: `步骤 ${s.action} 直接发送源文档「${s.args.docId}」；本计划已生成 draft_${s.args.docId}，必须发送生成稿`,
         step: s,
       });
@@ -115,7 +125,7 @@ function validatePlan(rawSteps, {
     // 让云侧“计划修正”有机会改对（例如令牌没有 summarize 时不要生成摘要）。
     if (enforceToolAuthorization && Array.isArray(authorizedTools) && !authorizedTools.includes(s.action)) {
       findings.push({
-        level: 'block',
+        level: 'block', code: 'TOOL_NOT_AUTHORIZED', field: 'action',
         reason: `动作「${s.action}」不在本次授权工具内，已移除`,
         step: s,
       });
@@ -145,7 +155,7 @@ function validatePlan(rawSteps, {
       const source = String(s.args.docId).slice('draft_'.length);
       if (!summarizedSoFar.has(source)) {
         findings.push({
-          level: 'block',
+          level: 'block', code: 'MISSING_SUMMARIZE', field: 'docId',
           reason: `步骤 ${s.action} 发送 draft_${source} 前缺少 summarize(${source})，已移除`,
           step: s,
         });
@@ -243,7 +253,7 @@ class GuardedPlanner {
     // 3) 计划校验（出模型后的第一道保险）
     const validate = (stepsIn) => validatePlan(stepsIn, {
       command, docs, delegation, delegationVerifier, registry: this.registry, authorizedTools,
-      enforceToolAuthorization: prepared.location === 'cloud',
+      enforceToolAuthorization: true,
     });
     let outcome = validate(resolved);
     const blockCount = (r) => r.findings.filter((f) => f.level === 'block').length;
@@ -262,7 +272,7 @@ class GuardedPlanner {
       try {
         const feedback = [
           `上一次计划有 ${before} 个步骤被校验拦下：`,
-          ...outcome.findings.filter((f) => f.level === 'block').map((f) => `- ${f.reason}`),
+          ...outcome.findings.filter((f) => f.level === 'block').map(safeFeedbackLine),
           '请只输出修正后的完整 JSON 数组；不要新增未授权工具、收件人或链接，不要解释。',
         ].join('\n');
         const raw2 = await this.llm.plan(prepared.command, contextBlocks, { authNote, feedback });

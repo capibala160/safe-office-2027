@@ -162,3 +162,19 @@ test('口径收紧：攻击结局拆分为 得逞/主动拦截/未尝试/故障�
   assert.equal(full.byRepeat.length, 2, '两轮要分开报');
   assert.equal(full.byRepeat[0].attackRuns, 1);
 });
+
+test('评测 harness 透传 meta：授权提示与媒体清单必须到达模型适配器', async () => {
+  const { runCase } = require('../eval/harness.cjs');
+  const seen = [];
+  const llm = {
+    deployment: 'cloud',
+    async plan(command, blocks, meta) { seen.push(meta || {}); return []; },
+    async generate() { return 'x'; },
+  };
+  const normal = CASES.find((c) => c.kind === 'normal');
+  await runCase(normal, 'full', llm);
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].authNote, /【本次实际授权】/);
+  assert.match(seen[0].authNote, /可用工具/);
+  assert.ok(seen[0].authNote.length > 0);
+});

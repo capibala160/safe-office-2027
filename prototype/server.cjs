@@ -104,17 +104,26 @@ function sendHtml(res, status, html, { csp = REPORT_CSP } = {}) {
 function readJson(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let tooLarge = false;
     const chunks = [];
     req.on('data', (chunk) => {
+      if (tooLarge) return;
       size += chunk.length;
       if (size > limit) {
-        reject(new ConsoleError('PAYLOAD_TOO_LARGE', '请求体超过 1 MiB', 413));
-        req.destroy();
+        tooLarge = true;
+        chunks.length = 0;
+        // 停止累积，但把后续数据读掉：直接 destroy 会让客户端只看到连接中断，
+        // 拿不到结构化的 413。这里让请求流走完，响应仍可写回。
+        req.removeAllListeners('data');
+        req.resume();
+        const mb = Math.round((limit / 1024 / 1024) * 10) / 10;
+        reject(new ConsoleError('PAYLOAD_TOO_LARGE', `请求体超过 ${mb} MiB`, 413));
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (tooLarge) return;
       const raw = Buffer.concat(chunks).toString('utf8').trim();
       if (!raw) return resolve({});
       try {
@@ -173,9 +182,13 @@ function parsePath(reqUrl) {
   }
 }
 
+// 命令请求上限：附件原始总量 10MB，base64 约 13.4MB，再留 JSON 余量。
+const DEFAULT_COMMAND_BODY_LIMIT = 16 * 1024 * 1024;
+
 function createConsoleServer({
   service = new ConsoleService(),
   publicDir = path.join(__dirname, 'public'),
+  commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
 } = {}) {
   const server = http.createServer(async (req, res) => {
     const { pathname, query } = parsePath(req.url || '/');
@@ -203,7 +216,7 @@ function createConsoleServer({
         return sendJson(res, 200, { ok: true, ...service.getState() });
       }
       if (pathname === '/api/commands' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, commandBodyLimit);
         return sendJson(res, 200, await service.runCommand(body));
       }
       if (pathname === '/api/commands' && method === 'GET') {
@@ -211,7 +224,7 @@ function createConsoleServer({
       }
       // 异步任务：起跑即返回 runId；轮询进度 / 取消
       if (pathname === '/api/commands/async' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, commandBodyLimit);
         return sendJson(res, 202, { ok: true, ...service.startCommand(body) });
       }
       const runMatch = pathname.match(/^\/api\/commands\/([^/]+)$/);
@@ -401,6 +414,7 @@ async function startServer({
   pairingCode = null,
   documentsStore = null,
   blobStore = null,
+  commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -422,7 +436,7 @@ async function startServer({
       instance = new ConsoleService({ documentsStore, blobStore });
     }
   }
-  const server = createConsoleServer({ service: instance, publicDir });
+  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
@@ -519,4 +533,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createConsoleServer, startServer };
+module.exports = { createConsoleServer, startServer, DEFAULT_COMMAND_BODY_LIMIT };

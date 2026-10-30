@@ -3,7 +3,7 @@
 //   使用 port=0 启动独立实例，fetch 走真实 HTTP 栈。
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { startServer } = require('../server.cjs');
+const { startServer, DEFAULT_COMMAND_BODY_LIMIT } = require('../server.cjs');
 
 async function boot(t) {
   const started = await startServer({ port: 0 });
@@ -271,4 +271,23 @@ test('重置 API：审计/操作/风险清零', async (t) => {
   const state = await json(`${url}/api/state`);
   assert.equal(state.data.counts.audit, 0);
   assert.equal(state.data.risk.score, 0);
+});
+
+test('请求体超限：返回结构化 413，不断连接', async (t) => {
+  const started = await startServer({ port: 0, commandBodyLimit: 1024 });
+  t.after(() => started.close());
+  const body = JSON.stringify({ command: 'x'.repeat(4096), role: '员工' });
+  const res = await fetch(`${started.url}/api/commands`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+  });
+  assert.equal(res.status, 413);
+  const data = await res.json();
+  assert.equal(data.error.code, 'PAYLOAD_TOO_LARGE');
+  assert.match(data.error.message, /请求体超过/);
+});
+
+test('命令请求上限覆盖 10MB 附件（base64 膨胀后仍有余量）', () => {
+  const base64 = Math.ceil((10 * 1024 * 1024 * 4) / 3);
+  assert.ok(DEFAULT_COMMAND_BODY_LIMIT > base64 + 64 * 1024,
+    `上限 ${DEFAULT_COMMAND_BODY_LIMIT} 应大于 base64 ${base64} + JSON 余量`);
 });

@@ -121,3 +121,20 @@ test('harness：消融档位记录 ablation 字段，且不污染 full 档', asy
     assert.ok(r.kind === 'attack' || r.kind === 'normal');
   }
 });
+
+test('消融支持重复轮次；续跑键复用无故障样本', async () => {
+  const normal = CASES.find((c) => c.kind === 'normal');
+  const llm = new MockLLM();
+  const layers = [layerById('gate2')];
+  const runs = await runAblations({ llm, cases: [normal], layers, repeats: 2 });
+  assert.equal(runs.length, 2);
+  assert.deepEqual(runs.map((r) => r.repeatIndex), [0, 1]);
+
+  const key = `gate2|${normal.id}|0`;
+  const reused = await runAblations({
+    llm, cases: [normal], layers, repeats: 2,
+    priorRuns: new Map([[key, runs[0]]]),
+  });
+  assert.equal(reused[0], runs[0], '第 0 轮应复用');
+  assert.equal(reused.length, 2);
+});

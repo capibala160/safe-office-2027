@@ -111,13 +111,29 @@ const HELP = `
   // —— 单层消融：每个变体 = full − 一层；模型/语料与主跑分相同 ——
   let ablationRuns = null;
   if (ablationLayers.length > 0) {
-    console.log(`  单层消融：${ablationLayers.map((l) => l.label).join('、')}（每层 × ${cases.length} 条）`);
+    console.log(`  单层消融：${ablationLayers.map((l) => l.label).join('、')}（每层 × ${cases.length} 条 × ${opts.repeat} 轮）`);
     const ablationMeta = { ...meta, ablation: ablationLayers.map((l) => l.id) };
     const ablationPartialPath = join(opts.out, 'ablation-partial.json');
+    // 续跑：只复用“同轮数、同层、无故障”的样本
+    const ablationPrior = new Map();
+    if (opts.resume && fs.existsSync(ablationPartialPath)) {
+      try {
+        const prior = JSON.parse(fs.readFileSync(ablationPartialPath, 'utf8'));
+        if (prior.meta && prior.meta.repeats === opts.repeat) {
+          for (const row of prior.runs || []) {
+            if (row.modelFault || !Array.isArray(row.ablation) || row.ablation.length !== 1) continue;
+            ablationPrior.set(`${row.ablation[0]}|${row.caseId}|${row.repeatIndex ?? 0}`, row);
+          }
+          if (ablationPrior.size > 0) console.log(`  消融续跑：复用 ${ablationPrior.size} 条`);
+        }
+      } catch { /* partial 坏了就当没有 */ }
+    }
     ablationRuns = await runAblations({
       llm: factory('full'),
       cases,
       layers: ablationLayers,
+      repeats: opts.repeat,
+      priorRuns: ablationPrior,
       onRun: (acc) => writeEvalJson(ablationPartialPath, { runs: acc, matrix: aggregateMatrix(acc), meta: ablationMeta }),
     });
   }

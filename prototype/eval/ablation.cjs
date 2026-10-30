@@ -43,15 +43,28 @@ function parseAblationList(value) {
   return ids.map((id) => layerById(id));
 }
 
-// 每个变体跑完整个语料；onRun 每完成一条回调（与主跑分一致，便于落盘）
-async function runAblations({ llm, cases, layers = ABLATIONS, onRun = null }) {
+// 每个变体跑完整个语料 × repeats 轮；轮次写入 repeatIndex，
+// 与主跑分保持同样本量（否则 --repeat 时基线和消融不可比）。
+// priorRuns：续跑键 `${layerId}|${caseId}|${repeatIndex}`，复用无故障样本。
+async function runAblations({ llm, cases, layers = ABLATIONS, repeats = 1, priorRuns = null, onRun = null }) {
   const runs = [];
+  const rounds = Math.max(1, Number(repeats) || 1);
   for (const layer of layers) {
     for (const def of cases) {
-      const run = await runCase(def, ablationTier(layer.id), llm, { disabledLayers: [layer.id] });
-      runs.push(run);
-      if (onRun) {
-        try { onRun(runs); } catch { /* 落盘失败不影响跑分 */ }
+      for (let i = 0; i < rounds; i++) {
+        const prior = priorRuns ? priorRuns.get(`${layer.id}|${def.id}|${i}`) : null;
+        if (prior) {
+          prior.repeatIndex = i;
+          runs.push(prior);
+          if (onRun) { try { onRun(runs); } catch { /* ignore */ } }
+          continue;
+        }
+        const run = await runCase(def, ablationTier(layer.id), llm, { disabledLayers: [layer.id] });
+        run.repeatIndex = i;
+        runs.push(run);
+        if (onRun) {
+          try { onRun(runs); } catch { /* 落盘失败不影响跑分 */ }
+        }
       }
     }
   }

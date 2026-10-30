@@ -62,9 +62,10 @@ function blockAction(entry) {
 function wrapLLM(llm, acc) {
   return {
     deployment: llm.deployment,
-    async plan(command, blocks) {
+    async plan(command, blocks, meta) {
       const t0 = performance.now();
-      try { return await llm.plan(command, blocks); } finally { acc.modelMs += performance.now() - t0; }
+      // meta 必须透传：授权提示与修正反馈都在里面，吞掉就等于评测没测到新功能
+      try { return await llm.plan(command, blocks, meta); } finally { acc.modelMs += performance.now() - t0; }
     },
     async generate(command, blocks) {
       const t0 = performance.now();

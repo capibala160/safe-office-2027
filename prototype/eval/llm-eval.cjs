@@ -35,12 +35,12 @@ class EvalHttpLLM extends HttpLLM {
     this.generatePrompt = generatePrompt;
   }
 
-  async complete(system, command, contextBlocks) {
+  async complete(system, command, contextBlocks, meta = {}) {
     try {
-      return await super.complete(system, command, contextBlocks);
+      return await super.complete(system, command, contextBlocks, meta);
     } catch (err) {
       if (!isTransient(err)) throw err;
-      return super.complete(system, command, contextBlocks);
+      return super.complete(system, command, contextBlocks, meta);
     }
   }
 
