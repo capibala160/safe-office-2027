@@ -23,7 +23,7 @@ const SFC1 = require('./public/sfc1-browser.js');
 const LOOPBACK_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const PHONE_ALLOWLIST = new Set([
   '/confirm.html', '/confirm.js', '/confirm.css', '/sfc1-browser.js',
-  '/api/phone/state', '/api/phone/decision', '/api/health',
+  '/api/phone/pair', '/api/phone/state', '/api/phone/decision', '/api/health',
 ]);
 
 function isLoopbackReq(req) {
@@ -192,6 +192,41 @@ function createConsoleServer({
   publicDir = path.join(__dirname, 'public'),
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
 } = {}) {
+  // —— 手机确认端配对会话 ——
+  // 配了配对码时，state/decision 必须带 X-Phone-Session；否则局域网任何人都能读待确认详情。
+  const phoneSessions = new Map();          // token → { expiresAt }
+  const pairAttempts = new Map();           // ip → number[]（1 分钟窗口）
+  const decisionAttempts = new Map();
+  const SESSION_TTL_MS = 10 * 60 * 1000;
+  const PAIR_LIMIT = 5;
+  const DECISION_LIMIT = 10;
+  const clientIp = (req) => (req.socket && req.socket.remoteAddress) || 'unknown';
+
+  function rateLimited(map, key, max, windowMs = 60 * 1000) {
+    const now = Date.now();
+    const list = (map.get(key) || []).filter((t) => now - t < windowMs);
+    list.push(now);
+    map.set(key, list);
+    return list.length > max;
+  }
+
+  function safeEqual(a, b) {
+    const left = Buffer.from(String(a));
+    const right = Buffer.from(String(b));
+    return left.length === right.length && crypto.timingSafeEqual(left, right);
+  }
+
+  function requirePhoneSession(req) {
+    if (!service.pairingCode) return; // 本机未启用配对码：保持旧的本地演示行为
+    const token = String(req.headers['x-phone-session'] || '');
+    const session = phoneSessions.get(token);
+    if (!session || session.expiresAt <= Date.now()) {
+      if (token) phoneSessions.delete(token);
+      throw new ConsoleError('AUTH_REQUIRED', '手机确认端需要先配对（X-Phone-Session 无效或已过期）', 401);
+    }
+    session.expiresAt = Date.now() + SESSION_TTL_MS; // 滑动续期
+  }
+
   const server = http.createServer(async (req, res) => {
     const { pathname, query } = parsePath(req.url || '/');
     const method = req.method || 'GET';
@@ -333,10 +368,32 @@ function createConsoleServer({
       if (pathname === '/api/device' && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getDevice() });
       }
+      if (pathname === '/api/phone/pair' && method === 'POST') {
+        if (!service.pairingCode) {
+          throw new ConsoleError('CONFLICT', '本机未启用配对码（请用 npm run start:lan 启动）', 409);
+        }
+        if (rateLimited(pairAttempts, clientIp(req), PAIR_LIMIT)) {
+          throw new ConsoleError('RATE_LIMITED', '配对尝试过多，请 1 分钟后再试', 429);
+        }
+        const body = await readJson(req);
+        const code = typeof body.code === 'string' ? body.code.trim() : '';
+        if (!safeEqual(code, service.pairingCode)) {
+          throw new ConsoleError('INVALID_CODE', '配对码不正确', 401);
+        }
+        const token = crypto.randomBytes(24).toString('base64url');
+        const expiresAt = Date.now() + SESSION_TTL_MS;
+        phoneSessions.set(token, { expiresAt });
+        return sendJson(res, 200, { ok: true, token, expiresAt: new Date(expiresAt).toISOString(), ttlSec: SESSION_TTL_MS / 1000 });
+      }
       if (pathname === '/api/phone/state' && method === 'GET') {
+        requirePhoneSession(req);
         return sendJson(res, 200, { ok: true, ...service.getPhoneState() });
       }
       if (pathname === '/api/phone/decision' && method === 'POST') {
+        requirePhoneSession(req);
+        if (rateLimited(decisionAttempts, clientIp(req), DECISION_LIMIT)) {
+          throw new ConsoleError('RATE_LIMITED', '确认提交过于频繁，请稍后再试', 429);
+        }
         const body = await readJson(req);
         return sendJson(res, 200, await service.submitPhoneDecision(body.challengeId, body.frame));
       }

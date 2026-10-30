@@ -19,8 +19,12 @@ const externalCommand = {
   domains: ['partner-example.com'],
 };
 
+let sessionToken = null;
+
 async function json(url, options) {
-  const res = await fetch(url, options);
+  const headers = { ...((options && options.headers) || {}) };
+  if (sessionToken) headers['X-Phone-Session'] = sessionToken;
+  const res = await fetch(url, { ...options, headers });
   const data = await res.json();
   return { res, data };
 }
@@ -34,8 +38,13 @@ function post(url, body) {
 }
 
 async function boot(t, options = {}) {
+  sessionToken = null;
   const started = await startServer({ port: 0, pairingCode: CODE, ...options });
   t.after(() => started.close());
+  // v0.23：配对码换会话 token，后续 state/decision 都要带
+  const paired = await post(`${started.url}/api/phone/pair`, { code: CODE });
+  assert.equal(paired.res.status, 200, '测试引导配对失败');
+  sessionToken = paired.data.token;
   return started;
 }
 

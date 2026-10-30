@@ -6,6 +6,7 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   const STORAGE_CODE = 'sfc1.pairing.code';
+  const STORAGE_TOKEN = 'sfc1.pairing.token';
   // 演示"错设备"：第二台手机加 ?device=phone-B，用的是同一配对码但设备 ID 不同
   const DEVICE_NAME = new URLSearchParams(location.search).get('device') || 'phone-A';
   const ACTION_LABELS = { 1: '外发', 2: '删除', 3: '打印', 4: '设备控制' };
@@ -27,6 +28,20 @@
     for (const section of ['pairing', 'idle', 'challenge', 'result']) {
       $(section).hidden = section !== id;
     }
+  }
+
+  // 统一带配对会话；401 = 会话失效 → 回到配对页
+  async function apiFetch(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    let token = null;
+    try { token = localStorage.getItem(STORAGE_TOKEN); } catch { /* ignore */ }
+    if (token) headers['X-Phone-Session'] = token;
+    const res = await fetch(path, { ...options, headers });
+    if (res.status === 401) {
+      forget();
+      throw new Error('配对会话已失效，请重新输入配对码');
+    }
+    return res;
   }
 
   function setError(message) {
@@ -70,7 +85,7 @@
     if (state.polling || state.busy || state.showingResult) return;
     state.polling = true;
     try {
-      const res = await fetch('/api/phone/state', { cache: 'no-store' });
+      const res = await apiFetch('/api/phone/state', { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (typeof data.now === 'number') {
@@ -221,7 +236,7 @@
         deviceId: state.deviceId,
         decidedAt: Math.floor(Date.now() / 1000) + state.clockOffset,
       }, state.key);
-      const res = await fetch('/api/phone/decision', {
+      const res = await apiFetch('/api/phone/decision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ challengeId: pending.challengeId, frame: SFC1.bytesToBase64(frame) }),
@@ -323,6 +338,19 @@
   async function pair(rawCode) {
     const code = String(rawCode || '').trim();
     if (!code) throw new Error('请输入配对码');
+    // 先向服务端换会话；服务端没启用配对码（本机演示）时才允许直连
+    const res = await fetch('/api/phone/pair', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (!res.ok && res.status !== 409) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error((data.error && data.error.message) || '配对码不正确');
+    }
+    if (res.ok) {
+      const data = await res.json();
+      try { localStorage.setItem(STORAGE_TOKEN, data.token); } catch { /* ignore */ }
+    }
     await deriveMaterial(code);
     try { localStorage.setItem(STORAGE_CODE, code); } catch { /* 隐私模式忽略 */ }
     $('pairing-input').value = '';
@@ -332,7 +360,7 @@
   }
 
   function forget() {
-    try { localStorage.removeItem(STORAGE_CODE); } catch { /* ignore */ }
+    try { localStorage.removeItem(STORAGE_CODE); localStorage.removeItem(STORAGE_TOKEN); } catch { /* ignore */ }
     stopPoll();
     stopTick();
     state.key = null;
@@ -364,8 +392,9 @@
     });
 
     let saved = null;
-    try { saved = localStorage.getItem(STORAGE_CODE); } catch { /* ignore */ }
-    if (saved) {
+    let token = null;
+    try { saved = localStorage.getItem(STORAGE_CODE); token = localStorage.getItem(STORAGE_TOKEN); } catch { /* ignore */ }
+    if (saved && token) {
       try {
         await deriveMaterial(saved);
         show('idle');

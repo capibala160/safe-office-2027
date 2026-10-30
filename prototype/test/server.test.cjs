@@ -38,7 +38,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.22.0');
+  assert.equal(data.version, '0.23.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -290,4 +290,43 @@ test('命令请求上限覆盖 10MB 附件（base64 膨胀后仍有余量）', (
   const base64 = Math.ceil((10 * 1024 * 1024 * 4) / 3);
   assert.ok(DEFAULT_COMMAND_BODY_LIMIT > base64 + 64 * 1024,
     `上限 ${DEFAULT_COMMAND_BODY_LIMIT} 应大于 base64 ${base64} + JSON 余量`);
+});
+
+test('手机确认端：配对会话保护 state/decision，错误配对有限流', async (t) => {
+  const started = await startServer({ port: 0, pairingCode: 'ABCD-EFGH' });
+  t.after(() => started.close());
+
+  const noAuth = await fetch(`${started.url}/api/phone/state`);
+  assert.equal(noAuth.status, 401);
+  assert.equal((await noAuth.json()).error.code, 'AUTH_REQUIRED');
+
+  const wrong = await post(`${started.url}/api/phone/pair`, { code: 'WRONG-CODE' });
+  assert.equal(wrong.res.status, 401);
+  assert.equal(wrong.data.error.code, 'INVALID_CODE');
+
+  const paired = await post(`${started.url}/api/phone/pair`, { code: 'ABCD-EFGH' });
+  assert.equal(paired.res.status, 200);
+  assert.ok(paired.data.token);
+
+  const authed = await fetch(`${started.url}/api/phone/state`, {
+    headers: { 'X-Phone-Session': paired.data.token },
+  });
+  assert.equal(authed.status, 200);
+
+  const decisionNoAuth = await fetch(`${started.url}/api/phone/decision`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  assert.equal(decisionNoAuth.status, 401);
+});
+
+test('手机确认端：配对失败 5 次后第 6 次返回 429', async (t) => {
+  const started = await startServer({ port: 0, pairingCode: 'ABCD-EFGH' });
+  t.after(() => started.close());
+  for (let i = 0; i < 5; i++) {
+    const r = await post(`${started.url}/api/phone/pair`, { code: `BAD${i}` });
+    assert.equal(r.res.status, 401);
+  }
+  const limited = await post(`${started.url}/api/phone/pair`, { code: 'BAD6' });
+  assert.equal(limited.res.status, 429);
+  assert.equal(limited.data.error.code, 'RATE_LIMITED');
 });
