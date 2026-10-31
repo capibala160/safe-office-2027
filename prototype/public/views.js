@@ -914,7 +914,10 @@
       </section>` : ''}
       ${canReview ? `<section class="card"><div class="card-head"><h2>退信处理</h2><span class="sub">粘贴 .eml 原文，按 Message-ID 回填；不自动重发</span></div>
         <div class="form-grid"><div class="full"><label class="label">退信原文（DSN）</label><textarea class="textarea" id="bounce-eml" rows="6" placeholder="粘贴原始退信邮件（含 message/delivery-status 段）"></textarea></div></div>
-        <div class="btn-row mt12"><input type="file" id="bounce-file" accept=".eml,message/rfc822,text/plain"><button class="btn small" id="bounce-ingest">解析并回填</button></div>
+        <div class="btn-row mt12"><input type="file" id="bounce-file" accept=".eml,message/rfc822,text/plain"><button class="btn small" id="bounce-ingest">解析并回填</button>${gov.bouncePoll && gov.bouncePoll.configured ? '<button class="btn ghost small" id="bounce-poll">立即轮询邮箱</button>' : ''}</div>
+        <div class="sub-text mt8">${gov.bouncePoll && gov.bouncePoll.configured
+    ? `IMAP：${esc(gov.bouncePoll.mailbox)} · ${gov.bouncePoll.polling ? '轮询中' : '未启动'}${gov.bouncePoll.lastAt ? ` · 上次 ${esc(gov.bouncePoll.lastAt)}` : ''}${gov.bouncePoll.lastError ? ` · 错误：${esc(gov.bouncePoll.lastError)}` : ''}`
+    : `IMAP 未配置${gov.bouncePoll && gov.bouncePoll.error ? `（${esc(gov.bouncePoll.error)}）` : ''}——只能手动导入 .eml`}</div>
         <div id="bounce-result" class="mt12"></div>
       </section>` : ''}
       <section class="card"><div class="card-head"><h2>策略矩阵</h2><span class="sub">未声明 = 拒绝（fail-closed）</span></div><div class="table-wrap"><table class="table"><thead><tr><th>角色</th>${actions.map((a) => `<th>${esc(a)}</th>`).join('')}</tr></thead><tbody>${roles.map((r) => `<tr><td><strong>${esc(r)}</strong></td>${actions.map((a) => `<td>${badge((policy[r] && policy[r][a]) || 'deny')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
@@ -928,6 +931,9 @@
           <div class="full"><label class="label">允许角色（至少一个）</label><div class="checks" id="mcp-roles">${roles.map((r) => `<label class="check"><input type="checkbox" value="${esc(r)}" ${r === '员工' ? 'checked' : ''}> ${esc(r)}</label>`).join('')}</div></div>
         </div>
         <div class="btn-row mt12"><button class="btn small" id="mcp-discover">发现工具</button><button class="btn ghost small" id="mcp-register">注册所选</button></div>
+        <div class="sub-text mt8">${(gov.mcpServers || []).length ? `已持久化 ${gov.mcpServers.length} 个服务（重启自动重连）：${esc(gov.mcpServers.map((s) => s.url).join('、'))}` : '尚未持久化 MCP 服务（注册成功后写入 data/mcp-servers.json）'}</div>
+        ${gov.mcpConfigError ? `<div class="notice block mt8">MCP 配置读取失败：${esc(gov.mcpConfigError)}</div>` : ''}
+        ${(gov.mcpRestore && gov.mcpRestore.failed && gov.mcpRestore.failed.length) ? `<div class="notice block mt8">上次重启有 ${gov.mcpRestore.failed.length} 个 MCP 服务恢复失败：${esc(gov.mcpRestore.failed.map((f) => `${f.url}（${f.error}）`).join('；'))}</div>` : ''}
         <div id="mcp-tools" class="mt12"></div>
         <div id="mcp-result" class="mt12"></div>
       </section>` : ''}
@@ -981,6 +987,18 @@
         toast(`已读入 ${file.name}`, 'info');
       } catch (err) { toast(`读取失败：${err.message}`, 'error'); }
     });
+    root.querySelector('#bounce-poll')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await API.post('/api/bounce/poll', {});
+        const r = res.result || {};
+        root.querySelector('#bounce-result').innerHTML = `<div class="notice ${r.bounced ? 'info' : 'block'}">邮箱扫描 ${esc(r.scanned || 0)} 封 · 退信 ${esc(r.dsn || 0)} · 回填 ${esc(r.bounced || 0)} · 重复 ${esc(r.duplicate || 0)} · 未匹配 ${esc(r.unmatched || 0)} · 忽略 ${esc(r.ignored || 0)} · 错误 ${esc(r.errors || 0)}</div>`;
+        toast(r.bounced ? `已回填 ${r.bounced} 条退信` : '本轮没有可回填的退信', r.bounced ? 'ok' : 'info');
+        await c.refreshState();
+      } catch (err) { toast(c.errorText(err), 'error'); }
+      finally { btn.disabled = false; }
+    });
     root.querySelector('#bounce-ingest')?.addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       const eml = root.querySelector('#bounce-eml').value;
@@ -1020,8 +1038,12 @@
       btn.disabled = true;
       try {
         const res = await API.post('/api/mcp/register', { url: mcpUrl.value, token: mcpToken(), tools, roles, level });
-        root.querySelector('#mcp-result').innerHTML = `<div class="notice info">已注册 ${res.registered.length} 个：${esc(res.registered.join('、'))}<div class="sub-text mt8">级别 ${esc(level)} · 允许角色 ${esc(roles.join(' / '))} · 沙箱 local</div></div>`;
-        toast('MCP 工具已注册', 'ok');
+        const persistFailed = res.persistEnabled && res.persisted === false;
+        const persistNote = persistFailed
+          ? `<div class="notice block mt8">工具已注册到内存，但配置落盘失败：${esc(res.persistError || '未知错误')}——重启后需重新注册</div>`
+          : '';
+        root.querySelector('#mcp-result').innerHTML = `<div class="notice info">已注册 ${res.registered.length} 个：${esc(res.registered.join('、'))}<div class="sub-text mt8">级别 ${esc(level)} · 允许角色 ${esc(roles.join(' / '))} · 沙箱 local${res.persistEnabled ? '' : ' · 未启用持久化（仅内存）'}</div></div>${persistNote}`;
+        toast(persistFailed ? '已注册，但配置落盘失败' : 'MCP 工具已注册', persistFailed ? 'error' : 'ok');
         await c.refreshState();
         c.rerender();
       } catch (err) { toast(c.errorText(err), 'error'); }

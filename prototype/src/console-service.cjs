@@ -30,8 +30,9 @@ const { FulfillmentService } = require('./fulfillment.cjs');
 const { parseDsn } = require('./dsn.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer, MailerError } = require('./mailer.cjs');
-const { printText } = require('./print-adapter.cjs');
+const { printDocument } = require('./print-adapter.cjs');
 const { writeMeeting } = require('./calendar-adapter.cjs');
+const { createBouncePollerFromEnv } = require('./imap-poller.cjs');
 const { scanAttachment } = require('./file-scan.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
@@ -39,7 +40,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.37.0';
+const VERSION = '0.40.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -109,6 +110,8 @@ class ConsoleService {
     toolRegistry = null,
     toolExecutors = null,
     allowRemoteMcp = null,
+    mcpConfigFile = process.env.SAFE_OFFICE_MCP_FILE || null,
+    bouncePoller = null,
     pairingCode = null,
     llm = null,
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
@@ -118,7 +121,8 @@ class ConsoleService {
     documentsStore = null,
     blobStore = null,
     printer = process.env.SAFE_OFFICE_PRINTER || null,
-    printAdapter = printText,
+    printAdapter = printDocument,
+    printPdfDir = process.env.SAFE_OFFICE_PRINT_PDF_DIR || null,
     calendarDir = process.env.SAFE_OFFICE_CALENDAR_DIR || null,
     blobKey = process.env.SAFE_OFFICE_BLOB_KEY || null,
   } = {}) {
@@ -141,7 +145,8 @@ class ConsoleService {
     this.recoveredInFlight = 0;
     this._auditRestoreError = null;
     this.printer = printer || null;          // null = 打印保持模拟
-    this.printAdapter = typeof printAdapter === 'function' ? printAdapter : printText;
+    this.printAdapter = typeof printAdapter === 'function' ? printAdapter : printDocument;
+    this.printPdfDir = printPdfDir ? String(printPdfDir) : null;   // null = 不保留 PDF
     this.calendarDir = calendarDir ? String(calendarDir) : null;   // null = 会议预约保持模拟
     this.key = Buffer.from(nearfieldKey);
     this.deviceId = deviceId;
@@ -158,6 +163,14 @@ class ConsoleService {
       ? /^(1|true|yes|on)$/i.test(String(process.env.SAFE_OFFICE_MCP_ALLOW_REMOTE || ''))
       : allowRemoteMcp === true;
     this.mcpSessions = new Map();   // url → { client, token, at }（内存，重启即失效）
+    // v0.39：已注册的 MCP 服务落盘（含 token），启动时重连
+    this.mcpConfigFile = mcpConfigFile ? String(mcpConfigFile) : null;
+    this.mcpConfig = [];
+    this.mcpConfigError = null;
+    this.mcpRestore = { attempted: 0, restored: 0, servers: [], failed: [] };
+    // v0.39：IMAP 退信轮询（未配置 = null；配置不全只记录错误，不阻塞启动）
+    this.bouncePoller = bouncePoller;
+    this.bouncePollerError = null;
     this._mailer = mailer;
     this.startedAt = now();
     this.seq = 0;
@@ -166,6 +179,51 @@ class ConsoleService {
     this.liveRuns = new Map();
     this._runChain = Promise.resolve();
     this._initWorkspace();
+    // 配置在 workspace 之后加载：重连要往注册表/审计里写
+    this.mcpConfig = this._loadMcpConfig();
+    this.mcpRestorePromise = this.mcpConfigFile
+      ? this.restoreMcpServers()
+      : Promise.resolve(this.mcpRestore);
+    if (!this.bouncePoller) {
+      try {
+        this.bouncePoller = createBouncePollerFromEnv({
+          ingest: (eml) => this.ingestBounce({ eml, by: 'imap' }),
+          logger: (message) => {
+            try { this.audit.append('IMAP 轮询失败', { error: message }); } catch { /* ignore */ }
+          },
+        });
+      } catch (err) {
+        this.bouncePollerError = err.message;
+      }
+    }
+  }
+
+  startBouncePolling() {
+    if (this.bouncePoller) this.bouncePoller.start();
+    return !!this.bouncePoller;
+  }
+
+  stopBouncePolling() {
+    if (this.bouncePoller) this.bouncePoller.stop();
+  }
+
+  async pollBounceNow({ by = null } = {}) {
+    if (!this.bouncePoller) {
+      throw new ConsoleError(
+        'CONFLICT',
+        this.bouncePollerError || 'IMAP 未配置（需要 SAFE_OFFICE_IMAP_HOST / USER / PASS）',
+        409,
+      );
+    }
+    const previousActor = this.audit.actor;
+    this.audit.actor = by || null;
+    try {
+      this.audit.append('IMAP 手动轮询', { mailbox: this.bouncePoller.config.mailbox });
+      const result = await this.bouncePoller.poll();
+      return { ok: true, result, state: this.bouncePoller.state };
+    } finally {
+      this.audit.actor = previousActor || null;
+    }
   }
 
   _initWorkspace() {
@@ -1872,6 +1930,17 @@ class ConsoleService {
       },
       policy: this._policyMatrix(),
       tools: this.toolRegistry.publicList(),
+      mcpServers: this.mcpConfig.map(({ token, ...rest }) => rest),   // 永不回传 token
+      mcpRestore: this.mcpRestore,
+      mcpConfigError: this.mcpConfigError,
+      bouncePoll: this.bouncePoller
+        ? {
+          configured: true,
+          mailbox: this.bouncePoller.config.mailbox,
+          polling: !!this.bouncePoller.timer,
+          ...this.bouncePoller.state,
+        }
+        : { configured: false, error: this.bouncePollerError },
       autoMode: this.autoMode,
       autoSafe: this._autoSafeStats(),
       roles: Object.entries(ROLE_DEFS).map(([name, def]) => ({ name, ...def })),
@@ -2158,10 +2227,11 @@ class ConsoleService {
     };
   }
 
-  async registerMcp({
-    url, token = null, tools = null, roles = [], level = 'L3',
-    capability = 'MCP 外部工具', timeoutMs = 8000, by = null,
-  } = {}) {
+  // 注册内核：只动注册表/策略/执行器，不写配置、不写审计（供注册与重启恢复共用）
+  async _applyMcpRegistration({
+    url, token = null, tools = [], roles = [], level = 'L3',
+    capability = 'MCP 外部工具', timeoutMs = 8000,
+  }) {
     const target = this._normalizeMcpUrl(url);
     if (!Array.isArray(roles) || roles.length === 0) {
       throw new ConsoleError('BAD_REQUEST', '必须至少选择一个允许角色（未声明 = 拒绝）', 400);
@@ -2206,15 +2276,141 @@ class ConsoleService {
       }
       throw new ConsoleError('MCP_ERROR', message, 502);
     }
+    return { url: target, registered };
+  }
+
+  _loadMcpConfig() {
+    if (!this.mcpConfigFile) return [];
+    try {
+      if (!fs.existsSync(this.mcpConfigFile)) return [];
+      const raw = JSON.parse(fs.readFileSync(this.mcpConfigFile, 'utf8'));
+      const list = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.servers) ? raw.servers : []);
+      const out = [];
+      for (const item of list) {
+        if (!item || typeof item.url !== 'string' || !item.url.trim()) continue;
+        if (!Array.isArray(item.tools) || item.tools.length === 0) continue;
+        if (!Array.isArray(item.roles) || item.roles.length === 0) continue;
+        if (!/^L[1-4]$/.test(String(item.level || ''))) continue;
+        out.push({
+          url: item.url,
+          token: item.token ? String(item.token) : null,
+          tools: item.tools.map(String),
+          roles: item.roles.map(String),
+          level: String(item.level),
+          capability: typeof item.capability === 'string' && item.capability
+            ? item.capability
+            : 'MCP 外部工具',
+          registeredAt: typeof item.registeredAt === 'string' ? item.registeredAt : null,
+        });
+      }
+      return out;
+    } catch (err) {
+      this.mcpConfigError = err.message;
+      return [];
+    }
+  }
+
+  _saveMcpConfig() {
+    if (!this.mcpConfigFile) return;
+    fs.mkdirSync(path.dirname(this.mcpConfigFile), { recursive: true });
+    const tmp = `${this.mcpConfigFile}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, `${JSON.stringify({ version: 1, servers: this.mcpConfig }, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      fs.renameSync(tmp, this.mcpConfigFile);
+    } catch (err) {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+      throw err;
+    }
+  }
+
+  // 启动重连：逐个恢复持久化的 MCP 服务；单个失败只记录，不阻塞启动
+  async restoreMcpServers() {
+    if (!this.mcpConfigFile) return this.mcpRestore;
+    const previousActor = this.audit.actor;
+    this.audit.actor = null;
+    try {
+      this.audit.append('MCP 配置加载', {
+        file: this.mcpConfigFile,
+        servers: this.mcpConfig.length,
+        error: this.mcpConfigError || null,
+      });
+      for (const entry of this.mcpConfig) {
+        this.mcpRestore.attempted += 1;
+        try {
+          const { registered } = await this._applyMcpRegistration(entry);
+          this.mcpRestore.restored += registered.length;
+          this.mcpRestore.servers.push({ url: entry.url, tools: registered });
+          this.audit.append('MCP 恢复', { url: entry.url, tools: registered });
+        } catch (err) {
+          const message = String(err && err.message ? err.message : err);
+          this.mcpRestore.failed.push({ url: entry.url, error: message });
+          this.audit.append('MCP 恢复失败', { url: entry.url, error: message });
+        }
+      }
+      return this.mcpRestore;
+    } finally {
+      this.audit.actor = previousActor || null;
+    }
+  }
+
+  async registerMcp({
+    url, token = null, tools = null, roles = [], level = 'L3',
+    capability = 'MCP 外部工具', timeoutMs = 8000, by = null,
+  } = {}) {
+    const rawTools = Array.isArray(tools) ? tools.map(String) : [];
+    const { url: target, registered } = await this._applyMcpRegistration({
+      url, token, tools: rawTools, roles, level, capability, timeoutMs,
+    });
+
+    // 落盘：同 URL + 同工具集合视为更新（token/角色可改），否则追加。
+    // 保存失败必须如实返回 persisted:false，不能让人以为重启后还在。
+    let persisted = false;
+    let persistError = null;
+    if (this.mcpConfigFile) {
+      const same = (a, b) => a.length === b.length && [...a].sort().join('\u0000') === [...b].sort().join('\u0000');
+      this.mcpConfig = this.mcpConfig.filter((e) => !(e.url === target && same(e.tools, rawTools)));
+      const entry = {
+        url: target,
+        token: token ? String(token) : null,
+        tools: rawTools,
+        roles: [...roles],
+        level,
+        capability,
+        registeredAt: new Date(this.now()).toISOString(),
+      };
+      this.mcpConfig.push(entry);
+      try {
+        this._saveMcpConfig();
+        persisted = true;
+      } catch (err) {
+        persistError = String(err && err.message ? err.message : err);
+        // 配置没落盘就不该出现在"已持久化"列表里；工具仍在内存注册表中
+        this.mcpConfig = this.mcpConfig.filter((e) => e !== entry);
+        this.audit.append('MCP 配置保存失败', { file: this.mcpConfigFile, error: persistError });
+      }
+    }
 
     const previousActor = this.audit.actor;
     this.audit.actor = by || null;
     try {
-      this.audit.append('MCP 注册', { url: target, tools: registered, roles, level });
+      this.audit.append('MCP 注册', {
+        url: target,
+        tools: registered,
+        roles,
+        level,
+        persisted,
+        persistError,
+      });
     } finally {
       this.audit.actor = previousActor || null;
     }
-    return { ok: true, url: target, registered };
+    return {
+      ok: true, url: target, registered, persisted,
+      persistEnabled: !!this.mcpConfigFile, persistError,
+    };
   }
 
   // ---------- 业务副作用（模拟） ----------
@@ -2233,6 +2429,9 @@ class ConsoleService {
         text: operation.body || '',
         title: doc ? doc.title : (operation.subject || ''),
         printer: this.printer,
+        level: operation.level || '',
+        operator: operation.createdBy || '',
+        pdfDir: this.printPdfDir,
       });
       if (result.mode === 'failed') {
         throw new MailerError(result.rejected ? 'rejected' : 'unknown',
@@ -2243,8 +2442,10 @@ class ConsoleService {
         docId: operation.recipient,
         subject: operation.subject,
         at: this._iso(),
-        mode: result.mode,               // printed = 已提交打印队列；simulated = 未配置打印机
+        // printed = 已提交打印队列；pdf = 只生成 PDF；simulated = 未配置打印机/目录
+        mode: result.mode,
         printer: result.printer || null,
+        file: result.file || null,
       });
       return;
     }
@@ -2290,6 +2491,7 @@ class ConsoleService {
   close() {
     if (this.closed) return;
     this.closed = true;
+    this.stopBouncePolling();
     this._saveAudit();
     try { this.store.close(); } catch { /* ignore */ }
     if (this._ownsBlobStore) {

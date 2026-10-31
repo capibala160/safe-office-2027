@@ -2,7 +2,12 @@
 // 真实打印适配器：提交打印队列 / 未配置则模拟 / 明确失败分类
 const test = require('node:test');
 const assert = require('node:assert');
-const { printText } = require('../src/print-adapter.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {
+  printText, printDocument, buildPrintHtml, findEdge,
+} = require('../src/print-adapter.cjs');
 const { ConsoleService } = require('../src/console-service.cjs');
 const { MailerError } = require('../src/mailer.cjs');
 
@@ -87,4 +92,114 @@ test('删除：导入资料真正从 DocumentStore 删除，不会重启复活',
   assert.ok(store.get('IMP-TEST'));
   await service._applyBusinessAction({ protocolAction: 2, operationId: 'op', recipient: 'IMP-TEST' });
   assert.equal(store.get('IMP-TEST'), null, '库里必须真删');
+});
+
+// ---------- v0.40 排版打印（HTML → PDF → 可选打印） ----------
+function tmpDir(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-print-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function fakePrintExec({ submitFail = false, submitStderr = '' } = {}) {
+  const calls = [];
+  const fn = (cmd, args, options, cb) => {
+    calls.push({ cmd, args, options });
+    if (cmd === 'powershell.exe') {
+      if (submitFail) cb(new Error('submit failed'), '', submitStderr);
+      else cb(null, 'ok', '');
+      return;
+    }
+    // 冒充 Edge：把 --print-to-pdf 指定的文件写出来
+    const arg = args.find((a) => a.startsWith('--print-to-pdf='));
+    const file = arg.slice('--print-to-pdf='.length);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '%PDF-1.4 fake');
+    cb(null, '', '');
+  };
+  return { fn, calls };
+}
+
+test('排版 HTML：标题/密级/操作人转义，正文逐行成段', () => {
+  const html = buildPrintHtml({
+    title: '<周报&评审>', text: '第一行\n第二行 <script>', level: '内部', operator: 'alice',
+    at: '2026-10-31T10:00:00.000Z',
+  });
+  assert.match(html, /<h1>&lt;周报&amp;评审&gt;<\/h1>/);
+  assert.match(html, /第一行<\/p>/);
+  assert.match(html, /第二行 &lt;script&gt;<\/p>/);
+  assert.match(html, /密级 <span class="level">内部<\/span>/);
+  assert.match(html, /操作人 alice/);
+  assert.ok(!html.includes('<script>'));
+});
+
+test('排版打印：未配置打印机和 PDF 目录 → simulated，不碰 Edge', async () => {
+  const exec = fakePrintExec();
+  const result = await printDocument({ text: 'x', exec: exec.fn });
+  assert.equal(result.mode, 'simulated');
+  assert.equal(exec.calls.length, 0);
+});
+
+test('排版打印：只配 PDF 目录 → 生成 PDF（pdf 模式）', async (t) => {
+  const dir = tmpDir(t);
+  const exec = fakePrintExec();
+  const result = await printDocument({
+    text: '正文', title: '周报', level: '内部', operator: 'alice', pdfDir: dir, exec: exec.fn,
+  });
+  assert.equal(result.mode, 'pdf');
+  assert.ok(result.file && fs.existsSync(result.file));
+  assert.match(path.basename(result.file), /^print-.*-[0-9a-f]{8}\.pdf$/);
+  assert.equal(exec.calls.length, 1);
+  assert.match(exec.calls[0].args.join(' '), /--headless=new/);
+});
+
+test('排版打印：配了打印机 → 先渲染 PDF 再 PrintTo，返回 printed', async (t) => {
+  const dir = tmpDir(t);
+  const exec = fakePrintExec();
+  const result = await printDocument({
+    text: '正文', title: '周报', printer: 'P1', pdfDir: dir, exec: exec.fn,
+  });
+  assert.equal(result.mode, 'printed');
+  assert.equal(exec.calls.length, 2);
+  assert.equal(exec.calls[1].cmd, 'powershell.exe');
+  assert.equal(exec.calls[1].options.env.SAFE_PRINT_NAME, 'P1');
+  assert.ok(fs.existsSync(exec.calls[1].options.env.SAFE_PRINT_PDF));
+});
+
+test('排版打印：打印机无效 → failed/rejected，PDF 仍保留', async (t) => {
+  const dir = tmpDir(t);
+  const exec = fakePrintExec({ submitFail: true, submitStderr: 'printer not found' });
+  const result = await printDocument({
+    text: 'x', title: 't', printer: 'NOPE', pdfDir: dir, exec: exec.fn,
+  });
+  assert.equal(result.mode, 'failed');
+  assert.equal(result.rejected, true);
+  assert.ok(result.file && fs.existsSync(result.file));
+});
+
+test('排版打印：找不到 Edge → 明确失败', async (t) => {
+  const dir = tmpDir(t);
+  const exec = fakePrintExec();
+  const result = await printDocument({
+    text: 'x', printer: 'P1', pdfDir: dir, edgePath: null, exec: exec.fn,
+  });
+  assert.equal(result.mode, 'failed');
+  assert.match(result.error, /未找到 Edge/);
+  assert.equal(exec.calls.length, 0);
+});
+
+test('真实 Edge：渲染一页 PDF 到磁盘', {
+  skip: (process.env.SAFE_OFFICE_TEST_EDGE === '1' && findEdge())
+    ? false
+    : '默认跳过真实 Edge 渲染（SAFE_OFFICE_TEST_EDGE=1 且存在 Edge 时运行）',
+}, async (t) => {
+  const dir = tmpDir(t);
+  const result = await printDocument({
+    text: '真实 Edge 渲染测试\n第二行', title: 'PDF 冒烟', level: '公开', operator: 'tester',
+    pdfDir: dir,
+  });
+  assert.equal(result.mode, 'pdf');
+  assert.ok(fs.existsSync(result.file));
+  const head = fs.readFileSync(result.file).subarray(0, 5).toString('latin1');
+  assert.equal(head, '%PDF-');
 });

@@ -533,6 +533,12 @@ function createConsoleServer({
         const body = await readJson(req);
         return sendJson(res, 200, service.reconcileOutbox(decodeURIComponent(outboxMatch[1]), body));
       }
+      if (pathname === '/api/bounce/poll' && method === 'POST') {
+        requireRole(req, ROLE_REVIEW, '轮询退信邮箱');
+        return sendJson(res, 200, await service.pollBounceNow({
+          by: req.user ? req.user.username : null,
+        }));
+      }
       if (pathname === '/api/bounce' && method === 'POST') {
         requireRole(req, ROLE_REVIEW, '处理退信');
         const body = await readJson(req);
@@ -749,6 +755,7 @@ async function startServer({
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
   storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
   auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
+  mcpConfigFile = process.env.SAFE_OFFICE_MCP_FILE || null,
   mailer = null,
   auth = null,
   allowVirtualConfirm = true,
@@ -770,12 +777,21 @@ async function startServer({
         blobStore,
         storeFile,
         auditFile,
+        mcpConfigFile,
         mailer: mailer || new FakeMailer(),
       });
     } else {
-      instance = new ConsoleService({ documentsStore, blobStore, storeFile, auditFile, mailer: mailer || new FakeMailer() });
+      instance = new ConsoleService({
+        documentsStore, blobStore, storeFile, auditFile, mcpConfigFile,
+        mailer: mailer || new FakeMailer(),
+      });
     }
   }
+  // 启动重连持久化的 MCP 服务；单个失败只记录，不阻塞启动
+  if (instance.mcpRestorePromise) {
+    try { await instance.mcpRestorePromise; } catch { /* 恢复失败不阻塞 */ }
+  }
+  if (instance.startBouncePolling) instance.startBouncePolling();
   const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -861,6 +877,8 @@ if (require.main === module) {
   } catch (err) {
     console.warn(`⚠ 附件库打不开（${attachmentsDb}）：${err.message}；本次不能带附件`);
   }
+  const mcpConfigFile = process.env.SAFE_OFFICE_MCP_FILE
+    || path.join(__dirname, 'data', 'mcp-servers.json');
   startServer({
     port: Number(process.env.PORT) || 7812,
     host: lan ? '0.0.0.0' : '127.0.0.1',
@@ -870,6 +888,7 @@ if (require.main === module) {
     blobStore,
     storeFile,
     auditFile,
+    mcpConfigFile,
     mailer: smtpMailer || new FakeMailer(),
     auth,
     allowVirtualConfirm,
@@ -903,8 +922,19 @@ if (require.main === module) {
       if (service.recoveredInFlight > 0) {
         console.log(`  ⚠ 上次中断的在途发送 ${service.recoveredInFlight} 条已转「待核对」，不会自动重试`);
       }
+      if (service.mcpConfigFile) {
+        const r = service.mcpRestore;
+        console.log(`  MCP 配置：${service.mcpConfigFile}（${service.mcpConfig.length} 个服务，恢复 ${r.restored} 个工具${r.failed.length ? `，失败 ${r.failed.length}` : ''}）`);
+      }
     } else {
       console.log('  内存模式：重启清空（设 SAFE_OFFICE_STORE_FILE / SAFE_OFFICE_AUDIT_FILE 可落盘）');
+    }
+    if (service.bouncePoller) {
+      const poller = service.bouncePoller;
+      console.log(`  退信轮询：IMAP ${poller.config.mailbox}（每 ${Math.round(poller.config.pollMs / 1000)}s）`);
+      if (poller.state.lastError) console.log(`    ⚠ 上次轮询失败：${poller.state.lastError}`);
+    } else if (service.bouncePollerError) {
+      console.warn(`  ⚠ IMAP 配置不完整：${service.bouncePollerError}`);
     }
     if (documentsStore) {
       const imported = documentsStore.list().length;
