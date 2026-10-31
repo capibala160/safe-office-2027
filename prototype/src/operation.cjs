@@ -68,7 +68,7 @@ function normalizeAttachments(attachments = []) {
 }
 
 function canonicalRecord(record) {
-  return JSON.stringify({
+  const canonical = {
     operationId: record.operationId,
     taskId: record.taskId,
     action: record.action,
@@ -84,7 +84,10 @@ function canonicalRecord(record) {
     expiresAt: record.expiresAt,
     modelId: record.modelId,
     planHash: record.planHash,
-  });
+  };
+  // v0.31 起把发起人绑进哈希；空值不写入，保证升级前冻结的旧记录仍能通过校验。
+  if (record.createdBy) canonical.createdBy = record.createdBy;
+  return JSON.stringify(canonical);
 }
 
 function computeOperationHash(record) {
@@ -125,6 +128,7 @@ function sealOperation(input = {}) {
     expiresAt,
     modelId: input.modelId || '',
     planHash: input.planHash || '',
+    createdBy: input.createdBy ? String(input.createdBy).slice(0, 64) : '',
     state: 'frozen',
   };
   base.operationHash = computeOperationHash(base);

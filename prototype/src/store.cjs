@@ -56,6 +56,7 @@ class OperationStore {
         expires_at TEXT NOT NULL,
         model_id TEXT NOT NULL DEFAULT '',
         plan_hash TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
         operation_hash TEXT NOT NULL UNIQUE,
         state TEXT NOT NULL,
         confirmation_id TEXT,
@@ -106,6 +107,11 @@ class OperationStore {
         hash TEXT NOT NULL
       );
     `);
+    // 旧库补列：v0.31 之前的 operations 表没有 created_by
+    const columns = this.db.prepare('PRAGMA table_info(operations)').all().map((c) => c.name);
+    if (!columns.includes('created_by')) {
+      this.db.exec("ALTER TABLE operations ADD COLUMN created_by TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   _transaction(fn) {
@@ -136,16 +142,16 @@ class OperationStore {
         INSERT INTO operations (
           operation_id, task_id, action, protocol_action, tool, recipient, subject,
           body, body_hash, attachments, source_doc_ids, level, created_at, expires_at,
-          model_id, plan_hash, operation_hash, state, confirmation_id, device_id,
+          model_id, plan_hash, created_by, operation_hash, state, confirmation_id, device_id,
           updated_at, result
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         operation.operationId, operation.taskId, operation.action, operation.protocolAction,
         operation.tool, operation.recipient, operation.subject, operation.body,
         operation.bodyHash, JSON.stringify(operation.attachments),
         JSON.stringify(operation.sourceDocIds), operation.level, operation.createdAt,
-        operation.expiresAt, operation.modelId, operation.planHash, operation.operationHash,
-        operation.state, null, null, this.now(), null,
+        operation.expiresAt, operation.modelId, operation.planHash, operation.createdBy || '',
+        operation.operationHash, operation.state, null, null, this.now(), null,
       );
       this.appendEvent('操作冻结', {
         operationId: operation.operationId,
@@ -177,6 +183,7 @@ class OperationStore {
       expiresAt: row.expires_at,
       modelId: row.model_id,
       planHash: row.plan_hash,
+      createdBy: row.created_by || '',
       operationHash: row.operation_hash,
       state: row.state,
       confirmationId: row.confirmation_id,

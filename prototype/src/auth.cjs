@@ -52,11 +52,12 @@ function saveUsers(file, users) {
 }
 
 class AuthService {
-  constructor({ users = [], ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
+  constructor({ users = [], ttlMs = DEFAULT_TTL_MS, now = () => Date.now(), file = null } = {}) {
     this.users = new Map(users.map((u) => [u.username, normalizeUser(u)]));
     this.sessions = new Map();
     this.ttlMs = ttlMs;
     this.now = now;
+    this.file = file;
   }
 
   login(username, password) {
@@ -83,11 +84,43 @@ class AuthService {
   logout(token) {
     return this.sessions.delete(token);
   }
+
+  // 改密：校验原密码 → 重算 scrypt → 落盘 → 注销该用户的其他会话（保留当前会话）。
+  // 用户表写入失败时不改内存，避免"内存已改、磁盘没改"的重启回退。
+  changePassword(username, oldPassword, newPassword, { keepToken = null } = {}) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) {
+      const err = new Error('用户不存在');
+      err.code = 'INVALID_CREDENTIALS';
+      throw err;
+    }
+    if (!verifyPassword(oldPassword, user)) {
+      const err = new Error('原密码不正确');
+      err.code = 'INVALID_CREDENTIALS';
+      throw err;
+    }
+    if (verifyPassword(newPassword, user)) {
+      const err = new Error('新密码不能与原密码相同');
+      err.code = 'BAD_PASSWORD';
+      throw err;
+    }
+    const next = hashPassword(newPassword);
+    const updated = { ...user, salt: next.salt, hash: next.hash };
+    if (this.file) {
+      const list = [...this.users.values()].map((u) => (u.username === user.username ? updated : u));
+      saveUsers(this.file, list);
+    }
+    this.users.set(user.username, updated);
+    for (const [token, session] of this.sessions) {
+      if (session.username === user.username && token !== keepToken) this.sessions.delete(token);
+    }
+    return { username: user.username };
+  }
 }
 
 function createAuthFromFile(file) {
   const users = loadUsers(file);
-  return users.length > 0 ? new AuthService({ users }) : null;
+  return users.length > 0 ? new AuthService({ users, file }) : null;
 }
 
 module.exports = {

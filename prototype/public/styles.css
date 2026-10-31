@@ -361,3 +361,18 @@ a.sample { display: block; text-decoration: none; color: inherit; }
 .diff-line { display: block; }
 .diff-line.add { color: #7bdca8; }
 .diff-line.del { color: #ff9d8f; }
+
+/* 改密弹窗（v0.31） */
+.dialog {
+  width: min(420px, 92vw);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+.dialog::backdrop { background: rgba(15, 23, 42, .55); }
+.dialog h2 { margin: 0 0 6px; font-size: 16px; }
+.dialog .input { width: 100%; margin-bottom: 10px; }
+.dialog .err { min-height: 18px; color: var(--block); font-size: 12px; }

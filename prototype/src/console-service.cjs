@@ -36,7 +36,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.30.0';
+const VERSION = '0.31.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -915,7 +915,7 @@ class ConsoleService {
 
     const operations = [];
     for (const descriptor of deferred) {
-      const operation = this._freezeDeferred(runId, descriptor, auditStart, options.attachments);
+      const operation = this._freezeDeferred(runId, descriptor, auditStart, options.attachments, operator);
       const autoMode = this._autoDecision(descriptor.action, operation);
       if (autoMode) {
         try {
@@ -995,7 +995,7 @@ class ConsoleService {
     return { ok: true, ...run };
   }
 
-  _freezeDeferred(runId, d, auditStart, attachments = []) {
+  _freezeDeferred(runId, d, auditStart, attachments = [], operator = null) {
     const action = d.action;
     const protocolAction = this.toolRegistry.protocolAction(action);
     if (!protocolAction) {
@@ -1040,6 +1040,7 @@ class ConsoleService {
         expiresAt: this._iso(this.now() + this.operationTtlMs),
         modelId: this._modelInfo().model || this._modelInfo().name,
         planHash: sha256Hex(`${runId}|${d.stepNumber}|${action}`),
+        createdBy: operator || '',
       });
     } catch (err) {
       // 冻结失败：刚写进去的附件内容没有操作引用，回滚掉（共用内容不动）
@@ -1177,6 +1178,7 @@ class ConsoleService {
       expiresAt: current.expiresAt,
       modelId: current.modelId,
       planHash: current.planHash,
+      createdBy: current.createdBy,
     });
     this.store.updateFrozenOperation(next);
 
@@ -1271,6 +1273,7 @@ class ConsoleService {
       action: operation.action,
       protocolAction: operation.protocolAction,
       protocolLabel: PROTOCOL_ACTIONS[operation.protocolAction] || '未知',
+      createdBy: operation.createdBy || '',
       tool: operation.tool,
       recipient: operation.recipient,
       subject: operation.subject,
@@ -1309,11 +1312,12 @@ class ConsoleService {
     };
   }
 
-  rejectOperation(id) {
+  rejectOperation(id, { actor = null } = {}) {
     const operation = this.store.getOperation(id);
     if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能拒绝`, 409);
     const rejected = this.store.setOperationState(id, 'rejected');
+    if (actor) this.audit.append('操作拒绝', { operationId: id, actor });
     return { ok: true, operation: this._operationView(rejected) };
   }
 
@@ -1439,7 +1443,20 @@ class ConsoleService {
     if (this.challengeHistory.length > 20) this.challengeHistory.pop();
   }
 
-  async decideChallenge(challengeId, decision) {
+  // 四眼原则：已登录用户不能批准自己发起的操作。
+  // 手机/WS63 确认端没有用户身份，只能靠"设备在另一台手机上"这个物理边界（见 docs/32）。
+  _assertNotSelfApproval(operation, actor) {
+    if (!actor || !operation || !operation.createdBy) return;
+    if (String(actor) !== operation.createdBy) return;
+    this.audit.append('四眼原则拒绝', {
+      operationId: operation.operationId,
+      operator: operation.createdBy,
+      actor,
+    });
+    throw new ConsoleError('FORBIDDEN', `四眼原则：操作由「${operation.createdBy}」发起，不能由本人批准`, 403);
+  }
+
+  async decideChallenge(challengeId, decision, { actor = null } = {}) {
     if (decision !== 'approve' && decision !== 'cancel') {
       throw new ConsoleError('BAD_REQUEST', "decision 必须是 'approve' 或 'cancel'");
     }
@@ -1449,6 +1466,7 @@ class ConsoleService {
     const operation = this.store.getOperation(challenge.operationId);
     if (!operation) throw new ConsoleError('NOT_FOUND', '操作不存在', 404);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能确认`, 409);
+    if (decision === 'approve') this._assertNotSelfApproval(operation, actor);
 
     const nowSec = this._nowSec();
     if (nowSec >= challenge.expiresAt) {

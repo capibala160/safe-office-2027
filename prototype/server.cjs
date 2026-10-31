@@ -232,6 +232,7 @@ function createConsoleServer({
   ]);
   const loginAttempts = new Map();
   const loginRateLimited = (key) => rateLimited(loginAttempts, key, 5, 60 * 1000);
+  const passwordAttempts = new Map();
   const ROLE_APPROVE = new Set(['员工', '管理员']);
   const ROLE_DEVICE = new Set(['设备助手', '管理员']);
   const ROLE_ADMIN = new Set(['管理员']);
@@ -355,6 +356,24 @@ function createConsoleServer({
 
     try {
       // ---------- API ----------
+      if (pathname === '/api/change-password' && method === 'POST') {
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+        if (rateLimited(passwordAttempts, clientIp(req), 5, 60 * 1000)) {
+          throw new ConsoleError('RATE_LIMITED', '改密尝试过多，请 1 分钟后再试', 429);
+        }
+        const body = await readJson(req);
+        try {
+          auth.changePassword(req.user.username, body.oldPassword, body.newPassword, {
+            keepToken: parseCookie(req.headers.cookie, 'sfc_session'),
+          });
+        } catch (err) {
+          if (err.code === 'INVALID_CREDENTIALS') {
+            throw new ConsoleError('INVALID_CREDENTIALS', err.message, 401);
+          }
+          throw new ConsoleError('BAD_REQUEST', err.message, 400);
+        }
+        return sendJson(res, 200, { ok: true });
+      }
       if (pathname === '/api/health' && method === 'GET') {
         return sendJson(res, 200, {
           ok: true, service: 'safe-office-console', version: VERSION,
@@ -486,7 +505,7 @@ function createConsoleServer({
       const opReject = pathname.match(/^\/api\/operations\/([^/]+)\/reject$/);
       if (opReject) requireRole(req, ROLE_APPROVE, '驳回操作');
       if (opReject && method === 'POST') {
-        return sendJson(res, 200, service.rejectOperation(decodeURIComponent(opReject[1])));
+        return sendJson(res, 200, service.rejectOperation(decodeURIComponent(opReject[1]), { actor: req.user ? req.user.username : null }));
       }
       const opTamper = pathname.match(/^\/api\/operations\/([^/]+)\/verify-tamper$/);
       if (opTamper) requireRole(req, ROLE_APPROVE, '校验操作');
@@ -542,7 +561,9 @@ function createConsoleServer({
           throw new ConsoleError('CONFLICT', '已启用真实动作，虚拟设备批准入口已关闭；请用手机/WS63 确认', 409);
         }
         const body = await readJson(req);
-        return sendJson(res, 200, await service.decideChallenge(decodeURIComponent(decideMatch[1]), body.decision));
+        return sendJson(res, 200, await service.decideChallenge(decodeURIComponent(decideMatch[1]), body.decision, {
+          actor: req.user ? req.user.username : null,
+        }));
       }
       const expireMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/expire$/);
       if (expireMatch) requireRole(req, ROLE_DEVICE, '模拟确认超时');

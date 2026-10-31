@@ -39,7 +39,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.30.0');
+  assert.equal(data.version, '0.31.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -470,6 +470,87 @@ test('虚拟批准入口：allowVirtualConfirm=false 时设备助手也拿 409',
   const boot = await fetch(`${started.url}/api/bootstrap`, { headers: { Cookie: `sfc_session=${token}` } });
   assert.equal(boot.status, 200);
   assert.equal((await boot.json()).virtualConfirm, false, '前端应能感知虚拟批准已关闭');
+});
+
+test('改密接口：原密码错误 401、新密码过短 400、成功后其他会话失效、新密码可登录', async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'alice', role: '员工', salt, hash }] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+
+  const first = await post(`${started.url}/api/login`, { username: 'alice', password: 'password123' });
+  const cookie1 = String(first.res.headers.get('set-cookie')).split(';')[0];
+  const second = await post(`${started.url}/api/login`, { username: 'alice', password: 'password123' });
+  const cookie2 = String(second.res.headers.get('set-cookie')).split(';')[0];
+  const change = (cookie, body) => fetch(`${started.url}/api/change-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify(body),
+  });
+
+  const wrong = await change(cookie1, { oldPassword: 'wrong-password', newPassword: 'newpassword123' });
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).error.code, 'INVALID_CREDENTIALS');
+
+  const short = await change(cookie1, { oldPassword: 'password123', newPassword: 'short' });
+  assert.equal(short.status, 400);
+  assert.equal((await short.json()).error.code, 'BAD_REQUEST');
+
+  const same = await change(cookie1, { oldPassword: 'password123', newPassword: 'password123' });
+  assert.equal(same.status, 400);
+
+  const ok = await change(cookie1, { oldPassword: 'password123', newPassword: 'newpassword123' });
+  assert.equal(ok.status, 200);
+
+  assert.equal((await fetch(`${started.url}/api/me`, { headers: { Cookie: cookie1 } })).status, 200, '当前会话保留');
+  assert.equal((await fetch(`${started.url}/api/me`, { headers: { Cookie: cookie2 } })).status, 401, '其他会话失效');
+
+  const oldLogin = await post(`${started.url}/api/login`, { username: 'alice', password: 'password123' });
+  assert.equal(oldLogin.res.status, 401);
+  const newLogin = await post(`${started.url}/api/login`, { username: 'alice', password: 'newpassword123' });
+  assert.equal(newLogin.res.status, 200);
+});
+
+test('四眼原则：HTTP 审批拒绝发起人，换一位管理员可批准', async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('admin1', '管理员'), mk('admin2', '管理员')] });
+  const started = await startServer({ port: 0, auth, allowVirtualConfirm: true });
+  t.after(() => started.close());
+  const cookie = (name) => `sfc_session=${auth.login(name, 'password123').token}`;
+
+  // 管理员角色本身不做业务动作：直接经服务层冻结一条发起人为 admin1 的操作
+  const sample = started.service.getDemoSamples().find((s) => s.id === 'external-confirm');
+  const run = await started.service.runCommand({ ...sample, role: '员工', operator: 'admin1' });
+  const op = run.operations[0];
+  assert.equal(op.createdBy, 'admin1');
+
+  const challengeRes = await fetch(`${started.url}/api/operations/${op.operationId}/challenge`, {
+    method: 'POST', headers: { Cookie: cookie('admin1') },
+  });
+  assert.equal(challengeRes.status, 200);
+  const { challenge } = await challengeRes.json();
+
+  const decide = (name) => fetch(`${started.url}/api/device/challenges/${challenge.challengeId}/decide`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie(name) },
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+
+  const self = await decide('admin1');
+  assert.equal(self.status, 403);
+  assert.equal((await self.json()).error.code, 'FORBIDDEN');
+
+  const detail = await fetch(`${started.url}/api/operations/${op.operationId}`, { headers: { Cookie: cookie('admin2') } });
+  assert.equal((await detail.json()).operation.state, 'frozen', '被拒后操作仍冻结');
+
+  const other = await decide('admin2');
+  assert.equal(other.status, 200);
+  const result = await other.json();
+  assert.equal(result.outcome, 'approved');
+  assert.equal(result.operation.state, 'executed');
 });
 
 test('坏 Cookie：不崩溃，返回 401/200', async (t) => {

@@ -8,6 +8,7 @@ const path = require('node:path');
 
 const {
   AuthService, hashPassword, verifyPassword, loadUsers, saveUsers, normalizeUser,
+  createAuthFromFile,
 } = require('../src/auth.cjs');
 
 test('密码：scrypt 哈希可验证，错误密码拒绝；短密码拒绝', () => {
@@ -39,6 +40,41 @@ test('会话：登录/验证/过期/登出', () => {
   });
   now = 1200;
   assert.equal(auth.verify(session.token), null, '过期后拒绝');
+});
+
+test('改密：校验原密码/长度/重复，成功后其他会话失效并写回用户表', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-users-'));
+  const file = path.join(dir, 'users.json');
+  const { salt, hash } = hashPassword('password123');
+  try {
+    saveUsers(file, [{ username: 'alice', role: '员工', salt, hash }]);
+    const auth = createAuthFromFile(file);
+    const current = auth.login('alice', 'password123');
+    const other = auth.login('alice', 'password123');
+
+    assert.throws(() => auth.changePassword('alice', 'wrong-password', 'newpassword123'), /原密码不正确/);
+    assert.throws(() => auth.changePassword('alice', 'password123', 'short'), /至少 8 位/);
+    assert.throws(() => auth.changePassword('alice', 'password123', 'password123'), /不能与原密码相同/);
+
+    auth.changePassword('alice', 'password123', 'newpassword123', { keepToken: current.token });
+    assert.ok(auth.verify(current.token), '当前会话保留');
+    assert.equal(auth.verify(other.token), null, '其他会话失效');
+
+    const reloaded = loadUsers(file);
+    assert.equal(reloaded.length, 1);
+    assert.equal(verifyPassword('newpassword123', reloaded[0]), true);
+    assert.ok(auth.login('alice', 'newpassword123'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('改密：内存模式（无文件）只改内存', () => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'bob', role: '员工', salt, hash }] });
+  auth.changePassword('bob', 'password123', 'newpassword123');
+  assert.ok(auth.login('bob', 'newpassword123'));
+  assert.equal(auth.login('bob', 'password123'), null);
 });
 
 test('用户表：保存/读取，权限 0600', () => {

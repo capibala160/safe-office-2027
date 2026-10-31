@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.30.0');
+  assert.equal(bootstrap.state.version, '0.31.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -87,6 +87,27 @@ test('外发：冻结待近场；批准后 executed/sent', async (t) => {
   assert.equal(decided.send.state, 'sent');
   assert.ok(decided.approval.confirmationId.startsWith('ws63-'));
   assert.equal(service.mailer.calls.length, 1);
+});
+
+test('四眼原则：发起人不能批准自己的操作，换人后可批准', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const run = await service.runCommand({ ...sample(service, 'external-confirm'), operator: 'alice' });
+  const op = run.operations[0];
+  assert.equal(op.createdBy, 'alice');
+
+  const challenge = service.beginChallenge(op.operationId);
+  await assert.rejects(
+    () => service.decideChallenge(challenge.challengeId, 'approve', { actor: 'alice' }),
+    /四眼原则/,
+  );
+  assert.equal(service.store.getOperation(op.operationId).state, 'frozen', '被拒后操作仍冻结');
+  assert.equal(service.mailer.calls.length, 0);
+
+  const approved = await service.decideChallenge(challenge.challengeId, 'approve', { actor: 'bob' });
+  assert.equal(approved.outcome, 'approved');
+  assert.equal(approved.operation.state, 'executed');
+  assert.ok(service.audit.entries.some((e) => e.kind === '四眼原则拒绝'));
 });
 
 test('取消：decision=0 → rejected，零发送', async (t) => {

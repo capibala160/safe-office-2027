@@ -87,7 +87,7 @@
   function operationCard(op) {
     return `<article class="op-card" data-op-card="${esc(op.operationId)}">
       <div class="op-head"><span class="tag">${esc(op.protocolLabel)}</span><strong>${esc(op.subject)}</strong>${badge(op.state)}${op.expired ? '<span class="badge block">已过期</span>' : ''}</div>
-      <div class="op-meta">目标：${esc(op.recipient)} · 密级：${esc(op.level)} · ${confirmationLabel(op)}</div>
+      <div class="op-meta">目标：${esc(op.recipient)} · 密级：${esc(op.level)} · ${confirmationLabel(op)}${op.createdBy ? ` · 发起人：${esc(op.createdBy)}` : ''}</div>
       <div class="op-hash">operationHash ${esc(short(op.operationHash, 28))} · ${op.outbox ? `outbox ${esc(statusText[op.outbox.state] || op.outbox.state)}` : '暂无 outbox'}</div>
       ${op.attachments && op.attachments.length ? `<div class="op-meta">附件（${op.attachments.length}）：${op.attachments.map((a) => (EXPORTABLE.has(op.state)
         ? `<a href="/api/operations/${encodeURIComponent(op.operationId)}/attachments/${esc(a.sha256)}" download="${esc(a.name)}">${esc(a.name)}</a>`
@@ -672,6 +672,7 @@
           <div class="sub-text">动作：${esc(op.protocolLabel)} / ${esc(op.action)}</div>
           <div class="sub-text">目标：${esc(op.recipient)}</div>
           <div class="sub-text">密级：${esc(op.level)}</div>
+          <div class="sub-text">发起人：${esc(op.createdBy || '—')}</div>
           <div class="sub-text">状态：${badge(op.state)}</div>
           <div class="sub-text">确认：${confirmationLabel(op)}</div>
         </div>

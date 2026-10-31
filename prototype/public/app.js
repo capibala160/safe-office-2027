@@ -261,6 +261,50 @@
     }
   }
 
+  // 改密弹窗：用原生 dialog；失败信息就地显示，不触发 API 的 401 跳转
+  function bindPasswordDialog() {
+    const dialog = document.getElementById('password-dialog');
+    const error = document.getElementById('password-error');
+    const save = document.getElementById('password-save');
+    const fields = ['old-password', 'new-password', 'confirm-password'];
+    if (!dialog || !error || !save) return;
+    const value = (id) => document.getElementById(id).value;
+
+    document.getElementById('btn-password').addEventListener('click', () => {
+      error.textContent = '';
+      for (const id of fields) document.getElementById(id).value = '';
+      dialog.showModal();
+      document.getElementById('old-password').focus();
+    });
+    document.getElementById('password-cancel').addEventListener('click', () => dialog.close());
+    dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+
+    save.addEventListener('click', async () => {
+      const oldPassword = value('old-password');
+      const newPassword = value('new-password');
+      const confirmPassword = value('confirm-password');
+      error.textContent = '';
+      if (newPassword.length < 8) { error.textContent = '新密码至少 8 位'; return; }
+      if (newPassword !== confirmPassword) { error.textContent = '两次输入的新密码不一致'; return; }
+      save.disabled = true;
+      try {
+        const res = await fetch('/api/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ oldPassword, newPassword }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error((data.error && data.error.message) || `HTTP ${res.status}`);
+        dialog.close();
+        toast('密码已修改；该账号在其他设备上的登录已失效', 'ok');
+      } catch (err) {
+        error.textContent = err.message;
+      } finally {
+        save.disabled = false;
+      }
+    });
+  }
+
   function bindChrome() {
     document.getElementById('auto-mode').addEventListener('change', async (e) => {
       const mode = e.currentTarget.value;
@@ -285,12 +329,14 @@
       try { await fetch('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
       location.href = '/login.html';
     });
+    bindPasswordDialog();
     fetch('/api/me', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((data) => {
       if (data && data.user) {
         const label = document.getElementById('current-user');
         label.textContent = `${data.user.username}（${data.user.role}）`;
         label.hidden = false;
         document.getElementById('btn-logout').hidden = false;
+        document.getElementById('btn-password').hidden = false;
       }
     }).catch(() => { /* ignore */ });
   }
