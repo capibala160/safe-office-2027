@@ -10,6 +10,7 @@ const { startServer } = require('../server.cjs');
 const { AuthService, hashPassword } = require('../src/auth.cjs');
 const { DocumentStore } = require('../src/ingest.cjs');
 const { totpCode } = require('../src/totp.cjs');
+const { startMcpServer } = require('../mcp-server.cjs');
 
 async function launch(t) {
   // 优先用系统 Edge（本机已装）；没有则回退 Playwright 自带 Chromium
@@ -329,6 +330,46 @@ test('UI 退信处理：员工发内网邮件 → 审计员粘贴 DSN → 发件
   assert.match(await page.textContent('#bounce-result'), /回填 1/);
   assert.equal(started.service.store.getOutbox(outbox.outboxId).state, 'bounced');
   assert.match(await page.textContent('body'), /退信处理/);
+
+  assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
+});
+
+test('UI MCP 接入：管理员在治理页发现并注册 MCP 工具', { timeout: 90000 }, async (t) => {
+  const mcp = await startMcpServer({ port: 0 });
+  t.after(() => mcp.close());
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'admin', role: '管理员', salt, hash }] });
+  const started = await startServer({ port: 0, auth });
+  const browser = await launch(t);
+  t.after(() => started.close());
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+
+  await page.goto(started.url, { waitUntil: 'domcontentloaded' });
+  await page.waitForURL(/\/login\.html/);
+  await page.fill('#username', 'admin');
+  await page.fill('#password', 'password123');
+  await page.click('#submit');
+  await page.waitForSelector('#current-user:not([hidden])');
+
+  await page.goto(`${started.url}/#/governance`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#mcp-url');
+  await page.fill('#mcp-url', mcp.url);
+  await page.click('#mcp-discover');
+  await page.waitForSelector('[data-mcp-tool]', { timeout: 15000 });
+  assert.equal(await page.locator('[data-mcp-tool]').count(), 2);
+
+  await page.click('#mcp-register');
+  await page.waitForFunction(() => {
+    const toast = document.getElementById('toast');
+    return toast && toast.classList.contains('show') && toast.textContent.includes('MCP 工具已注册');
+  }, null, { timeout: 15000 });
+
+  // 重渲染后工具注册表里应出现 mcp_ 前缀工具
+  await page.waitForFunction(() => document.body.innerText.includes('mcp_wordCount'), null, { timeout: 15000 });
+  assert.ok((await page.textContent('body')).includes('mcp_echo'));
+  assert.ok(started.service.toolRegistry.get('mcp_wordCount'));
 
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });

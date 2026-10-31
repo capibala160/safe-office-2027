@@ -162,6 +162,7 @@ async function registerMcpTools({
   policy = null,
   defaults = {},
   overrides = {},
+  include = null,
   source = 'mcp',
 } = {}) {
   if (!registry || typeof registry.register !== 'function' || typeof registry.validate !== 'function') {
@@ -172,8 +173,20 @@ async function registerMcpTools({
   }
 
   const listed = await client.listTools();
-  const tools = Array.isArray(listed) ? listed : (listed && listed.tools);
-  if (!Array.isArray(tools)) throw new Error('MCP tools/list 返回结构非法');
+  const all = Array.isArray(listed) ? listed : (listed && listed.tools);
+  if (!Array.isArray(all)) throw new Error('MCP tools/list 返回结构非法');
+  // v0.36：控制台按勾选注册；include 为空 = 全部（保持旧行为）
+  let tools = all;
+  if (Array.isArray(include)) {
+    const wanted = new Set(include.map((x) => String(x)));
+    tools = all.filter((t) => t && wanted.has(t.name));
+    if (tools.length === 0) throw new Error('勾选的工具在服务端不存在');
+    if (tools.length !== wanted.size) {
+      const found = new Set(tools.map((t) => t.name));
+      const missing = [...wanted].filter((name) => !found.has(name));
+      throw new Error(`服务端缺少工具：${missing.join(', ')}`);
+    }
+  }
 
   const definitions = tools.map((tool) => {
     const def = mcpToolToDefinition(tool, { defaults, overrides: overrides[tool.name] || {} });

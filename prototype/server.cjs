@@ -667,6 +667,22 @@ function createConsoleServer({
         requireRole(req, ROLE_STAFF, '读取治理数据');
         return sendJson(res, 200, { ok: true, ...service.getGovernance(userContext(req)) });
       }
+      if (pathname === '/api/mcp/discover' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '发现 MCP 工具');
+        const body = await readJson(req);
+        return sendJson(res, 200, await service.discoverMcp({
+          ...body,
+          by: req.user ? req.user.username : null,
+        }));
+      }
+      if (pathname === '/api/mcp/register' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '注册 MCP 工具');
+        const body = await readJson(req);
+        return sendJson(res, 200, await service.registerMcp({
+          ...body,
+          by: req.user ? req.user.username : null,
+        }));
+      }
       if (pathname === '/api/governance/review' && method === 'POST') {
         requireRole(req, ROLE_REVIEW, '风险复核');
         const body = await readJson(req);

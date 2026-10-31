@@ -920,6 +920,17 @@
       <section class="card"><div class="card-head"><h2>策略矩阵</h2><span class="sub">未声明 = 拒绝（fail-closed）</span></div><div class="table-wrap"><table class="table"><thead><tr><th>角色</th>${actions.map((a) => `<th>${esc(a)}</th>`).join('')}</tr></thead><tbody>${roles.map((r) => `<tr><td><strong>${esc(r)}</strong></td>${actions.map((a) => `<td>${badge((policy[r] && policy[r][a]) || 'deny')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>办公能力分级</h2><span class="sub">${gov.capabilities.length} 类</span></div><div class="table-wrap"><table class="table"><thead><tr><th>能力</th><th>级别</th><th>工具</th><th>约束</th></tr></thead><tbody>${gov.capabilities.map((cap) => `<tr><td>${esc(cap.name)}</td><td>${badge(cap.level)}</td><td class="mono">${esc(cap.tools.join(', '))}</td><td>${esc(cap.constraints)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>工具注册表</h2><span class="sub">${(gov.tools || []).length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>工具</th><th>能力</th><th>级别</th><th>高危</th><th>转交</th><th>来源</th></tr></thead><tbody>${(gov.tools || []).map((tool) => `<tr><td class="mono">${esc(tool.name)}</td><td>${esc(tool.capability)}</td><td>${badge(tool.level)}</td><td>${tool.highRisk ? '是' : '否'}</td><td>${tool.deferred ? '是' : '否'}</td><td>${esc(tool.source)}</td></tr>`).join('')}</tbody></table></div></section>
+      ${canAdmin ? `<section class="card"><div class="card-head"><h2>接入 MCP 服务</h2><span class="sub">仅管理员；注册后按角色策略生效（未声明 = 拒绝）</span></div>
+        <div class="form-grid">
+          <div class="full"><label class="label">服务地址</label><input class="input" id="mcp-url" value="http://127.0.0.1:7899" placeholder="http://127.0.0.1:7899"></div>
+          <div><label class="label">Token（可选）</label><input class="input" id="mcp-token" type="password" autocomplete="off"></div>
+          <div><label class="label">工具级别</label><select class="select" id="mcp-level"><option>L1</option><option>L2</option><option selected>L3</option><option>L4</option></select></div>
+          <div class="full"><label class="label">允许角色（至少一个）</label><div class="checks" id="mcp-roles">${roles.map((r) => `<label class="check"><input type="checkbox" value="${esc(r)}" ${r === '员工' ? 'checked' : ''}> ${esc(r)}</label>`).join('')}</div></div>
+        </div>
+        <div class="btn-row mt12"><button class="btn small" id="mcp-discover">发现工具</button><button class="btn ghost small" id="mcp-register">注册所选</button></div>
+        <div id="mcp-tools" class="mt12"></div>
+        <div id="mcp-result" class="mt12"></div>
+      </section>` : ''}
       <section class="card"><div class="card-head"><h2>时延</h2></div><div class="table-wrap"><table class="table"><thead><tr><th>阶段</th><th>次数</th><th>合计</th><th>均值</th><th>峰值</th></tr></thead><tbody>${gov.perf.map((p) => `<tr><td>${esc(p.label)}</td><td>${esc(p.count)}</td><td>${esc(Number(p.totalMs).toFixed(2))} ms</td><td>${esc(Number(p.avgMs).toFixed(3))} ms</td><td>${esc(Number(p.maxMs).toFixed(3))} ms</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>审计时间线</h2>${audit ? `<span class="sub">最近 ${audit.items.length} 条</span>` : '<span class="sub">需要审计员/管理员权限</span>'}</div>${audit ? `<div class="event-list">${audit.items.slice().reverse().map(eventItem).join('') || '<div class="empty">暂无审计</div>'}</div>` : '<div class="notice block">当前角色不可读取完整审计日志。</div>'}</section>`;
 
@@ -981,6 +992,38 @@
         root.querySelector('#bounce-result').innerHTML = `<div class="notice ${res.summary.bounced ? 'info' : 'block'}">回填 ${res.summary.bounced} · 重复 ${res.summary.duplicate} · 跳过 ${res.summary.skipped} · 未匹配 ${res.summary.unmatched} · 忽略 ${res.summary.ignored}</div><div class="event-list mt8">${rows}</div>`;
         toast(res.summary.bounced ? `已回填 ${res.summary.bounced} 条退信` : '没有可回填的记录', res.summary.bounced ? 'ok' : 'info');
         await c.refreshState();
+      } catch (err) { toast(c.errorText(err), 'error'); }
+      finally { btn.disabled = false; }
+    });
+    const mcpUrl = root.querySelector('#mcp-url');
+    const mcpToken = () => root.querySelector('#mcp-token').value || null;
+    root.querySelector('#mcp-discover')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await API.post('/api/mcp/discover', { url: mcpUrl.value, token: mcpToken() });
+        root.querySelector('#mcp-tools').innerHTML = res.tools.length
+          ? `<div class="stack">${res.tools.map((t) => `<label class="spread"><span class="check"><input type="checkbox" data-mcp-tool="${esc(t.name)}" checked> <span class="mono">${esc(t.name)}</span></span><span class="sub-text">${esc(t.description || '')}${t.required && t.required.length ? ` · 参数 ${esc(t.required.join(', '))}` : ''}</span></label>`).join('')}</div>`
+          : '<div class="empty">服务端没有工具</div>';
+        root.querySelector('#mcp-result').innerHTML = `<div class="notice info">已连接 ${esc((res.server && res.server.name) || res.url)} · 发现 ${res.tools.length} 个工具</div>`;
+        toast(`发现 ${res.tools.length} 个工具`, 'ok');
+      } catch (err) { toast(c.errorText(err), 'error'); }
+      finally { btn.disabled = false; }
+    });
+    root.querySelector('#mcp-register')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const tools = [...root.querySelectorAll('[data-mcp-tool]:checked')].map((x) => x.dataset.mcpTool);
+      const roles = [...root.querySelectorAll('#mcp-roles input:checked')].map((x) => x.value);
+      const level = root.querySelector('#mcp-level').value;
+      if (!tools.length) { toast('先发现并勾选工具', 'info'); return; }
+      if (!roles.length) { toast('至少选择一个允许角色（未声明 = 拒绝）', 'info'); return; }
+      btn.disabled = true;
+      try {
+        const res = await API.post('/api/mcp/register', { url: mcpUrl.value, token: mcpToken(), tools, roles, level });
+        root.querySelector('#mcp-result').innerHTML = `<div class="notice info">已注册 ${res.registered.length} 个：${esc(res.registered.join('、'))}<div class="sub-text mt8">级别 ${esc(level)} · 允许角色 ${esc(roles.join(' / '))} · 沙箱 local</div></div>`;
+        toast('MCP 工具已注册', 'ok');
+        await c.refreshState();
+        c.rerender();
       } catch (err) { toast(c.errorText(err), 'error'); }
       finally { btn.disabled = false; }
     });

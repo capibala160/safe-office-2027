@@ -22,6 +22,7 @@ const {
 } = require('./scenario.cjs');
 const { CAPABILITIES, RISK_LEVELS } = require('./capabilities.cjs');
 const { ToolRegistry } = require('./tool-registry.cjs');
+const { McpClient, createHttpTransport, registerMcpTools } = require('./mcp-adapter.cjs');
 const { redact } = require('./guard.cjs');
 const { OperationStore } = require('./store.cjs');
 const { BlobStore, MAX_BLOB_BYTES } = require('./blob-store.cjs');
@@ -37,7 +38,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.35.0';
+const VERSION = '0.36.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -106,6 +107,7 @@ class ConsoleService {
     autoSafeDomains = ['partner-example.com'],
     toolRegistry = null,
     toolExecutors = null,
+    allowRemoteMcp = null,
     pairingCode = null,
     llm = null,
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
@@ -148,6 +150,11 @@ class ConsoleService {
     this.autoSafeDomains = [...autoSafeDomains];
     this._injectedRegistry = toolRegistry;
     this._injectedExecutors = toolExecutors;
+    // v0.36：MCP 只允许回环地址，防 SSRF；确需远程时显式开环境变量
+    this.allowRemoteMcp = allowRemoteMcp === null
+      ? /^(1|true|yes|on)$/i.test(String(process.env.SAFE_OFFICE_MCP_ALLOW_REMOTE || ''))
+      : allowRemoteMcp === true;
+    this.mcpSessions = new Map();   // url → { client, token, at }（内存，重启即失效）
     this._mailer = mailer;
     this.startedAt = now();
     this.seq = 0;
@@ -181,6 +188,8 @@ class ConsoleService {
     this.toolExecutors = this._injectedExecutors instanceof Map
       ? this._injectedExecutors
       : new Map(Object.entries(this._injectedExecutors || {}));
+    // 运行期注册的自定义/MCP 执行器在 reset 后仍可用（注册表本来就复用）
+    this._injectedExecutors = this.toolExecutors;
     this.toolRegistry.applyPolicies(this.policy);
     this.planner = new GuardedPlanner({
       llm: this._injectedLlm || createLlmFromEnv(),
@@ -2065,6 +2074,135 @@ class ConsoleService {
     } finally {
       this.audit.actor = previousActor || null;
     }
+  }
+
+  // ---------- v0.36 MCP 控制台接入 ----------
+  //   - 管理员在治理页填地址 → 发现工具 → 勾选后注册进 ToolRegistry
+  //   - 注册必须显式给角色策略与级别（未声明 = 拒绝）；沙箱档案固定 local
+  //   - 只允许回环地址（防 SSRF）；确需远程开 SAFE_OFFICE_MCP_ALLOW_REMOTE=1
+  _normalizeMcpUrl(url) {
+    let parsed;
+    try {
+      parsed = new URL(String(url || '').trim());
+    } catch {
+      throw new ConsoleError('BAD_REQUEST', 'MCP 地址不是合法 URL', 400);
+    }
+    if (!/^https?:$/.test(parsed.protocol)) {
+      throw new ConsoleError('BAD_REQUEST', 'MCP 地址只支持 http/https', 400);
+    }
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
+    if (!loopback && !this.allowRemoteMcp) {
+      throw new ConsoleError('FORBIDDEN', 'MCP 只允许回环地址（确需远程请设置 SAFE_OFFICE_MCP_ALLOW_REMOTE=1）', 403);
+    }
+    return parsed.toString();
+  }
+
+  _mcpClient(url, token, timeoutMs) {
+    const transport = createHttpTransport({
+      url,
+      headers: token ? { 'x-mcp-token': String(token) } : {},
+      timeoutMs: Number(timeoutMs) > 0 ? Number(timeoutMs) : 8000,
+    });
+    return new McpClient({ transport });
+  }
+
+  async discoverMcp({ url, token = null, timeoutMs = 8000, by = null } = {}) {
+    const target = this._normalizeMcpUrl(url);
+    const client = this._mcpClient(target, token, timeoutMs);
+    let init;
+    try {
+      init = await client.initialize();
+    } catch (err) {
+      throw new ConsoleError('MCP_ERROR', `连接 MCP 失败：${err.message}`, 502);
+    }
+    let tools;
+    try {
+      tools = await client.listTools();
+    } catch (err) {
+      throw new ConsoleError('MCP_ERROR', `读取工具列表失败：${err.message}`, 502);
+    }
+    this.mcpSessions.set(target, { client, token: token || null, at: this.now() });
+    const previousActor = this.audit.actor;
+    this.audit.actor = by || null;
+    try {
+      this.audit.append('MCP 发现', {
+        url: target,
+        server: init && init.serverInfo ? init.serverInfo.name : null,
+        tools: tools.map((t) => t.name),
+      });
+    } finally {
+      this.audit.actor = previousActor || null;
+    }
+    return {
+      ok: true,
+      url: target,
+      server: init && init.serverInfo ? init.serverInfo : null,
+      tools: tools.map((t) => ({
+        name: t.name,
+        description: t.description || '',
+        required: t.inputSchema && Array.isArray(t.inputSchema.required) ? t.inputSchema.required : [],
+      })),
+    };
+  }
+
+  async registerMcp({
+    url, token = null, tools = null, roles = [], level = 'L3',
+    capability = 'MCP 外部工具', timeoutMs = 8000, by = null,
+  } = {}) {
+    const target = this._normalizeMcpUrl(url);
+    if (!Array.isArray(roles) || roles.length === 0) {
+      throw new ConsoleError('BAD_REQUEST', '必须至少选择一个允许角色（未声明 = 拒绝）', 400);
+    }
+    const knownRoles = new Set(Object.keys(ROLE_DEFS));
+    for (const role of roles) {
+      if (!knownRoles.has(role)) throw new ConsoleError('BAD_REQUEST', `未知角色：${role}`, 400);
+    }
+    if (!/^L[1-4]$/.test(String(level))) {
+      throw new ConsoleError('BAD_REQUEST', '级别必须是 L1–L4', 400);
+    }
+    if (!Array.isArray(tools) || tools.length === 0) {
+      throw new ConsoleError('BAD_REQUEST', '至少勾选一个 MCP 工具', 400);
+    }
+
+    const session = this.mcpSessions.get(target);
+    const client = session && session.client ? session.client : this._mcpClient(target, token, timeoutMs);
+    let registered;
+    try {
+      const result = await registerMcpTools({
+        registry: this.toolRegistry,
+        client,
+        policy: this.policy,
+        include: tools.map(String),
+        defaults: {
+          namePrefix: 'mcp_',
+          capability,
+          level,
+          sandbox: { local: true },
+          policies: roles.map((role) => ({ role, decision: 'allow' })),
+        },
+      });
+      registered = result.registered;
+      for (const [name, executor] of result.executors) this.toolExecutors.set(name, executor);
+    } catch (err) {
+      const message = String(err && err.message ? err.message : err);
+      if (/已注册|重复/.test(message)) {
+        throw new ConsoleError('CONFLICT', message, 409);
+      }
+      if (/不存在|缺少工具/.test(message)) {
+        throw new ConsoleError('BAD_REQUEST', message, 400);
+      }
+      throw new ConsoleError('MCP_ERROR', message, 502);
+    }
+
+    const previousActor = this.audit.actor;
+    this.audit.actor = by || null;
+    try {
+      this.audit.append('MCP 注册', { url: target, tools: registered, roles, level });
+    } finally {
+      this.audit.actor = previousActor || null;
+    }
+    return { ok: true, url: target, registered };
   }
 
   // ---------- 业务副作用（模拟） ----------
