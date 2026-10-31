@@ -258,6 +258,8 @@ function createConsoleServer({
   const ROLE_DOC_READ = new Set(['员工', '管理员', '审计员']);
   const ROLE_DOC_WRITE = new Set(['员工', '管理员']);
   const ROLE_STAFF = ROLE_DOC_READ;
+  // 文档共享的目标角色：管理员/审计员本来就可见全部文档，设备助手/访客没有文档读取面
+  const SHAREABLE_ROLES = new Set(['员工', '实习生']);
   // 设备助手需要看到待审批队列与操作详情（但不读文档正文/审计）
   const ROLE_OP_READ = new Set(['员工', '管理员', '审计员', '设备助手']);
   const ROLE_AUDIT = new Set(['管理员', '审计员']);
@@ -517,6 +519,56 @@ function createConsoleServer({
       if (pathname === '/api/documents' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取文档列表');
         return sendJson(res, 200, { ok: true, items: service.listDocuments(userContext(req)) });
+      }
+      // —— 文档共享（v0.41）：只有登录用户之间才有意义 ——
+      if (pathname === '/api/share-targets' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取共享对象');
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表），无法共享', 409);
+        return sendJson(res, 200, {
+          ok: true,
+          items: auth.listUsers()
+            .filter((u) => SHAREABLE_ROLES.has(u.role))
+            .map((u) => ({ username: u.username, role: u.role })),
+        });
+      }
+      const docSharesMatch = pathname.match(/^\/api\/documents\/([^/]+)\/shares$/);
+      if (docSharesMatch) requireRole(req, ROLE_STAFF, '读取文档共享');
+      if (docSharesMatch && method === 'GET') {
+        return sendJson(res, 200, {
+          ok: true,
+          ...service.listDocumentShares(decodeURIComponent(docSharesMatch[1]), userContext(req)),
+        });
+      }
+      const docShareMatch = pathname.match(/^\/api\/documents\/([^/]+)\/share$/);
+      if (docShareMatch) requireRole(req, ROLE_STAFF, '共享文档');
+      if (docShareMatch && method === 'POST') {
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表），无法共享', 409);
+        const body = await readJson(req);
+        const grantee = String(body.grantee || '').trim();
+        const target = auth.listUsers().find((u) => u.username === grantee);
+        if (!target) throw new ConsoleError('NOT_FOUND', `用户不存在：${grantee || '（空）'}`, 404);
+        return sendJson(res, 200, {
+          ok: true,
+          ...service.shareDocument({
+            docId: decodeURIComponent(docShareMatch[1]),
+            grantee: target.username,
+            granteeRole: target.role,
+            ...userContext(req),
+          }),
+        });
+      }
+      const docRevokeMatch = pathname.match(/^\/api\/documents\/([^/]+)\/share\/revoke$/);
+      if (docRevokeMatch) requireRole(req, ROLE_STAFF, '取消共享');
+      if (docRevokeMatch && method === 'POST') {
+        const body = await readJson(req);
+        return sendJson(res, 200, {
+          ok: true,
+          ...service.revokeDocumentShare({
+            docId: decodeURIComponent(docRevokeMatch[1]),
+            grantee: String(body.grantee || '').trim(),
+            ...userContext(req),
+          }),
+        });
       }
       const docMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
       if (docMatch) requireRole(req, ROLE_STAFF, '读取文档');

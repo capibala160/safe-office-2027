@@ -184,6 +184,68 @@
     });
   }
 
+  // ---------- 文档共享（v0.41） ----------
+  async function showSharePanel(container, c, id) {
+    try {
+      const [detail, targets] = await Promise.all([
+        API.get(`/api/documents/${encodeURIComponent(id)}/shares`),
+        API.get('/api/share-targets'),
+      ]);
+      const doc = detail.document;
+      const shares = detail.shares || [];
+      const users = (targets.items || []);
+      const roleOf = (name) => {
+        const u = users.find((item) => item.username === name);
+        return u ? u.role : '—';
+      };
+      const shared = new Set(shares.map((s) => s.grantee));
+      const me = c.store.authUser ? c.store.authUser.username : null;
+      const candidates = users.filter((u) => u.username !== doc.owner && u.username !== me && !shared.has(u.username));
+      container.innerHTML = `<section class="card">
+        <div class="card-head"><h2>共享「${esc(doc.title)}」</h2><span class="sub">所有者 ${esc(doc.owner)} · ${esc(doc.level)}</span></div>
+        <div class="btn-row">
+          <select class="select" id="share-target">
+            ${candidates.length
+              ? `<option value="">选择用户…</option>${candidates.map((u) => `<option value="${esc(u.username)}">${esc(u.username)}（${esc(u.role)}）</option>`).join('')}`
+              : '<option value="">没有可共享的用户</option>'}
+          </select>
+          <button class="btn small" id="share-add" ${candidates.length ? '' : 'disabled'}>共享</button>
+          <button class="btn ghost small" id="share-close">收起</button>
+        </div>
+        <div class="table-wrap mt12"><table class="table"><thead><tr><th>被授权人</th><th>角色</th><th>授权人</th><th>时间</th><th></th></tr></thead><tbody>
+          ${shares.length
+            ? shares.map((s) => `<tr><td>${esc(s.grantee)}</td><td>${esc(roleOf(s.grantee))}</td><td>${esc(s.grantedBy || '—')}</td><td>${esc(dateTime(s.grantedAt))}</td><td class="row-actions"><button class="btn ghost small" data-share-revoke="${esc(s.grantee)}">撤销</button></td></tr>`).join('')
+            : '<tr><td colspan="5">还没有共享给任何人</td></tr>'}
+        </tbody></table></div>
+        <div class="sub-text mt8">共享只授予读取权限，不改变所有者与密级；撤销后对方立即失去访问权。共享与撤销都会写入审计链。</div>
+      </section>`;
+      container.querySelector('#share-close').addEventListener('click', () => { container.innerHTML = ''; });
+      const add = container.querySelector('#share-add');
+      if (add) add.addEventListener('click', async () => {
+        const grantee = container.querySelector('#share-target').value;
+        if (!grantee) { toast('先选择用户', 'info'); return; }
+        add.disabled = true;
+        try {
+          await API.post(`/api/documents/${encodeURIComponent(id)}/share`, { grantee });
+          toast(`已共享给 ${grantee}`, 'ok');
+          await c.refreshBootstrap();
+          await showSharePanel(container, c, id);
+        } catch (err) { toast(errorText(err), 'error'); add.disabled = false; }
+      });
+      container.querySelectorAll('[data-share-revoke]').forEach((btn) => btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          await API.post(`/api/documents/${encodeURIComponent(id)}/share/revoke`, { grantee: btn.dataset.shareRevoke });
+          toast(`已撤销 ${btn.dataset.shareRevoke} 的共享`, 'ok');
+          await c.refreshBootstrap();
+          await showSharePanel(container, c, id);
+        } catch (err) { toast(errorText(err), 'error'); btn.disabled = false; }
+      }));
+    } catch (err) {
+      container.innerHTML = `<div class="notice block">${esc(errorText(err))}</div>`;
+    }
+  }
+
   // ---------- 工作台 ----------
   async function dashboard(root, c) {
     const state = c.store.state || await c.refreshState();
@@ -576,7 +638,12 @@
       <section class="card">
         <div class="card-head"><h2>文件列表</h2><span class="sub">${docs.length} 项</span></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>类型</th><th>标题</th><th>密级</th><th>归属</th><th>状态</th><th>操作</th></tr></thead><tbody>
-          ${docs.map((d) => `<tr><td class="mono">${esc(d.id)}</td><td>${esc(d.type)}</td><td>${esc(d.title)}</td><td>${badge(d.level)}</td><td>${esc(d.owner || '共享')}</td><td>${esc(d.status)}</td><td class="row-actions"><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button>${d.type === 'document' && !d.deleted ? `<button class="btn ghost small" data-doc-task="minutes" data-id="${esc(d.id)}" data-title="${esc(d.title)}">整理纪要</button><button class="btn ghost small" data-doc-task="email" data-id="${esc(d.id)}" data-title="${esc(d.title)}">起草邮件</button>` : ''}</td></tr>`).join('')}
+          ${docs.map((d) => {
+            const canShare = d.type === 'document' && d.owner && !d.deleted && c.store.authUser
+              && (d.owner === c.store.authUser.username || c.store.authUser.role === '管理员');
+            const ownerLabel = d.sharedWithMe ? `${d.owner}（共享给我）` : (d.owner || '共享');
+            return `<tr><td class="mono">${esc(d.id)}</td><td>${esc(d.type)}</td><td>${esc(d.title)}</td><td>${badge(d.level)}</td><td>${esc(ownerLabel)}</td><td>${esc(d.status)}</td><td class="row-actions"><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button>${d.type === 'document' && !d.deleted ? `<button class="btn ghost small" data-doc-task="minutes" data-id="${esc(d.id)}" data-title="${esc(d.title)}">整理纪要</button><button class="btn ghost small" data-doc-task="email" data-id="${esc(d.id)}" data-title="${esc(d.title)}">起草邮件</button>` : ''}${canShare ? `<button class="btn ghost small" data-share="${esc(d.id)}">共享</button>` : ''}</td></tr>`;
+          }).join('')}
         </tbody></table></div>
         <div class="btn-row mt12"><button class="btn danger small" id="files-delete">删除周例会纪要（M2）</button><button class="btn ghost small" id="files-rollback">回滚最近快照</button></div>
         <div class="sub-text mt8">MockLLM 的单删计划固定为 M2；批量删除样例在命令台。删除确认后由假执行器标记 deleted。</div>
@@ -584,6 +651,7 @@
       <div id="files-detail"></div><div id="files-result"></div>`;
     const detail = root.querySelector('#files-detail');
     root.querySelectorAll('[data-doc]').forEach((btn) => btn.addEventListener('click', () => showDocDetail(detail, c, btn.dataset.doc)));
+    root.querySelectorAll('[data-share]').forEach((btn) => btn.addEventListener('click', () => showSharePanel(detail, c, btn.dataset.share)));
     // 从文件页直接发起任务：带上当前文档授权跳转到命令台
     root.querySelectorAll('[data-doc-task]').forEach((btn) => btn.addEventListener('click', () => {
       const id = btn.dataset.id;

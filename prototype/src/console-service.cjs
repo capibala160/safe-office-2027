@@ -40,7 +40,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.40.2';
+const VERSION = '0.41.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -654,10 +654,21 @@ class ConsoleService {
   }
 
   // ---------- 文档 / 通讯录 / 日历 ----------
+  // v0.41：显式共享授权也算可见（只加不减，密级在授权时已校验）
+  _isSharedWithMe(docId, actor) {
+    if (!actor || !this.documentsStore) return false;
+    try {
+      return this.documentsStore.isSharedWith(docId, actor);
+    } catch {
+      return false;
+    }
+  }
+
   _docRowVisible(doc, actor, role) {
     if (!actor || !doc || !doc.owner) return true;
     if (doc.owner === actor) return true;
-    return ['管理员', '审计员'].includes(role);
+    if (['管理员', '审计员'].includes(role)) return true;
+    return this._isSharedWithMe(doc.id, actor);
   }
 
   listDocuments({ actor = null, role = null } = {}) {
@@ -669,6 +680,7 @@ class ConsoleService {
         status: this.business.deletedDocIds.has(d.id) ? 'deleted' : 'available',
         deleted: this.business.deletedDocIds.has(d.id), tainted: false, generated: false,
         owner: d.owner || '',
+        sharedWithMe: this._isSharedWithMe(d.id, actor),
       });
     }
     for (const i of Object.values(IMAGES)) {
@@ -717,8 +729,107 @@ class ConsoleService {
     return {
       id, title: meta.title, level: meta.level, body: null, originalBody: null,
       tainted: false, generated: false, status: this.business.deletedDocIds.has(id) ? 'deleted' : 'not-read',
+      owner: meta.owner || '',
+      sharedWithMe: this._isSharedWithMe(id, actor),
       note: '正文未进入授权知识库；请先通过命令台/纪要中心读取。',
     };
+  }
+
+  // ---------- 文档共享（v0.41） ----------
+  // 规则：只有文档所有者或管理员能授权/撤销；共享不降密级（目标角色必须本就能读该密级）；
+  //       共享只影响"能不能读"，不改变所有者，也不把文档移出租户视图。
+  _assertShareableDoc(docId, actor, role) {
+    if (!this.documentsStore) {
+      throw new ConsoleError('CONFLICT', '文档库未启用：请用 npm start 启动（内存模式不支持共享）', 409);
+    }
+    const id = String(docId || '');
+    const doc = this.documentsStore.get(id) || getDocumentById(id);
+    if (!doc) throw new ConsoleError('NOT_FOUND', `文档不存在：${id}`, 404);
+    if (this.business.deletedDocIds.has(id)) throw new ConsoleError('CONFLICT', `文档已删除：${id}`, 409);
+    if (!doc.owner) throw new ConsoleError('CONFLICT', '样例文档对所有角色可见，无需共享', 409);
+    const isOwner = !!actor && doc.owner === actor;
+    if (!isOwner && role !== '管理员') {
+      throw new ConsoleError('FORBIDDEN', '只有文档所有者或管理员可以共享', 403);
+    }
+    return doc;
+  }
+
+  listDocumentShares(docId, { actor = null, role = null } = {}) {
+    const doc = this._assertShareableDoc(docId, actor, role);
+    return {
+      document: { id: doc.id, title: doc.title, level: doc.level, owner: doc.owner || '' },
+      shares: this.documentsStore.listShares(doc.id),
+    };
+  }
+
+  shareDocument({ docId, grantee, granteeRole = null, actor = null, role = null } = {}) {
+    const doc = this._assertShareableDoc(docId, actor, role);
+    const target = String(grantee || '').trim();
+    if (!target) throw new ConsoleError('BAD_REQUEST', '缺少共享对象', 400);
+    if (target === doc.owner) throw new ConsoleError('BAD_REQUEST', '不能共享给文档所有者本人', 400);
+    if (target === actor) throw new ConsoleError('BAD_REQUEST', '不能共享给自己', 400);
+    const def = ROLE_DEFS[granteeRole];
+    if (!def) throw new ConsoleError('BAD_REQUEST', `未知角色：${granteeRole || '（空）'}`, 400);
+    if (['管理员', '审计员'].includes(granteeRole)) {
+      throw new ConsoleError('CONFLICT', `角色「${granteeRole}」本来就可见全部文档，无需共享`, 409);
+    }
+    if (!def.levels.includes(doc.level)) {
+      throw new ConsoleError(
+        'FORBIDDEN', `角色「${granteeRole}」无权读取${doc.level}级文档，共享不能绕过密级`, 403,
+      );
+    }
+    const previousActor = this.audit.actor;
+    this.audit.actor = actor || null;
+    try {
+      this.documentsStore.share(doc.id, target, actor || '');
+      this.audit.append('文档共享', {
+        docId: doc.id, owner: doc.owner || '', grantee: target, granteeRole, level: doc.level,
+      });
+    } finally {
+      this.audit.actor = previousActor || null;
+    }
+    return {
+      document: { id: doc.id, title: doc.title, level: doc.level, owner: doc.owner || '' },
+      shares: this.documentsStore.listShares(doc.id),
+    };
+  }
+
+  revokeDocumentShare({ docId, grantee, actor = null, role = null } = {}) {
+    const doc = this._assertShareableDoc(docId, actor, role);
+    const target = String(grantee || '').trim();
+    if (!target) throw new ConsoleError('BAD_REQUEST', '缺少共享对象', 400);
+    if (!this.documentsStore.revokeShare(doc.id, target)) {
+      throw new ConsoleError('NOT_FOUND', `没有共享记录：${doc.id} → ${target}`, 404);
+    }
+    // 撤销后对方已读进知识库的副本一并清除（含由该文档派生的摘要/正式稿），
+    // 否则"撤销"只是挡住列表，正文仍能从这里读到。
+    const purged = this._purgeKnowledgeFor(doc.id, target);
+    const previousActor = this.audit.actor;
+    this.audit.actor = actor || null;
+    try {
+      this.audit.append('取消共享', {
+        docId: doc.id, owner: doc.owner || '', grantee: target, purged,
+      });
+    } finally {
+      this.audit.actor = previousActor || null;
+    }
+    return {
+      document: { id: doc.id, title: doc.title, level: doc.level, owner: doc.owner || '' },
+      shares: this.documentsStore.listShares(doc.id),
+      purged,
+    };
+  }
+
+  _purgeKnowledgeFor(docId, grantee) {
+    let purged = 0;
+    for (const [id, item] of Object.entries(this.runtime.knowledge)) {
+      const fromDoc = id === docId || (Array.isArray(item.sourceIds) && item.sourceIds.includes(docId));
+      if (fromDoc && item.owner === grantee) {
+        delete this.runtime.knowledge[id];
+        purged += 1;
+      }
+    }
+    return purged;
   }
 
   listContacts() {
@@ -972,14 +1083,16 @@ class ConsoleService {
     return this.fulfillment.send(outboxId);
   }
 
-  // 租户隔离：共享样例文档（无 owner）所有人可见；导入资料只看自己的（管理员/审计员例外）
+  // 租户隔离：共享样例文档（无 owner）所有人可见；导入资料只看自己的（管理员/审计员例外）；
+  // v0.41：被显式共享的文档对被授权人可见（密级已在授权时校验）
   _docVisibleTo(id, actor, role) {
     if (!actor) return true;
     const doc = getDocumentById(id);
     if (!doc) return true;
     if (!doc.owner) return true;
     if (doc.owner === actor) return true;
-    return ['管理员', '审计员'].includes(role);
+    if (['管理员', '审计员'].includes(role)) return true;
+    return this._isSharedWithMe(id, actor);
   }
 
   _issueAgentAndToken({

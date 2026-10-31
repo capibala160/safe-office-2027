@@ -431,3 +431,79 @@ test('UI 设备确认：员工发起挑战 → 设备助手在设备页批准 �
 
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });
+
+test('UI 文档共享：alice 导入并共享给 bob → bob 看到共享给我 → 撤销后消失', { timeout: 90000 }, async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('alice', '员工'), mk('bob', '员工')] });
+  const started = await startServer({ port: 0, auth, documentsStore: new DocumentStore(':memory:') });
+  const browser = await launch(t);
+  t.after(() => started.close());
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+  const login = async (name) => {
+    await page.goto(started.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForURL(/\/login\.html/);
+    await page.fill('#username', name);
+    await page.fill('#password', 'password123');
+    await page.click('#submit');
+    await page.waitForURL((url) => !url.pathname.endsWith('/login.html'));
+    await page.waitForSelector('#current-user:not([hidden])');
+  };
+
+  await login('alice');
+  await page.goto(`${started.url}/#/files`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#doc-file');
+  await page.setInputFiles('#doc-file', {
+    name: 'e2e-share.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('共享测试资料\n第二行', 'utf8'),
+  });
+  await page.selectOption('#doc-level', '内部');
+  await page.click('#doc-import');
+  await page.waitForFunction(() => document.body.innerText.includes('共享测试资料'), null, { timeout: 15000 });
+
+  // 所有者共享给 bob
+  await page.locator('tr', { hasText: '共享测试资料' }).first().locator('[data-share]').click();
+  await page.waitForSelector('#share-target');
+  await page.selectOption('#share-target', 'bob');
+  await page.click('#share-add');
+  await page.waitForFunction(() => {
+    const toast = document.getElementById('toast');
+    return toast && toast.textContent.includes('已共享给 bob');
+  }, null, { timeout: 15000 });
+
+  // bob 登录：文档可见并标「共享给我」
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await login('bob');
+  await page.goto(`${started.url}/#/files`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => document.body.innerText.includes('共享测试资料'), null, { timeout: 15000 });
+  assert.match(await page.textContent('body'), /共享给我/);
+
+  // alice 撤销后，bob 不再可见
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await login('alice');
+  await page.goto(`${started.url}/#/files`, { waitUntil: 'domcontentloaded' });
+  await page.locator('tr', { hasText: '共享测试资料' }).first().locator('[data-share]').click();
+  await page.waitForSelector('[data-share-revoke="bob"]');
+  await page.click('[data-share-revoke="bob"]');
+  await page.waitForFunction(() => {
+    const toast = document.getElementById('toast');
+    return toast && toast.textContent.includes('已撤销');
+  }, null, { timeout: 15000 });
+
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await login('bob');
+  await page.goto(`${started.url}/#/files`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#view');
+  await page.waitForTimeout(500);
+  assert.ok(!(await page.textContent('body')).includes('共享测试资料'), '撤销后 bob 不应再看到该文档');
+
+  assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
+});

@@ -192,6 +192,16 @@ class DocumentStore {
     if (!columns.includes('owner')) {
       this.db.exec("ALTER TABLE documents ADD COLUMN owner TEXT NOT NULL DEFAULT ''");
     }
+    // v0.41：文档共享授权（所有者按人授权；共享不降密级，撤销即失权）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS document_shares (
+        doc_id TEXT NOT NULL,
+        grantee TEXT NOT NULL,
+        granted_by TEXT NOT NULL,
+        granted_at TEXT NOT NULL,
+        PRIMARY KEY (doc_id, grantee)
+      );
+    `);
   }
 
   upsert(doc) {
@@ -233,8 +243,59 @@ class DocumentStore {
   }
 
   delete(docId) {
-    const info = this.db.prepare('DELETE FROM documents WHERE doc_id = ?').run(String(docId));
+    const id = String(docId);
+    this.db.prepare('DELETE FROM document_shares WHERE doc_id = ?').run(id);
+    const info = this.db.prepare('DELETE FROM documents WHERE doc_id = ?').run(id);
     return info.changes > 0;
+  }
+
+  // ---------- 文档共享（v0.41） ----------
+  // 授权只是"额外允许某个账号读"，不改变文档所有者与密级
+  share(docId, grantee, grantedBy = '', now = () => new Date().toISOString()) {
+    const id = String(docId);
+    const who = String(grantee);
+    if (!id || !who) throw new Error('共享需要文档 ID 与目标账号');
+    this.db.prepare(`
+      INSERT INTO document_shares (doc_id, grantee, granted_by, granted_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(doc_id, grantee) DO UPDATE SET
+        granted_by = excluded.granted_by, granted_at = excluded.granted_at
+    `).run(id, who, String(grantedBy || ''), now());
+    return { docId: id, grantee: who, grantedBy: String(grantedBy || '') };
+  }
+
+  revokeShare(docId, grantee) {
+    const info = this.db.prepare(
+      'DELETE FROM document_shares WHERE doc_id = ? AND grantee = ?',
+    ).run(String(docId), String(grantee));
+    return info.changes > 0;
+  }
+
+  listShares(docId) {
+    return this.db.prepare(`
+      SELECT doc_id, grantee, granted_by, granted_at
+        FROM document_shares WHERE doc_id = ? ORDER BY granted_at, grantee
+    `).all(String(docId)).map((row) => ({
+      docId: row.doc_id,
+      grantee: row.grantee,
+      grantedBy: row.granted_by || '',
+      grantedAt: row.granted_at,
+    }));
+  }
+
+  isSharedWith(docId, grantee) {
+    if (!grantee) return false;
+    const row = this.db.prepare(
+      'SELECT 1 AS hit FROM document_shares WHERE doc_id = ? AND grantee = ?',
+    ).get(String(docId), String(grantee));
+    return !!row;
+  }
+
+  sharedDocIds(grantee) {
+    if (!grantee) return [];
+    return this.db.prepare(
+      'SELECT doc_id FROM document_shares WHERE grantee = ?',
+    ).all(String(grantee)).map((row) => row.doc_id);
   }
 
   close() {
@@ -274,6 +335,9 @@ function importFile(store, filePath, options = {}) {
 }
 
 function removeFile(store, docId) {
+  // 走 DocumentStore.delete 以同时清掉共享授权（v0.41），否则删除后重新导入同内容
+  // 会得到同一个 ID，旧授权会被重新激活。
+  if (typeof store.delete === 'function') return store.delete(docId);
   const info = store.db.prepare('DELETE FROM documents WHERE doc_id = ?').run(docId);
   return info.changes > 0;
 }
