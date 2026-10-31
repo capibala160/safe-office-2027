@@ -282,6 +282,11 @@
       mark.textContent = '!';
       title.textContent = '已确认，但执行失败';
       detail.textContent = data.message || '';
+    } else if (data.outcome === 'approved-but-unknown') {
+      mark.classList.add('bad');
+      mark.textContent = '!';
+      title.textContent = '已确认，但结果待核实';
+      detail.textContent = data.message || '发送结果不确定，请回控制台人工核对。';
     } else {
       mark.classList.add('bad');
       mark.textContent = '×';

@@ -75,6 +75,8 @@ class AuthService {
     this.sessions = new Map();      // tokenHash → { username, role, expiresAt }
     this.pendingTotp = new Map();   // username → secret（尚未启用）
     this.ttlMs = ttlMs;
+    // 滑动续期的落盘节流：默认最多每分钟写一次；测试/短 TTL 时按 TTL/4 缩小
+    this.sessionSaveIntervalMs = Math.min(60_000, Math.max(1_000, Math.floor(ttlMs / 4)));
     this.now = now;
     this.file = file;
     this.sessionFile = sessionFile;
@@ -100,6 +102,7 @@ class AuthService {
         // 角色以用户表为准；用户被删/改角色后旧会话不能沿用旧权限
         this.sessions.set(String(item.tokenHash).toLowerCase(), {
           username: user.username, role: user.role, expiresAt,
+          persistedExpiresAt: expiresAt,
         });
       }
     } catch (err) {
@@ -127,6 +130,10 @@ class AuthService {
         fs.renameSync(tmp, this.sessionFile);
       }
       this.sessionSaveError = null;
+      // 记录"这份文件里实际写下的过期时间"，续期落盘以它为基准而不是相邻请求差
+      for (const session of this.sessions.values()) {
+        session.persistedExpiresAt = session.expiresAt;
+      }
     } catch (err) {
       this.sessionSaveError = err.message;
     }
@@ -155,10 +162,11 @@ class AuthService {
       this._saveSessions();
       return null;
     }
-    const previousExpiry = session.expiresAt;
     session.expiresAt = now + this.ttlMs;
-    // 滑动过期：最多每分钟落盘一次，避免每个请求都写文件
-    if (session.expiresAt - previousExpiry > 60 * 1000) this._saveSessions();
+    // 滑动过期：与"上次真正落盘的过期时间"比较，而不是相邻两次请求的差值。
+    // 否则请求间隔一直小于 1 分钟时，续期永远不会落盘。
+    const persisted = Number(session.persistedExpiresAt) || 0;
+    if (session.expiresAt - persisted >= this.sessionSaveIntervalMs) this._saveSessions();
     return { username: session.username, role: session.role, expiresAt: session.expiresAt };
   }
 

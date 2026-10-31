@@ -531,7 +531,12 @@ function createConsoleServer({
       if (outboxMatch) requireRole(req, ROLE_STAFF, '核对发件');
       if (outboxMatch && method === 'POST') {
         const body = await readJson(req);
-        return sendJson(res, 200, service.reconcileOutbox(decodeURIComponent(outboxMatch[1]), body));
+        const ctx = userContext(req);
+        return sendJson(res, 200, service.reconcileOutbox(decodeURIComponent(outboxMatch[1]), {
+          ...body,
+          actor: ctx.actor,
+          role: ctx.role,
+        }));
       }
       if (pathname === '/api/bounce/poll' && method === 'POST') {
         requireRole(req, ROLE_REVIEW, '轮询退信邮箱');

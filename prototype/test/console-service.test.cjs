@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.40.0');
+  assert.equal(bootstrap.state.version, '0.40.1');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -540,4 +540,62 @@ test('手机确认端：详情带收件人/正文预览/附件，目标哈希与
   assert.ok(details.bodyPreview.length > 0, '应有正文预览');
   assert.ok(Array.isArray(details.attachments));
   assert.equal(details.verify.ok, true);
+});
+
+test('设备批准但发送失败/未知：不按成功回报', async (t) => {
+  const failed = setup({ service: { mailer: new FakeMailer({ behavior: 'rejected' }) } });
+  t.after(() => failed.service.close());
+  const run = await runSample(failed.service, 'external-confirm');
+  const op = run.operations[0];
+  const ch = failed.service.beginChallenge(op.operationId);
+  const decided = await failed.service.decideChallenge(ch.challengeId, 'approve');
+  assert.equal(decided.ok, false, '发送失败不能报 ok:true');
+  assert.equal(decided.outcome, 'approved-but-failed');
+  assert.equal(decided.code, 'SEND_FAILED');
+  assert.equal(decided.send.state, 'failed');
+  assert.match(decided.message, /发送失败/);
+  assert.equal(decided.operation.state, 'failed');
+  assert.equal(decided.operation.outbox.state, 'failed');
+
+  const unknown = setup({ service: { mailer: new FakeMailer({ behavior: 'timeout' }) } });
+  t.after(() => unknown.service.close());
+  const run2 = await runSample(unknown.service, 'external-confirm');
+  const op2 = run2.operations[0];
+  const ch2 = unknown.service.beginChallenge(op2.operationId);
+  const decided2 = await unknown.service.decideChallenge(ch2.challengeId, 'approve');
+  assert.equal(decided2.ok, false);
+  assert.equal(decided2.outcome, 'approved-but-unknown');
+  assert.equal(decided2.code, 'SEND_UNKNOWN');
+  assert.equal(decided2.send.state, 'unknown');
+  assert.match(decided2.message, /待核实/);
+});
+
+test('发件核对：不能核对他人记录（服务层 404）', async (t) => {
+  const { service } = setup({ service: { mailer: new FakeMailer({ behavior: 'accepted-then-timeout' }) } });
+  t.after(() => service.close());
+  const run = await service.runCommand({ ...sample(service, 'external-confirm'), operator: 'alice' });
+  const op = run.operations[0];
+  const ch = service.beginChallenge(op.operationId);
+  await service.decideChallenge(ch.challengeId, 'approve');
+  const outbox = service.store.getOutboxByOperation(op.operationId);
+  assert.equal(outbox.state, 'unknown');
+
+  assert.throws(
+    () => service.reconcileOutbox(outbox.outboxId, { state: 'sent', actor: 'bob', role: '员工' }),
+    /发件记录不存在/,
+  );
+  assert.equal(service.store.getOutbox(outbox.outboxId).state, 'unknown');
+
+  const ok = service.reconcileOutbox(outbox.outboxId, { state: 'sent', actor: 'alice', role: '员工' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.outbox.state, 'sent');
+
+  // 管理员跨租户核对仍然允许
+  const run2 = await service.runCommand({ ...sample(service, 'external-confirm'), operator: 'alice' });
+  const op2 = run2.operations[0];
+  const ch2 = service.beginChallenge(op2.operationId);
+  await service.decideChallenge(ch2.challengeId, 'approve');
+  const outbox2 = service.store.getOutboxByOperation(op2.operationId);
+  const admin = service.reconcileOutbox(outbox2.outboxId, { state: 'sent', actor: 'root', role: '管理员' });
+  assert.equal(admin.ok, true);
 });

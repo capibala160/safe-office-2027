@@ -763,6 +763,8 @@
   function renderDeviceResult(res) {
     const map = {
       approved: ['ok', `已批准 → 操作 ${res.operation ? res.operation.state : ''} → 发送 ${res.send ? res.send.state : ''}`],
+      'approved-but-failed': ['error', `已批准，但执行失败：${res.message || ''}`],
+      'approved-but-unknown': ['error', `已批准，但结果待核实：${res.message || ''}`],
       cancelled: ['error', `已取消 → 操作 ${res.operation ? res.operation.state : ''}`],
       expired: ['error', `已超时：nonce 已消费，操作仍 ${res.operation ? res.operation.state : ''}`],
       timeout: ['error', '设备无响应'],

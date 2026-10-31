@@ -40,7 +40,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.40.0';
+const VERSION = '0.40.1';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -1717,6 +1717,32 @@ class ConsoleService {
         confirmationId: approval.confirmationId,
       });
       const sent = await this._sendChecked(operation, confirmed.outbox.outboxId);
+      const approvalView = {
+        decision: approval.decision, deviceLabel: approval.deviceLabel,
+        confirmationId: approval.confirmationId, decidedAt: approval.decidedAt,
+      };
+      // 设备批准 ≠ 发送成功：failed/unknown 都不能按"已执行"回报
+      if (sent.state !== 'sent') {
+        const failed = sent.state === 'failed';
+        const outcome = failed ? 'approved-but-failed' : 'approved-but-unknown';
+        const code = failed ? 'SEND_FAILED' : 'SEND_UNKNOWN';
+        const message = failed
+          ? `已确认，但发送失败：${sent.error || '邮件服务拒绝'}`
+          : `已确认，但发送结果待核实：${sent.error || '结果未知'}`;
+        challenge.state = 'approved';
+        challenge.result = {
+          code, confirmationId: approval.confirmationId, sent: sent.state,
+          error: sent.error || null,
+        };
+        this._pushHistory(challenge, { code, outcome });
+        return {
+          ok: false, outcome, code, message,
+          approval: approvalView,
+          operation: this._operationView(this.store.getOperation(operation.operationId)),
+          outbox: sent,
+          send: sent,
+        };
+      }
       if (this.toolRegistry.isHighRisk(operation.action)) {
         this.risk.observe({ kind: 'executed-high-risk', action: operation.action });
       }
@@ -1725,10 +1751,7 @@ class ConsoleService {
       this._pushHistory(challenge, { code: 'OK', outcome: 'approved' });
       return {
         ok: true, outcome: 'approved', code: 'OK', message: '设备已批准并执行',
-        approval: {
-          decision: approval.decision, deviceLabel: approval.deviceLabel,
-          confirmationId: approval.confirmationId, decidedAt: approval.decidedAt,
-        },
+        approval: approvalView,
         operation: this._operationView(this.store.getOperation(operation.operationId)),
         outbox: sent,
         send: sent,
@@ -2039,9 +2062,13 @@ class ConsoleService {
     };
   }
 
-  reconcileOutbox(outboxId, { state, messageId = null, note = '' } = {}) {
+  reconcileOutbox(outboxId, { state, messageId = null, note = '', actor = null, role = null } = {}) {
     const outbox = this.store.getOutbox(outboxId);
-    if (!outbox) throw new ConsoleError('NOT_FOUND', `发件记录不存在：${outboxId}`, 404);
+    const operation = outbox ? this.store.getOperation(outbox.operationId) : null;
+    // 不存在或不属于当前租户 → 统一 404，避免泄露他人发件记录的存在性
+    if (!outbox || !operation || !this._operationVisible(operation, actor, role)) {
+      throw new ConsoleError('NOT_FOUND', `发件记录不存在：${outboxId}`, 404);
+    }
     try {
       const updated = this.fulfillment.reconcile(outboxId, { state, messageId, note });
       const operation = this.store.getOperation(outbox.operationId);

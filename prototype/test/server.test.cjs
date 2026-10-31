@@ -7,6 +7,7 @@ const { startServer, DEFAULT_COMMAND_BODY_LIMIT } = require('../server.cjs');
 const { AuthService, hashPassword } = require('../src/auth.cjs');
 const { totpCode } = require('../src/totp.cjs');
 const { DocumentStore } = require('../src/ingest.cjs');
+const { FakeMailer } = require('../src/mailer.cjs');
 
 async function boot(t) {
   const started = await startServer({ port: 0 });
@@ -117,7 +118,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.40.0');
+  assert.equal(data.version, '0.40.1');
 });
 
 test('静态首页与资源', async (t) => {
@@ -807,4 +808,79 @@ test('坏 Cookie：不崩溃，返回 401/200', async (t) => {
   // 进程仍存活
   const again = await fetch(`${started.url}/api/health`);
   assert.equal(again.status, 200);
+});
+
+test('发件核对：他人记录 404，本人可核对；设备助手不能核对', async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({
+    users: [mk('alice', '员工'), mk('bob', '员工'), mk('dev', '设备助手')],
+  });
+  const started = await startServer({
+    port: 0, auth, mailer: new FakeMailer({ behavior: 'accepted-then-timeout' }),
+  });
+  t.after(() => started.close());
+  const cookie = (name) => `sfc_session=${auth.login(name, 'password123').token}`;
+
+  // alice 发起外发（结果会因 accepted-then-timeout 变成 unknown）
+  const run = await fetch(`${started.url}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('alice') },
+    body: JSON.stringify(externalCommand),
+  });
+  assert.equal(run.status, 200);
+  const op = (await run.json()).operations[0];
+
+  const challengeRes = await fetch(`${started.url}/api/operations/${op.operationId}/challenge`, {
+    method: 'POST', headers: { Cookie: cookie('alice') },
+  });
+  assert.equal(challengeRes.status, 200);
+  const challenge = (await challengeRes.json()).challenge;
+
+  // 设备助手批准 → 发送 unknown（不是成功）
+  const decideRes = await fetch(`${started.url}/api/device/challenges/${challenge.challengeId}/decide`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('dev') },
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+  assert.equal(decideRes.status, 200);
+  const decided = await decideRes.json();
+  assert.equal(decided.outcome, 'approved-but-unknown');
+  assert.equal(decided.ok, false);
+
+  const aliceView = await fetch(`${started.url}/api/operations/${op.operationId}`, {
+    headers: { Cookie: cookie('alice') },
+  });
+  const outboxId = (await aliceView.json()).operation.outbox.outboxId;
+  assert.ok(outboxId);
+
+  const bobRead = await fetch(`${started.url}/api/operations/${op.operationId}`, {
+    headers: { Cookie: cookie('bob') },
+  });
+  assert.equal(bobRead.status, 404, 'Bob 看不到 Alice 的操作');
+
+  const bobReconcile = await fetch(`${started.url}/api/outbox/${encodeURIComponent(outboxId)}/reconcile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('bob') },
+    body: JSON.stringify({ state: 'sent', messageId: 'bob-forged' }),
+  });
+  assert.equal(bobReconcile.status, 404, 'Bob 不能改 Alice 的发件状态');
+  assert.equal(started.service.store.getOutbox(outboxId).state, 'unknown', '状态未被改动');
+
+  const devReconcile = await fetch(`${started.url}/api/outbox/${encodeURIComponent(outboxId)}/reconcile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('dev') },
+    body: JSON.stringify({ state: 'sent' }),
+  });
+  assert.equal(devReconcile.status, 403, '设备助手不参与发件核对');
+
+  const aliceReconcile = await fetch(`${started.url}/api/outbox/${encodeURIComponent(outboxId)}/reconcile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('alice') },
+    body: JSON.stringify({ state: 'sent', messageId: 'alice-fixed' }),
+  });
+  assert.equal(aliceReconcile.status, 200);
+  assert.equal((await aliceReconcile.json()).outbox.state, 'sent');
 });

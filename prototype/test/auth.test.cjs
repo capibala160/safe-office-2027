@@ -158,3 +158,50 @@ test('用户表：保存/读取，权限 0600', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('会话续期：请求间隔小于 1 分钟也会持续落盘', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-renew-'));
+  const sessionsFile = path.join(dir, 'sessions.json');
+  const { salt, hash } = hashPassword('password123');
+  const users = [{ username: 'alice', role: '员工', salt, hash }];
+  let now = 1_000_000;
+  try {
+    const first = new AuthService({ users, ttlMs: 8 * 3600 * 1000, now: () => now, sessionFile: sessionsFile });
+    const session = first.login('alice', 'password123');
+    const original = session.expiresAt;
+    // 每 20 秒访问一次，持续 2 分钟：相邻请求差只有 20s，远小于 1 分钟
+    for (let i = 0; i < 6; i += 1) {
+      now += 20_000;
+      assert.ok(first.verify(session.token));
+    }
+    const saved = JSON.parse(fs.readFileSync(sessionsFile, 'utf8')).sessions[0];
+    assert.ok(saved.expiresAt > original, '续期必须写回文件（修复前永远不落盘）');
+
+    const second = new AuthService({ users, ttlMs: 8 * 3600 * 1000, now: () => now, sessionFile: sessionsFile });
+    const resumed = second.verify(session.token);
+    assert.ok(resumed, '重启后会话仍有效');
+    assert.ok(resumed.expiresAt >= now + 8 * 3600 * 1000 - 1000, '过期时间是续期后的值');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('会话续期：短 TTL 下重启后不丢会话', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-renew-short-'));
+  const sessionsFile = path.join(dir, 'sessions.json');
+  const { salt, hash } = hashPassword('password123');
+  const users = [{ username: 'alice', role: '员工', salt, hash }];
+  let now = 0;
+  try {
+    const first = new AuthService({ users, ttlMs: 4000, now: () => now, sessionFile: sessionsFile });
+    const session = first.login('alice', 'password123');
+    now = 3000;
+    assert.ok(first.verify(session.token), '续期到 7000');
+    // 已超过登录时的 4000，但还在最后一次续期的有效期内
+    now = 4500;
+    const second = new AuthService({ users, ttlMs: 4000, now: () => now, sessionFile: sessionsFile });
+    assert.ok(second.verify(session.token), '重启不能把续期后的会话丢掉');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
