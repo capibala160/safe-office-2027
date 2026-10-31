@@ -15,7 +15,7 @@ const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
 const { BlobStore, parseKey } = require('./src/blob-store.cjs');
 const { FakeMailer } = require('./src/mailer.cjs');
 const { createSmtpMailerFromEnv } = require('./src/smtp-mailer.cjs');
-const { scanAttachment } = require('./src/file-scan.cjs');
+const { scanAttachment, findClamav } = require('./src/file-scan.cjs');
 const { AuthService, createAuthFromFile } = require('./src/auth.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
@@ -855,6 +855,12 @@ if (require.main === module) {
     const model = service.getState().model;
     console.log(`  模型：${model.mode}${model.model ? ` / ${model.model}` : ''}`);
     if (smtpMailer) console.log('  邮件：SMTP 真实发送（收件人白名单已启用）');
+    const clamavMode = String(process.env.SAFE_OFFICE_CLAMAV || 'off').toLowerCase();
+    if (clamavMode !== 'off') {
+      const scanner = findClamav();
+      if (scanner) console.log(`  附件扫描：ClamAV ${clamavMode}（${scanner}）`);
+      else console.log(`  附件扫描：ClamAV ${clamavMode}，但未找到扫描器${clamavMode === 'required' ? '——附件将被拒绝' : ''}`);
+    }
     if (auth) {
       console.log(`  登录：已启用（${auth.users.size} 个用户，${usersFile}）`);
       console.log(`  会话：持久化 → ${sessionsFile}（只存 token 的 SHA-256）`);
@@ -887,6 +893,8 @@ if (require.main === module) {
       console.log(`    配对码：${code}`);
       for (const item of phoneUrls) console.log(`    手机打开：${item.url}  (${item.name})`);
       if (phoneUrls.length === 0) console.log('    （未找到局域网 IPv4，请检查网络）');
+    } else if (auth) {
+      console.log('  本机演示：登录已启用；业务动作模拟；确认端为虚拟设备');
     } else {
       console.log('  仅本机演示：无登录；业务动作模拟；确认端为虚拟设备');
     }

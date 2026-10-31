@@ -49,6 +49,16 @@ function extOf(filename) {
 }
 
 function findClamav() {
+  // 允许显式指定可执行文件（Windows zip 解压目录通常不在 PATH）
+  const configured = process.env.SAFE_OFFICE_CLAMAV_CMD;
+  if (configured) {
+    try {
+      execFileSync(configured, ['--version'], { stdio: 'ignore', timeout: 5000 });
+      return configured;
+    } catch {
+      return null;
+    }
+  }
   for (const cmd of ['clamdscan', 'clamscan']) {
     try {
       execFileSync(cmd, ['--version'], { stdio: 'ignore', timeout: 3000 });
@@ -58,15 +68,20 @@ function findClamav() {
   return null;
 }
 
-function scanWithClamav(buffer, filename, { cmd = null, timeoutMs = 15000 } = {}) {
+function scanWithClamav(buffer, filename, { cmd = null, db = null, timeoutMs = 15000 } = {}) {
   const scanner = cmd || findClamav();
   if (!scanner) return { available: false, infected: false };
+  const database = db || process.env.SAFE_OFFICE_CLAMAV_DB || null;
   const file = path.join(os.tmpdir(), `safe-office-scan-${crypto.randomUUID()}`);
   fs.writeFileSync(file, buffer, { mode: 0o600 });
   try {
-    execFileSync(scanner, ['--no-summary', file], { stdio: 'pipe', timeout: timeoutMs });
+    const args = ['--no-summary'];
+    if (database) args.push(`--database=${database}`);
+    args.push(file);
+    execFileSync(scanner, args, { stdio: 'pipe', timeout: timeoutMs });
     return { available: true, infected: false };
   } catch (err) {
+    if (err && err.code === 'ENOENT') return { available: false, infected: false };
     // clamscan 命中病毒时 exit=1；2=扫描错误
     if (err && err.status === 1) return { available: true, infected: true };
     return { available: true, error: String((err && err.message) || err), infected: false };
@@ -76,7 +91,7 @@ function scanWithClamav(buffer, filename, { cmd = null, timeoutMs = 15000 } = {}
 }
 
 function scanAttachment(buffer, {
-  filename = '', clamavMode = process.env.SAFE_OFFICE_CLAMAV || 'off', clamavCmd = null,
+  filename = '', clamavMode = process.env.SAFE_OFFICE_CLAMAV || 'off', clamavCmd = null, clamavDb = null,
 } = {}) {
   const ext = extOf(filename);
   if (BLOCKED_EXT.has(ext)) {
@@ -93,7 +108,7 @@ function scanAttachment(buffer, {
 
   const mode = String(clamavMode || 'off').toLowerCase();
   if (mode === 'off') return { ok: true, kind, scanned: false, engine: null };
-  const result = scanWithClamav(buffer, filename, { cmd: clamavCmd });
+  const result = scanWithClamav(buffer, filename, { cmd: clamavCmd, db: clamavDb });
   if (!result.available) {
     if (mode === 'required') return { ok: false, rejected: true, reason: 'ClamAV 不可用（required 模式拒绝）' };
     return { ok: true, kind, scanned: false, engine: null, note: 'ClamAV 不可用，未扫描' };

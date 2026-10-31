@@ -56,6 +56,28 @@ test('加密：附件落盘为 AES-256-GCM，明文不出现；错误密钥解�
   }
 });
 
+// 真实 ClamAV：只有本机显式配置了 SAFE_OFFICE_CLAMAV_CMD / _DB 才跑；CI/无扫描器自动跳过
+const CLAMAV_CMD = process.env.SAFE_OFFICE_CLAMAV_CMD || '';
+const CLAMAV_DB = process.env.SAFE_OFFICE_CLAMAV_DB || '';
+const HAS_CLAMAV = !!CLAMAV_CMD && fs.existsSync(CLAMAV_CMD) && !!CLAMAV_DB && fs.existsSync(CLAMAV_DB);
+
+test('扫描：真实 ClamAV 检出 EICAR、放行干净文件（本机有扫描器时）', { skip: !HAS_CLAMAV }, () => {
+  const bs = String.fromCharCode(92);
+  const eicar = Buffer.from(
+    'X5O!P%@AP[4' + bs + 'PZX54(P^)7CC)7}' + '$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!' + '$H+H*',
+  );
+  const clean = scanAttachment(Buffer.from('hello clean file'), {
+    filename: 'a.txt', clamavMode: 'required', clamavCmd: CLAMAV_CMD, clamavDb: CLAMAV_DB,
+  });
+  assert.equal(clean.ok, true);
+  assert.equal(clean.scanned, true, '必须真的扫过，而不是跳过');
+  const infected = scanAttachment(eicar, {
+    filename: 'a.txt', clamavMode: 'required', clamavCmd: CLAMAV_CMD, clamavDb: CLAMAV_DB,
+  });
+  assert.equal(infected.ok, false);
+  assert.match(infected.reason, /恶意/);
+});
+
 test('控制台：附件上传时拒绝 .exe', () => {
   const service = new ConsoleService();
   try {
