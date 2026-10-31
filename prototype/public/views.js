@@ -453,7 +453,7 @@
         <div class="btn-row mt12"><button class="btn" id="mail-run">生成并发起</button></div>
         <div class="sub-text mt8" id="mail-hint">外发：partner@partner-example.com；内网：team@corp.internal。正文由 Agent 读取文档生成。</div>
       </section>
-      <section class="card"><div class="card-head"><h2>邮件记录</h2><span class="sub">${emails.items.length} 条</span></div><div class="stack">${emails.items.length ? emails.items.map(operationCard).join('') : '<div class="empty">还没有邮件记录</div>'}</div></section>
+      <section class="card"><div class="card-head"><h2>邮件记录</h2><span class="sub">${emails.items.length} 条${emails.counts && emails.counts.bounced ? ` · 退信 ${emails.counts.bounced}` : ''}</span></div><div class="stack">${emails.items.length ? emails.items.map(operationCard).join('') : '<div class="empty">还没有邮件记录</div>'}</div></section>
       <div id="mail-result"></div>`;
 
     const mode = root.querySelector('#mail-mode');
@@ -912,6 +912,11 @@
           ${users.items.map((u) => `<tr><td class="mono">${esc(u.username)}</td><td>${esc(u.role)}</td><td>${u.totpEnabled ? '已启用' : '未启用'}</td><td><button class="btn ghost small" data-reset-user="${esc(u.username)}">重置密码</button></td></tr>`).join('')}
         </tbody></table></div>
       </section>` : ''}
+      ${canReview ? `<section class="card"><div class="card-head"><h2>退信处理</h2><span class="sub">粘贴 .eml 原文，按 Message-ID 回填；不自动重发</span></div>
+        <div class="form-grid"><div class="full"><label class="label">退信原文（DSN）</label><textarea class="textarea" id="bounce-eml" rows="6" placeholder="粘贴原始退信邮件（含 message/delivery-status 段）"></textarea></div></div>
+        <div class="btn-row mt12"><input type="file" id="bounce-file" accept=".eml,message/rfc822,text/plain"><button class="btn small" id="bounce-ingest">解析并回填</button></div>
+        <div id="bounce-result" class="mt12"></div>
+      </section>` : ''}
       <section class="card"><div class="card-head"><h2>策略矩阵</h2><span class="sub">未声明 = 拒绝（fail-closed）</span></div><div class="table-wrap"><table class="table"><thead><tr><th>角色</th>${actions.map((a) => `<th>${esc(a)}</th>`).join('')}</tr></thead><tbody>${roles.map((r) => `<tr><td><strong>${esc(r)}</strong></td>${actions.map((a) => `<td>${badge((policy[r] && policy[r][a]) || 'deny')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>办公能力分级</h2><span class="sub">${gov.capabilities.length} 类</span></div><div class="table-wrap"><table class="table"><thead><tr><th>能力</th><th>级别</th><th>工具</th><th>约束</th></tr></thead><tbody>${gov.capabilities.map((cap) => `<tr><td>${esc(cap.name)}</td><td>${badge(cap.level)}</td><td class="mono">${esc(cap.tools.join(', '))}</td><td>${esc(cap.constraints)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>工具注册表</h2><span class="sub">${(gov.tools || []).length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>工具</th><th>能力</th><th>级别</th><th>高危</th><th>转交</th><th>来源</th></tr></thead><tbody>${(gov.tools || []).map((tool) => `<tr><td class="mono">${esc(tool.name)}</td><td>${esc(tool.capability)}</td><td>${badge(tool.level)}</td><td>${tool.highRisk ? '是' : '否'}</td><td>${tool.deferred ? '是' : '否'}</td><td>${esc(tool.source)}</td></tr>`).join('')}</tbody></table></div></section>
@@ -955,6 +960,29 @@
     });
     root.querySelector('#gov-report')?.addEventListener('click', () => {
       window.open('/api/report', '_blank', 'noopener');
+    });
+    const bounceFile = root.querySelector('#bounce-file');
+    bounceFile?.addEventListener('change', async () => {
+      const file = bounceFile.files && bounceFile.files[0];
+      if (!file) return;
+      try {
+        root.querySelector('#bounce-eml').value = await file.text();
+        toast(`已读入 ${file.name}`, 'info');
+      } catch (err) { toast(`读取失败：${err.message}`, 'error'); }
+    });
+    root.querySelector('#bounce-ingest')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const eml = root.querySelector('#bounce-eml').value;
+      if (!eml.trim()) { toast('先粘贴退信原文或选择 .eml 文件', 'info'); return; }
+      btn.disabled = true;
+      try {
+        const res = await API.post('/api/bounce', { eml });
+        const rows = res.results.map((r) => `<div class="event ${r.outcome === 'bounced' ? 'warn' : ''}"><div><div class="kind">${esc(r.outcome === 'bounced' ? `已回填退信：${r.recipient || '未知收件人'}` : `未回填（${r.outcome}）：${r.recipient || '未知收件人'}`)}</div><div class="sub-text">${esc([r.status, r.diagnostic, r.reason].filter(Boolean).join(' · '))}</div></div><div class="seq">${esc(r.status || '')}</div></div>`).join('');
+        root.querySelector('#bounce-result').innerHTML = `<div class="notice ${res.summary.bounced ? 'info' : 'block'}">回填 ${res.summary.bounced} · 重复 ${res.summary.duplicate} · 跳过 ${res.summary.skipped} · 未匹配 ${res.summary.unmatched} · 忽略 ${res.summary.ignored}</div><div class="event-list mt8">${rows}</div>`;
+        toast(res.summary.bounced ? `已回填 ${res.summary.bounced} 条退信` : '没有可回填的记录', res.summary.bounced ? 'ok' : 'info');
+        await c.refreshState();
+      } catch (err) { toast(c.errorText(err), 'error'); }
+      finally { btn.disabled = false; }
     });
     root.querySelector('#gov-reset')?.addEventListener('click', async () => {
       if (!window.confirm('重置演示会清空审计、操作和风险，确定吗？')) return;

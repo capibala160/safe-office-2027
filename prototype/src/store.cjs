@@ -13,9 +13,13 @@ const { verifyOperation, TRANSITIONS } = require('./operation.cjs');
 const OUTBOX_TRANSITIONS = {
   pending: new Set(['sending', 'failed']),
   sending: new Set(['sent', 'failed', 'unknown']),
+  // v0.35：unknown 不直接接受退信——客户端超时拿不到服务端 Message-ID，
+  //        无法可靠匹配；先人工核对成 sent，再走 sent → bounced。
   unknown: new Set(['sent', 'failed']),
   failed: new Set(), /* 明确失败后必须新建操作记录，不能复用旧记录重试 */
-  sent: new Set(),
+  // v0.35：sent 只代表 SMTP 接了；退信 = 投递失败。两种情况都必须新建操作才能重发
+  sent: new Set(['bounced']),
+  bounced: new Set(),
 };
 
 function sha256Hex(text) {
@@ -345,6 +349,16 @@ class OperationStore {
 
   getOutboxByOperation(operationId) {
     return this._rowToOutbox(this.db.prepare('SELECT * FROM outbox WHERE operation_id = ?').get(operationId));
+  }
+
+  // v0.35 退信匹配：Message-ID 大小写与尖括号不敏感；同 ID 多条时返回全部交由上层判断
+  listOutboxByMessageId(messageId) {
+    const target = String(messageId || '').trim().replace(/^<|>$/g, '').toLowerCase();
+    if (!target) return [];
+    return this.listOutbox().filter((row) => {
+      const id = String(row.messageId || '').trim().replace(/^<|>$/g, '').toLowerCase();
+      return id === target;
+    });
   }
 
   listOutbox() {

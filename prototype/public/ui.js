@@ -33,12 +33,12 @@
     allow: '放行', confirm: '需确认', deny: '拒绝',
     frozen: '待确认', confirmed: '已确认', executing: '执行中', executed: '已执行',
     rejected: '已拒绝', expired: '已过期', failed: '失败',
-    pending: '待发送', sending: '发送中', sent: '已发送', unknown: '待核实',
+    pending: '待发送', sending: '发送中', sent: '已发送', unknown: '待核实', bounced: '退信',
     approved: '已批准', cancelled: '已取消', tampered: '篡改', timeout: '超时',
   };
   const kindClass = (kind, detail) => {
     if (/拒绝|拦截|失败|冻结/.test(kind)) return 'block';
-    if (/脱敏|警告|校正|超时|未知/.test(kind)) return 'warn';
+    if (/脱敏|警告|校正|超时|未知|退信/.test(kind)) return 'warn';
     if (/确认|执行|发送|冻结|复核|生成|读入|转写|识别|快照/.test(kind)) return 'ok';
     return 'info';
   };

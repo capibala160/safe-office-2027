@@ -26,6 +26,7 @@ const { redact } = require('./guard.cjs');
 const { OperationStore } = require('./store.cjs');
 const { BlobStore, MAX_BLOB_BYTES } = require('./blob-store.cjs');
 const { FulfillmentService } = require('./fulfillment.cjs');
+const { parseDsn } = require('./dsn.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer, MailerError } = require('./mailer.cjs');
 const { printText } = require('./print-adapter.cjs');
@@ -36,7 +37,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.34.0';
+const VERSION = '0.35.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -1971,8 +1972,99 @@ class ConsoleService {
         frozen: operations.filter((o) => o.state === 'frozen').length,
         sent: operations.filter((o) => o.outbox && o.outbox.state === 'sent').length,
         unknown: operations.filter((o) => o.outbox && o.outbox.state === 'unknown').length,
+        bounced: operations.filter((o) => o.outbox && o.outbox.state === 'bounced').length,
       },
     };
+  }
+
+  // ---------- v0.35 退信处理 ----------
+  // 输入一封 .eml 退信原文（DSN），按 Original-Message-ID 回填发件记录。
+  // 只登记，不重发；模糊/缺失的匹配一律不猜。
+  ingestBounce({ eml, by = null } = {}) {
+    if (typeof eml !== 'string' || !eml.trim()) {
+      throw new ConsoleError('BAD_REQUEST', '缺少退信原文（.eml）', 400);
+    }
+    const parsed = parseDsn(eml);
+    if (!parsed.isDsn) {
+      throw new ConsoleError('BAD_REQUEST', '这不是退信报告：未找到 delivery-status 结构', 400);
+    }
+    if (parsed.reports.length === 0) {
+      throw new ConsoleError('BAD_REQUEST', '退信报告里没有可识别的收件人状态', 400);
+    }
+
+    const previousActor = this.audit.actor;
+    this.audit.actor = by || null;
+    try {
+      const results = [];
+      for (const report of parsed.reports) {
+        const base = {
+          recipient: report.recipient,
+          action: report.action,
+          status: report.status,
+          diagnostic: report.diagnostic,
+        };
+        if (report.action !== 'failed') {
+          const reason = report.action === 'delayed'
+            ? '延迟通知（非失败），不改状态'
+            : `非失败报告（${report.action || '未知动作'}）`;
+          results.push({ ...base, outcome: 'ignored', reason });
+          continue;
+        }
+        if (!report.messageIds.length) {
+          results.push({ ...base, outcome: 'unmatched', reason: '退信未带原始 Message-ID，无法定位发件记录' });
+          continue;
+        }
+        for (const messageId of report.messageIds) {
+          const res = this.fulfillment.recordBounce({
+            messageId,
+            recipient: report.recipient,
+            status: report.status,
+            diagnostic: report.diagnostic,
+          });
+          if (!res.matched) {
+            results.push({ ...base, messageId, outcome: 'unmatched', reason: res.reason });
+          } else if (res.duplicate) {
+            results.push({ ...base, messageId, outcome: 'duplicate', outboxId: res.outbox.outboxId, reason: res.reason });
+          } else if (res.skipped) {
+            results.push({ ...base, messageId, outcome: 'skipped', outboxId: res.outbox.outboxId, reason: res.reason });
+          } else {
+            results.push({
+              ...base,
+              messageId,
+              outcome: 'bounced',
+              outboxId: res.outbox.outboxId,
+              operationId: res.outbox.operationId,
+              previousState: res.previousState,
+            });
+          }
+        }
+      }
+
+      for (const item of results) {
+        const detail = {
+          recipient: item.recipient,
+          action: item.action,
+          status: item.status,
+          diagnostic: item.diagnostic,
+          messageId: item.messageId || null,
+          outboxId: item.outboxId || null,
+          operationId: item.operationId || null,
+          reason: item.reason || null,
+        };
+        this.audit.append(item.outcome === 'bounced' ? '退信' : '退信未回填', detail);
+      }
+
+      const summary = {
+        bounced: results.filter((r) => r.outcome === 'bounced').length,
+        duplicate: results.filter((r) => r.outcome === 'duplicate').length,
+        skipped: results.filter((r) => r.outcome === 'skipped').length,
+        unmatched: results.filter((r) => r.outcome === 'unmatched').length,
+        ignored: results.filter((r) => r.outcome === 'ignored').length,
+      };
+      return { ok: true, reportType: parsed.reportType, summary, results };
+    } finally {
+      this.audit.actor = previousActor || null;
+    }
   }
 
   // ---------- 业务副作用（模拟） ----------

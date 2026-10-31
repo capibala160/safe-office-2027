@@ -1,6 +1,7 @@
 'use strict';
 // 浏览器端 E2E：登录 → 工作台一键样例 → 审批页 → 上传资料 → 改密 → 退出
 //             + 手机确认端：控制台发起外发 → 手机配对 → 批准 → 控制台已执行
+//             + 治理页退信处理：员工发内网邮件 → 审计员粘贴 DSN → 回填退信
 // 运行：npm run e2e（需要本机 Playwright Chromium；不纳入 npm test）
 const test = require('node:test');
 const assert = require('node:assert');
@@ -253,6 +254,81 @@ test('UI 手机确认：员工发起外发 → 手机配对 → 批准 → 控�
   await consolePage.waitForSelector('#view .op-card');
   await consolePage.waitForFunction(() => document.body.innerText.includes('已执行'), null, { timeout: 15000 });
   assert.match(await consolePage.textContent('body'), /发起人：alice/);
+
+  assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
+});
+
+test('UI 退信处理：员工发内网邮件 → 审计员粘贴 DSN → 发件记录退信', { timeout: 90000 }, async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('emp', '员工'), mk('auditor', '审计员')] });
+  const started = await startServer({ port: 0, auth });
+  const browser = await launch(t);
+  t.after(() => started.close());
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+
+  const login = async (name) => {
+    await page.goto(started.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForURL(/\/login\.html/);
+    await page.fill('#username', name);
+    await page.fill('#password', 'password123');
+    await page.click('#submit');
+    await page.waitForSelector('#current-user:not([hidden])');
+  };
+
+  // 员工：内网纪要样例 → 策略自动确认 → FakeMailer 发送成功
+  await login('emp');
+  await page.waitForSelector('[data-sample="normal-minutes"]');
+  await page.click('[data-sample="normal-minutes"]');
+  await page.waitForFunction(() => {
+    const toast = document.getElementById('toast');
+    return toast && toast.classList.contains('show') && toast.textContent.includes('样例执行完成');
+  }, null, { timeout: 15000 });
+  const outbox = started.service.store.listOutbox().find((row) => row.state === 'sent');
+  assert.ok(outbox && outbox.messageId, '应有已发送记录');
+
+  // 审计员：治理页粘贴退信
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await login('auditor');
+  await page.goto(`${started.url}/#/governance`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#bounce-eml');
+  const dsn = [
+    'From: Mail Delivery Subsystem <mailer-daemon@example.com>',
+    'Subject: Delivery Status Notification',
+    'Content-Type: multipart/report; report-type=delivery-status; boundary="E2E-B"',
+    '',
+    '--E2E-B',
+    'Content-Type: message/delivery-status',
+    '',
+    'Reporting-MTA: dns; mx.example.com',
+    '',
+    'Final-Recipient: rfc822; team@corp.internal',
+    'Action: failed',
+    'Status: 5.1.1',
+    'Diagnostic-Code: smtp; 550 5.1.1 unknown user',
+    '',
+    '--E2E-B',
+    'Content-Type: message/rfc822',
+    '',
+    `Message-ID: <${outbox.messageId}>`,
+    '',
+    '--E2E-B--',
+    '',
+  ].join('\r\n');
+  await page.fill('#bounce-eml', dsn);
+  await page.click('#bounce-ingest');
+  await page.waitForFunction(() => {
+    const toast = document.getElementById('toast');
+    return toast && toast.classList.contains('show') && toast.textContent.includes('已回填 1 条退信');
+  }, null, { timeout: 15000 });
+  assert.match(await page.textContent('#bounce-result'), /回填 1/);
+  assert.equal(started.service.store.getOutbox(outbox.outboxId).state, 'bounced');
+  assert.match(await page.textContent('body'), /退信处理/);
 
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });

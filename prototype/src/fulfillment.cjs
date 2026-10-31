@@ -100,6 +100,51 @@ class FulfillmentService {
     }
   }
 
+  // v0.35 退信登记：按原始 Message-ID 找到发件记录，sent/unknown → bounced。
+  //   - 只改本地状态，绝不自动重发（重发必须新建操作并重新确认）
+  //   - 重复导入同一封退信是幂等操作
+  //   - 已 failed/bounced 的记录不再处理，由上层如实报告跳过原因
+  recordBounce({ messageId, recipient = null, status = '', diagnostic = '', note = '' } = {}) {
+    const id = String(messageId || '').trim();
+    if (!id) return { matched: false, reason: '退信报告缺少 Original-Message-ID' };
+    const rows = this.store.listOutboxByMessageId(id);
+    if (rows.length === 0) return { matched: false, reason: '未找到对应发件记录' };
+    if (rows.length > 1) {
+      return { matched: false, reason: '同一 Message-ID 命中多条发件记录，拒绝自动回填' };
+    }
+    const row = rows[0];
+    if (row.state === 'bounced') {
+      return { matched: true, duplicate: true, outbox: row, reason: '该发件记录已登记过退信' };
+    }
+    if (row.state !== 'sent') {
+      const reason = row.state === 'unknown'
+        ? '发件记录为待核实（无服务端 Message-ID），请先人工核对为已发送'
+        : `发件记录状态 ${row.state} 不接受退信`;
+      return { matched: true, skipped: true, outbox: row, reason };
+    }
+    const summary = [
+      '投递退信',
+      recipient ? `收件人 ${recipient}` : '',
+      status ? `状态 ${status}` : '',
+      diagnostic || '',
+      note || '',
+    ].filter(Boolean).join('；');
+    const updated = this.store.setOutboxState(row.outboxId, 'bounced', { error: summary });
+    const operation = this.store.getOperation(row.operationId);
+    // unknown 的发件记录对应操作还停在 executing：退信证明投递曾发生，落 executed 并留结果
+    if (operation && operation.state === 'executing') {
+      this.store.setOperationState(operation.operationId, 'executed', {
+        result: { bounced: true, recipient, status, diagnostic, messageId: id },
+      });
+    }
+    return {
+      matched: true,
+      outbox: updated,
+      operation: operation ? this.store.getOperation(operation.operationId) : null,
+      previousState: row.state,
+    };
+  }
+
   // 人工核对后消除 unknown；只允许 unknown → sent/failed
   reconcile(outboxId, { state, messageId = null, note = '' } = {}) {
     const row = this.store.getOutbox(outboxId);

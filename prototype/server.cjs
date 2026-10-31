@@ -533,6 +533,14 @@ function createConsoleServer({
         const body = await readJson(req);
         return sendJson(res, 200, service.reconcileOutbox(decodeURIComponent(outboxMatch[1]), body));
       }
+      if (pathname === '/api/bounce' && method === 'POST') {
+        requireRole(req, ROLE_REVIEW, '处理退信');
+        const body = await readJson(req);
+        return sendJson(res, 200, service.ingestBounce({
+          eml: body.eml,
+          by: req.user ? req.user.username : null,
+        }));
+      }
       if (pathname === '/api/calendar' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取日历');
         return sendJson(res, 200, { ok: true, items: service.listCalendar(userContext(req)) });

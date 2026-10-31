@@ -36,12 +36,88 @@ const externalCommand = {
   domains: ['partner-example.com'],
 };
 
+test('退信接口：员工 403，审计员可回填，非退信 400', async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('emp', '员工'), mk('auditor', '审计员')] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+  const cookie = (name) => `sfc_session=${auth.login(name, 'password123').token}`;
+
+  // 内网邮件：策略自动确认 → 立即 sent，拿到 FakeMailer 的 messageId
+  const run = await fetch(`${started.url}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('emp') },
+    body: JSON.stringify({
+      command: '把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal',
+      tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M2'],
+    }),
+  });
+  assert.equal(run.status, 200);
+  const op = (await run.json()).operations[0];
+  assert.equal(op.outbox.state, 'sent');
+  const messageId = op.outbox.messageId;
+
+  const dsn = [
+    'From: Mail Delivery Subsystem <mailer-daemon@example.com>',
+    'Subject: Delivery Status Notification',
+    'Content-Type: multipart/report; report-type=delivery-status; boundary="B1"',
+    '',
+    '--B1',
+    'Content-Type: message/delivery-status',
+    '',
+    'Reporting-MTA: dns; mx.example.com',
+    '',
+    'Final-Recipient: rfc822; team@corp.internal',
+    'Action: failed',
+    'Status: 5.1.1',
+    'Diagnostic-Code: smtp; 550 5.1.1 unknown user',
+    '',
+    '--B1',
+    'Content-Type: message/rfc822',
+    '',
+    `Message-ID: <${messageId}>`,
+    '',
+    '--B1--',
+    '',
+  ].join('\r\n');
+
+  const empBounce = await fetch(`${started.url}/api/bounce`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('emp') },
+    body: JSON.stringify({ eml: dsn }),
+  });
+  assert.equal(empBounce.status, 403);
+
+  const auditorBounce = await fetch(`${started.url}/api/bounce`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('auditor') },
+    body: JSON.stringify({ eml: dsn }),
+  });
+  assert.equal(auditorBounce.status, 200);
+  const bounced = await auditorBounce.json();
+  assert.equal(bounced.summary.bounced, 1);
+
+  const maybeSent = await fetch(`${started.url}/api/emails`, { headers: { Cookie: cookie('emp') } });
+  const emails = await maybeSent.json();
+  assert.equal(emails.counts.bounced, 1);
+
+  const notDsn = await fetch(`${started.url}/api/bounce`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('auditor') },
+    body: JSON.stringify({ eml: 'From: a@b.c\r\nSubject: hi\r\n\r\nhello' }),
+  });
+  assert.equal(notDsn.status, 400);
+});
+
 test('健康检查与版本', async (t) => {
   const { url } = await boot(t);
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.34.0');
+  assert.equal(data.version, '0.35.0');
 });
 
 test('静态首页与资源', async (t) => {
