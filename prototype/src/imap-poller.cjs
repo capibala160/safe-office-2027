@@ -76,6 +76,36 @@ class ImapBouncePoller {
     };
   }
 
+  // 候选 UID：未读 + 最近 7 天的退信特征邮件（用户可能先点开看过，不能只因已读就漏掉）。
+  // 单个查询服务端不支持就跳过；全部失败才抛错。
+  async _searchCandidateUids(client) {
+    const since = new Date(this.now() - 7 * 24 * 60 * 60 * 1000);
+    const queries = [
+      { seen: false },
+      // 不依赖主题编码：最近 7 天的邮件全扫一遍（已读退信也能覆盖），
+      // 普通邮件靠 ignoredUids 记忆避免重复抓取
+      { since },
+      { since, subject: '退信' },
+      { since, subject: 'Delivery Status' },
+      { since, subject: 'Undelivered' },
+      { since, from: 'mailer-daemon' },
+    ];
+    const uids = new Set();
+    let ok = 0;
+    let lastError = null;
+    for (const query of queries) {
+      try {
+        const res = await client.search(query, { uid: true });
+        ok += 1;
+        for (const uid of res || []) uids.add(Number(uid));
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (ok === 0 && lastError) throw lastError;
+    return [...uids].filter((uid) => Number.isInteger(uid) && uid > 0).sort((a, b) => a - b);
+  }
+
   async poll() {
     if (this.running) return { skipped: 'running' };
     this.running = true;
@@ -85,7 +115,7 @@ class ImapBouncePoller {
       client = this.factory(this.config);
       await client.connect();
       await client.mailboxOpen(this.config.mailbox);
-      const uids = await client.search({ seen: false }, { uid: true });
+      const uids = await this._searchCandidateUids(client);
       const unseen = (Array.isArray(uids) ? uids : [])
         .map(Number)
         .filter((uid) => Number.isInteger(uid) && uid > 0)
@@ -130,6 +160,7 @@ class ImapBouncePoller {
         }
         if (outcome && outcome.skipped) {
           result.ignored += 1;
+          this.ignoredUids.add(uid);
           continue;
         }
         result.dsn += 1;
@@ -141,6 +172,8 @@ class ImapBouncePoller {
         }
         await client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
         result.markedSeen += 1;
+        // 已处理过的退信（含用户先点开过的）不再重复抓取
+        this.ignoredUids.add(uid);
       }
 
       if (list.length) this.cursorUid = list[list.length - 1];

@@ -40,7 +40,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.40.1';
+const VERSION = '0.40.2';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -2127,34 +2127,52 @@ class ConsoleService {
           results.push({ ...base, outcome: 'ignored', reason });
           continue;
         }
-        if (!report.messageIds.length) {
-          results.push({ ...base, outcome: 'unmatched', reason: '退信未带原始 Message-ID，无法定位发件记录' });
+        const messageIds = report.messageIds || [];
+        const idemKeys = report.idempotencyKeys || [];
+        if (!messageIds.length && !idemKeys.length) {
+          results.push({ ...base, outcome: 'unmatched', reason: '退信未带可匹配的 Message-ID / 幂等键' });
           continue;
         }
-        for (const messageId of report.messageIds) {
+        // 依次尝试：Message-ID 优先，再用 X-Idempotency-Key 回退（QQ 会改写 Message-ID）
+        const attempts = [
+          ...messageIds.map((k) => ({ messageId: k })),
+          ...idemKeys.map((k) => ({ idempotencyKey: k })),
+        ];
+        let matched = null;
+        const misses = [];
+        for (const attempt of attempts) {
           const res = this.fulfillment.recordBounce({
-            messageId,
+            ...attempt,
             recipient: report.recipient,
             status: report.status,
             diagnostic: report.diagnostic,
           });
-          if (!res.matched) {
-            results.push({ ...base, messageId, outcome: 'unmatched', reason: res.reason });
-          } else if (res.duplicate) {
-            results.push({ ...base, messageId, outcome: 'duplicate', outboxId: res.outbox.outboxId, reason: res.reason });
+          if (!res.matched) { misses.push(res.reason); continue; }
+          const keyInfo = attempt.messageId
+            ? { messageId: attempt.messageId }
+            : { idempotencyKey: attempt.idempotencyKey };
+          if (res.duplicate) {
+            matched = { ...base, ...keyInfo, outcome: 'duplicate', outboxId: res.outbox.outboxId, reason: res.reason };
           } else if (res.skipped) {
-            results.push({ ...base, messageId, outcome: 'skipped', outboxId: res.outbox.outboxId, reason: res.reason });
+            matched = { ...base, ...keyInfo, outcome: 'skipped', outboxId: res.outbox.outboxId, reason: res.reason };
           } else {
-            results.push({
+            matched = {
               ...base,
-              messageId,
+              ...keyInfo,
               outcome: 'bounced',
+              matchedBy: res.matchedBy,
               outboxId: res.outbox.outboxId,
               operationId: res.outbox.operationId,
               previousState: res.previousState,
-            });
+            };
           }
+          break;
         }
+        results.push(matched || {
+          ...base,
+          outcome: 'unmatched',
+          reason: misses.join('；') || '未找到对应发件记录',
+        });
       }
 
       for (const item of results) {
@@ -2164,6 +2182,8 @@ class ConsoleService {
           status: item.status,
           diagnostic: item.diagnostic,
           messageId: item.messageId || null,
+          idempotencyKey: item.idempotencyKey || null,
+          matchedBy: item.matchedBy || null,
           outboxId: item.outboxId || null,
           operationId: item.operationId || null,
           reason: item.reason || null,

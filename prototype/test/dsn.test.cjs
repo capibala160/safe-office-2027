@@ -326,3 +326,87 @@ test('控制台：延迟通知只记录不改状态；非退信原文拒绝', as
   );
   assert.throws(() => service.ingestBounce({ eml: '' }), /缺少退信原文/);
 });
+
+// ---------- v0.40.2 QQ 格式退信（HTML + base64 原信，Message-ID 被改写） ----------
+function qqDsn({
+  recipient = 'nobody@gmail.com',
+  messageId = '<tencent_rewritten@qq.com>',
+  idempotencyKey = 'a'.repeat(64),
+  status = '5.1.1',
+} = {}) {
+  const B = 'QQ_MAIL_RETURN';
+  const original = [
+    `Message-ID: ${messageId}`,
+    `X-Idempotency-Key: ${idempotencyKey}`,
+    'From: sender@qq.com',
+    `To: ${recipient}`,
+    'Subject: test',
+    '',
+    '测试正文',
+  ].join('\r\n');
+  const b64 = Buffer.from(original, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
+  const html = [
+    '<html><body>',
+    '<p>很抱歉您发送的邮件被退回，以下是该邮件的相关信息：</p>',
+    `<p>无法发送到 ${recipient} </p>`,
+    `<p>退信原因 收件人邮件地址（${recipient}）不存在，邮件无法送达。</p>`,
+    `<p>host gmail-smtp-in.l.google.com[142.250.99.27] said: ${status} The email account that you tried to reach does not exist. 解决方案 请联系您的收件人</p>`,
+    '</body></html>',
+  ].join('');
+  return [
+    'From: "PostMaster" <PostMaster@qq.com>',
+    'To: sender@qq.com',
+    'Subject: 来自qq.com的退信',
+    `Content-Type: multipart/report; boundary="${B}"; report-type=delivery-status`,
+    '',
+    `--${B}`,
+    'Content-type: text/html; charset="utf-8"',
+    '',
+    html,
+    '',
+    `--${B}`,
+    'Content-Type: application/octet-stream;',
+    'Content-Transfer-Encoding: base64',
+    '',
+    b64,
+    '',
+    `--${B}--`,
+    '',
+  ].join('\r\n');
+}
+
+test('解析 QQ 退信：HTML 事实 + base64 原信里的幂等键', () => {
+  const parsed = parseDsn(qqDsn({ idempotencyKey: 'b'.repeat(64) }));
+  assert.equal(parsed.isDsn, true);
+  assert.equal(parsed.reportType, 'failure');
+  assert.equal(parsed.reports.length, 1);
+  const [report] = parsed.reports;
+  assert.equal(report.recipient, 'nobody@gmail.com');
+  assert.equal(report.action, 'failed');
+  assert.equal(report.status, '5.1.1');
+  assert.match(report.diagnostic, /The email account that you tried to reach does not exist/);
+  assert.deepEqual(parsed.messageIds, ['tencent_rewritten@qq.com']);
+  assert.deepEqual(parsed.idempotencyKeys, ['b'.repeat(64)]);
+});
+
+test('QQ 退信：Message-ID 被改写时用 X-Idempotency-Key 回填', async (t) => {
+  const service = setupConsole();
+  t.after(() => service.close());
+  const op = await runExternal(service);
+  const res = service.ingestBounce({
+    eml: qqDsn({ idempotencyKey: op.operationHash, recipient: 'partner@partner-example.com' }),
+    by: 'auditor',
+  });
+  assert.equal(res.summary.bounced, 1);
+  assert.equal(res.results[0].matchedBy, 'idempotencyKey');
+  const after = service.getOperation(op.operationId).operation;
+  assert.equal(after.outbox.state, 'bounced');
+
+  // 幂等键也对不上时不允许猜
+  const other = setupConsole();
+  t.after(() => other.close());
+  await runExternal(other);
+  const miss = other.ingestBounce({ eml: qqDsn({ idempotencyKey: 'c'.repeat(64) }) });
+  assert.equal(miss.summary.unmatched, 1);
+  assert.equal(miss.summary.bounced, 0);
+});

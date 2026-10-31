@@ -351,6 +351,13 @@ class OperationStore {
     return this._rowToOutbox(this.db.prepare('SELECT * FROM outbox WHERE operation_id = ?').get(operationId));
   }
 
+  // v0.40.2 退信回退匹配：部分 MTA 改写 Message-ID，但保留 X-Idempotency-Key（= operationHash）
+  listOutboxByIdempotencyKey(idempotencyKey) {
+    const target = String(idempotencyKey || '').trim().toLowerCase();
+    if (!target) return [];
+    return this.listOutbox().filter((row) => String(row.idempotencyKey || '').toLowerCase() === target);
+  }
+
   // v0.35 退信匹配：Message-ID 大小写与尖括号不敏感；同 ID 多条时返回全部交由上层判断
   listOutboxByMessageId(messageId) {
     const target = String(messageId || '').trim().replace(/^<|>$/g, '').toLowerCase();

@@ -56,7 +56,16 @@ function makeClient(messages, { failFetch = new Set() } = {}) {
     fetchCount: 0,
     async connect() {},
     async mailboxOpen() {},
-    async search() { return messages.filter((m) => !seen.has(m.uid)).map((m) => m.uid); },
+    async search(query = {}) {
+      return messages.filter((m) => {
+        if (query.seen === false && !seen.has(m.uid)) return true;
+        if (query.since) return true;   // 假客户端：最近窗口内全返回
+        const src = String(m.source);
+        if (query.subject && src.includes(query.subject)) return true;
+        if (query.from && src.toLowerCase().includes(String(query.from).toLowerCase())) return true;
+        return false;
+      }).map((m) => m.uid);
+    },
     async fetchOne(uid) {
       this.fetchCount += 1;
       if (failFetch.has(uid)) throw new Error('fetch boom');
@@ -238,4 +247,19 @@ test('轮转：退信多于单轮上限时分批处理', async () => {
   const second = await poller.poll();
   assert.equal(second.dsn, 1);
   assert.deepEqual([...client.seen].sort(), [1, 2, 3]);
+});
+
+test('回归：用户先点开过退信（已读）也要能处理', async () => {
+  const client = makeClient([{ uid: 1, source: dsn() }]);
+  client.seen.add(1);   // 已读：用户先在邮箱里点开过
+  const poller = new ImapBouncePoller({
+    config: CONFIG,
+    factory: () => client,
+    ingest: () => ({ ok: true, summary: { bounced: 1, duplicate: 0, unmatched: 0, ignored: 0 } }),
+  });
+  const result = await poller.poll();
+  assert.equal(result.dsn, 1, '已读退信不能漏');
+  assert.equal(result.markedSeen, 1);
+  const second = await poller.poll();
+  assert.equal(second.scanned, 0, '处理过的退信不重复抓取');
 });

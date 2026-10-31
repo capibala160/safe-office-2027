@@ -104,17 +104,31 @@ class FulfillmentService {
   //   - 只改本地状态，绝不自动重发（重发必须新建操作并重新确认）
   //   - 重复导入同一封退信是幂等操作
   //   - 已 failed/bounced 的记录不再处理，由上层如实报告跳过原因
-  recordBounce({ messageId, recipient = null, status = '', diagnostic = '', note = '' } = {}) {
+  recordBounce({
+    messageId = null, idempotencyKey = null,
+    recipient = null, status = '', diagnostic = '', note = '',
+  } = {}) {
     const id = String(messageId || '').trim();
-    if (!id) return { matched: false, reason: '退信报告缺少 Original-Message-ID' };
-    const rows = this.store.listOutboxByMessageId(id);
-    if (rows.length === 0) return { matched: false, reason: '未找到对应发件记录' };
+    const key = String(idempotencyKey || '').trim().toLowerCase();
+    if (!id && !key) {
+      return { matched: false, reason: '退信既没有 Message-ID 也没有幂等键' };
+    }
+    let rows = id ? this.store.listOutboxByMessageId(id) : [];
+    let matchedBy = rows.length > 0 ? 'messageId' : null;
+    // 回退：MTA 改写 Message-ID 时，用发信时写入的 X-Idempotency-Key 匹配
+    if (rows.length === 0 && key) {
+      rows = this.store.listOutboxByIdempotencyKey(key);
+      matchedBy = rows.length > 0 ? 'idempotencyKey' : null;
+    }
+    if (rows.length === 0) {
+      return { matched: false, reason: '未找到对应发件记录（Message-ID / 幂等键均未命中）' };
+    }
     if (rows.length > 1) {
-      return { matched: false, reason: '同一 Message-ID 命中多条发件记录，拒绝自动回填' };
+      return { matched: false, reason: '同一匹配键命中多条发件记录，拒绝自动回填' };
     }
     const row = rows[0];
     if (row.state === 'bounced') {
-      return { matched: true, duplicate: true, outbox: row, reason: '该发件记录已登记过退信' };
+      return { matched: true, duplicate: true, outbox: row, matchedBy, reason: '该发件记录已登记过退信' };
     }
     if (row.state !== 'sent') {
       const reason = row.state === 'unknown'
@@ -139,6 +153,7 @@ class FulfillmentService {
     }
     return {
       matched: true,
+      matchedBy,
       outbox: updated,
       operation: operation ? this.store.getOperation(operation.operationId) : null,
       previousState: row.state,
