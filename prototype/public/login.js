@@ -27,6 +27,7 @@
         body: JSON.stringify({
           username: document.getElementById('username').value,
           password: document.getElementById('password').value,
+          code: document.getElementById('totp').value.trim(),
         }),
       });
       const data = await res.json().catch(() => ({}));

@@ -1,14 +1,20 @@
 'use strict';
 // ============================================================
-// 控制台登录 / 多用户（v0.25）
+// 控制台登录 / 多用户（v0.32）
 //   - 用户表：data/users.json（gitignore），密码 scrypt 哈希 + 随机 salt
-//   - 会话：内存 token（HttpOnly Cookie），默认 8 小时滑动过期
+//   - 会话：内存 + 可选 JSON 落盘（默认 data/sessions.json）；8 小时滑动过期
 //   - 角色：登录用户绑定一个角色，命令请求不能自行提权
-// 边界：共享同一工作区（不是租户隔离）；会话在内存，重启后需重新登录。
+//   - TOTP：可选第二步验证（RFC 6238，HMAC-SHA1 / 30s / 6 位）
+//   - 管理员可重置他人密码（不要求知道原密码）
+// 边界：会话文件只存 token 的 SHA-256；TOTP 密钥明文存 users.json（0600）。
+//       仍共享同一工作区（租户隔离见 v0.33）。
 // ============================================================
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  generateSecret, verifyTotp, otpauthUri, base32Decode,
+} = require('./totp.cjs');
 
 const ROLES = new Set(['员工', '实习生', '审计员', '设备助手', '管理员', '访客']);
 const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
@@ -28,6 +34,10 @@ function verifyPassword(password, user) {
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
 function normalizeUser(raw) {
   if (!raw || typeof raw !== 'object') throw new Error('用户记录必须是对象');
   const username = String(raw.username || '').trim();
@@ -35,7 +45,13 @@ function normalizeUser(raw) {
   if (!ROLES.has(raw.role)) throw new Error(`用户「${username}」角色非法：${raw.role}`);
   if (!/^[0-9a-f]{32,128}$/i.test(String(raw.salt || ''))) throw new Error(`用户「${username}」salt 非法`);
   if (!/^[0-9a-f]{64}$/i.test(String(raw.hash || ''))) throw new Error(`用户「${username}」hash 非法`);
-  return { username, role: raw.role, salt: raw.salt, hash: raw.hash };
+  const totpEnabled = raw.totpEnabled === true;
+  const totpSecret = String(raw.totpSecret || '').toUpperCase();
+  if (totpEnabled && !totpSecret) throw new Error(`用户「${username}」启用了两步验证但缺少密钥`);
+  if (totpSecret) {
+    try { base32Decode(totpSecret); } catch { throw new Error(`用户「${username}」两步验证密钥非法`); }
+  }
+  return { username, role: raw.role, salt: raw.salt, hash: raw.hash, totpSecret, totpEnabled };
 }
 
 function loadUsers(file) {
@@ -52,37 +68,140 @@ function saveUsers(file, users) {
 }
 
 class AuthService {
-  constructor({ users = [], ttlMs = DEFAULT_TTL_MS, now = () => Date.now(), file = null } = {}) {
+  constructor({
+    users = [], ttlMs = DEFAULT_TTL_MS, now = () => Date.now(), file = null, sessionFile = null,
+  } = {}) {
     this.users = new Map(users.map((u) => [u.username, normalizeUser(u)]));
-    this.sessions = new Map();
+    this.sessions = new Map();      // tokenHash → { username, role, expiresAt }
+    this.pendingTotp = new Map();   // username → secret（尚未启用）
     this.ttlMs = ttlMs;
     this.now = now;
     this.file = file;
+    this.sessionFile = sessionFile;
+    this.sessionLoadError = null;
+    this.sessionSaveError = null;
+    this._loadSessions();
   }
 
-  login(username, password) {
+  // ---------- 会话落盘 ----------
+  _loadSessions() {
+    if (!this.sessionFile || !fs.existsSync(this.sessionFile)) return;
+    try {
+      const data = JSON.parse(fs.readFileSync(this.sessionFile, 'utf8'));
+      const list = Array.isArray(data) ? data : data.sessions;
+      if (!Array.isArray(list)) throw new Error('sessions.json 必须是数组或 { sessions: [...] }');
+      const now = this.now();
+      for (const item of list) {
+        if (!item || !/^[0-9a-f]{64}$/i.test(String(item.tokenHash || ''))) continue;
+        const user = this.users.get(String(item.username || ''));
+        if (!user) continue;
+        const expiresAt = Number(item.expiresAt);
+        if (!Number.isFinite(expiresAt) || expiresAt <= now) continue;
+        // 角色以用户表为准；用户被删/改角色后旧会话不能沿用旧权限
+        this.sessions.set(String(item.tokenHash).toLowerCase(), {
+          username: user.username, role: user.role, expiresAt,
+        });
+      }
+    } catch (err) {
+      this.sessionLoadError = err.message;
+      this.sessions.clear();
+    }
+  }
+
+  _saveSessions() {
+    if (!this.sessionFile) return;
+    const now = this.now();
+    const list = [...this.sessions.entries()]
+      .filter(([, session]) => session.expiresAt > now)
+      .map(([tokenHash, session]) => ({
+        tokenHash, username: session.username, role: session.role, expiresAt: session.expiresAt,
+      }));
+    try {
+      fs.mkdirSync(path.dirname(this.sessionFile), { recursive: true });
+      const tmp = `${this.sessionFile}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ sessions: list }, null, 2), { encoding: 'utf8', mode: 0o600 });
+      try {
+        fs.renameSync(tmp, this.sessionFile);
+      } catch {
+        try { fs.rmSync(this.sessionFile, { force: true }); } catch { /* ignore */ }
+        fs.renameSync(tmp, this.sessionFile);
+      }
+      this.sessionSaveError = null;
+    } catch (err) {
+      this.sessionSaveError = err.message;
+    }
+  }
+
+  // ---------- 登录 / 会话 ----------
+  login(username, password, code = '') {
     const user = this.users.get(String(username || '').trim());
     if (!user || !verifyPassword(password, user)) return null;
+    if (user.totpEnabled && !verifyTotp(user.totpSecret, code, { now: this.now() })) return null;
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAt = this.now() + this.ttlMs;
-    this.sessions.set(token, { username: user.username, role: user.role, expiresAt });
+    this.sessions.set(hashToken(token), { username: user.username, role: user.role, expiresAt });
+    this._saveSessions();
     return { token, expiresAt, user: { username: user.username, role: user.role } };
   }
 
   verify(token) {
     if (!token) return null;
-    const session = this.sessions.get(token);
+    const key = hashToken(token);
+    const session = this.sessions.get(key);
     if (!session) return null;
-    if (session.expiresAt <= this.now()) {
-      this.sessions.delete(token);
+    const now = this.now();
+    if (session.expiresAt <= now) {
+      this.sessions.delete(key);
+      this._saveSessions();
       return null;
     }
-    session.expiresAt = this.now() + this.ttlMs;
+    const previousExpiry = session.expiresAt;
+    session.expiresAt = now + this.ttlMs;
+    // 滑动过期：最多每分钟落盘一次，避免每个请求都写文件
+    if (session.expiresAt - previousExpiry > 60 * 1000) this._saveSessions();
     return { username: session.username, role: session.role, expiresAt: session.expiresAt };
   }
 
   logout(token) {
-    return this.sessions.delete(token);
+    const removed = this.sessions.delete(hashToken(token));
+    if (removed) this._saveSessions();
+    return removed;
+  }
+
+  userInfo(username) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) return null;
+    return {
+      username: user.username, role: user.role,
+      totpEnabled: !!user.totpEnabled,
+    };
+  }
+
+  listUsers() {
+    return [...this.users.values()]
+      .map((user) => ({ username: user.username, role: user.role, totpEnabled: !!user.totpEnabled }))
+      .sort((a, b) => a.username.localeCompare(b.username));
+  }
+
+  _persistUser(updated) {
+    if (this.file) {
+      const list = [...this.users.values()].map((u) => (u.username === updated.username ? updated : u));
+      saveUsers(this.file, list);
+    }
+    this.users.set(updated.username, updated);
+  }
+
+  _dropSessions(username, { keepToken = null } = {}) {
+    const keepKey = keepToken ? hashToken(keepToken) : null;
+    let removed = 0;
+    for (const [key, session] of this.sessions) {
+      if (session.username === username && key !== keepKey) {
+        this.sessions.delete(key);
+        removed += 1;
+      }
+    }
+    if (removed) this._saveSessions();
+    return removed;
   }
 
   // 改密：校验原密码 → 重算 scrypt → 落盘 → 注销该用户的其他会话（保留当前会话）。
@@ -105,22 +224,103 @@ class AuthService {
       throw err;
     }
     const next = hashPassword(newPassword);
-    const updated = { ...user, salt: next.salt, hash: next.hash };
-    if (this.file) {
-      const list = [...this.users.values()].map((u) => (u.username === user.username ? updated : u));
-      saveUsers(this.file, list);
-    }
-    this.users.set(user.username, updated);
-    for (const [token, session] of this.sessions) {
-      if (session.username === user.username && token !== keepToken) this.sessions.delete(token);
-    }
+    this._persistUser({ ...user, salt: next.salt, hash: next.hash });
+    this._dropSessions(user.username, { keepToken });
     return { username: user.username };
+  }
+
+  // 管理员重置：不知道原密码；注销目标用户全部会话
+  adminResetPassword(username, newPassword) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) {
+      const err = new Error('用户不存在');
+      err.code = 'USER_NOT_FOUND';
+      throw err;
+    }
+    if (typeof newPassword !== 'string' || newPassword.length < 8) {
+      const err = new Error('密码至少 8 位');
+      err.code = 'BAD_PASSWORD';
+      throw err;
+    }
+    const next = hashPassword(newPassword);
+    this._persistUser({ ...user, salt: next.salt, hash: next.hash });
+    this.pendingTotp.delete(user.username);
+    this._dropSessions(user.username);
+    return { username: user.username };
+  }
+
+  // ---------- TOTP ----------
+  beginTotpSetup(username) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) {
+      const err = new Error('用户不存在');
+      err.code = 'USER_NOT_FOUND';
+      throw err;
+    }
+    if (user.totpEnabled) {
+      const err = new Error('两步验证已启用；请先关闭再重新绑定');
+      err.code = 'TOTP_ENABLED';
+      throw err;
+    }
+    const secret = generateSecret();
+    this.pendingTotp.set(user.username, secret);
+    return { secret, uri: otpauthUri({ secret, account: user.username }) };
+  }
+
+  enableTotp(username, code) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) {
+      const err = new Error('用户不存在');
+      err.code = 'USER_NOT_FOUND';
+      throw err;
+    }
+    if (user.totpEnabled) {
+      const err = new Error('两步验证已启用');
+      err.code = 'TOTP_ENABLED';
+      throw err;
+    }
+    const secret = this.pendingTotp.get(user.username);
+    if (!secret) {
+      const err = new Error('请先生成两步验证密钥');
+      err.code = 'TOTP_SETUP_REQUIRED';
+      throw err;
+    }
+    if (!verifyTotp(secret, code, { now: this.now() })) {
+      const err = new Error('动态验证码不正确');
+      err.code = 'INVALID_TOTP';
+      throw err;
+    }
+    this._persistUser({ ...user, totpSecret: secret, totpEnabled: true });
+    this.pendingTotp.delete(user.username);
+    return { username: user.username, totpEnabled: true };
+  }
+
+  disableTotp(username, password, code) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) {
+      const err = new Error('用户不存在');
+      err.code = 'USER_NOT_FOUND';
+      throw err;
+    }
+    if (!verifyPassword(password, user)) {
+      const err = new Error('密码不正确');
+      err.code = 'INVALID_CREDENTIALS';
+      throw err;
+    }
+    if (user.totpEnabled && !verifyTotp(user.totpSecret, code, { now: this.now() })) {
+      const err = new Error('动态验证码不正确');
+      err.code = 'INVALID_TOTP';
+      throw err;
+    }
+    this._persistUser({ ...user, totpSecret: '', totpEnabled: false });
+    this.pendingTotp.delete(user.username);
+    return { username: user.username, totpEnabled: false };
   }
 }
 
-function createAuthFromFile(file) {
+function createAuthFromFile(file, { sessionFile = null } = {}) {
   const users = loadUsers(file);
-  return users.length > 0 ? new AuthService({ users, file }) : null;
+  return users.length > 0 ? new AuthService({ users, file, sessionFile }) : null;
 }
 
 module.exports = {

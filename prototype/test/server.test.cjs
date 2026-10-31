@@ -5,6 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { startServer, DEFAULT_COMMAND_BODY_LIMIT } = require('../server.cjs');
 const { AuthService, hashPassword } = require('../src/auth.cjs');
+const { totpCode } = require('../src/totp.cjs');
 
 async function boot(t) {
   const started = await startServer({ port: 0 });
@@ -39,7 +40,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.31.0');
+  assert.equal(data.version, '0.32.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -551,6 +552,85 @@ test('四眼原则：HTTP 审批拒绝发起人，换一位管理员可批准', 
   const result = await other.json();
   assert.equal(result.outcome, 'approved');
   assert.equal(result.operation.state, 'executed');
+});
+
+test('两步验证：启用后登录必须带码，/api/me 标记，关闭后恢复', async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'alice', role: '员工', salt, hash }] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+  const login = (code) => post(`${started.url}/api/login`, {
+    username: 'alice', password: 'password123', ...(code ? { code } : {}),
+  });
+
+  const first = await login();
+  const cookie = String(first.res.headers.get('set-cookie')).split(';')[0];
+
+  const setup = await fetch(`${started.url}/api/2fa/setup`, { method: 'POST', headers: { Cookie: cookie } });
+  assert.equal(setup.status, 200);
+  const { secret } = await setup.json();
+  const enable = await fetch(`${started.url}/api/2fa/enable`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ code: totpCode(secret) }),
+  });
+  assert.equal(enable.status, 200);
+
+  const me = await fetch(`${started.url}/api/me`, { headers: { Cookie: cookie } });
+  assert.equal((await me.json()).user.totpEnabled, true);
+
+  const noCode = await login();
+  assert.equal(noCode.res.status, 401);
+  const wrongCode = await login('000000');
+  assert.equal(wrongCode.res.status, 401);
+  const withCode = await login(totpCode(secret));
+  assert.equal(withCode.res.status, 200);
+
+  const disable = await fetch(`${started.url}/api/2fa/disable`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ password: 'password123', code: totpCode(secret) }),
+  });
+  assert.equal(disable.status, 200);
+  const afterDisable = await login();
+  assert.equal(afterDisable.res.status, 200);
+});
+
+test('用户管理：管理员可列出/重置，非管理员 403', async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('admin', '管理员'), mk('alice', '员工')] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+  const cookie = (name) => `sfc_session=${auth.login(name, 'password123').token}`;
+
+  assert.equal((await fetch(`${started.url}/api/users`, { headers: { Cookie: cookie('alice') } })).status, 403);
+  const list = await fetch(`${started.url}/api/users`, { headers: { Cookie: cookie('admin') } });
+  assert.equal(list.status, 200);
+  const users = (await list.json()).items;
+  assert.deepEqual(users.map((u) => u.username), ['admin', 'alice']);
+
+  const aliceCookie = cookie('alice');
+  const reset = await fetch(`${started.url}/api/users/alice/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('admin') },
+    body: JSON.stringify({ newPassword: 'resetpass123' }),
+  });
+  assert.equal(reset.status, 200);
+  assert.equal((await fetch(`${started.url}/api/me`, { headers: { Cookie: aliceCookie } })).status, 401, '目标会话失效');
+  assert.equal((await post(`${started.url}/api/login`, { username: 'alice', password: 'password123' })).res.status, 401);
+  const newLogin = await post(`${started.url}/api/login`, { username: 'alice', password: 'resetpass123' });
+  assert.equal(newLogin.res.status, 200);
+  const freshAlice = String(newLogin.res.headers.get('set-cookie')).split(';')[0];
+
+  const forbidden = await fetch(`${started.url}/api/users/admin/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: freshAlice },
+    body: JSON.stringify({ newPassword: 'whatever123' }),
+  });
+  assert.equal(forbidden.status, 403);
 });
 
 test('坏 Cookie：不崩溃，返回 401/200', async (t) => {

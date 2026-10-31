@@ -8,6 +8,7 @@ const { chromium } = require('playwright');
 const { startServer } = require('../server.cjs');
 const { AuthService, hashPassword } = require('../src/auth.cjs');
 const { DocumentStore } = require('../src/ingest.cjs');
+const { totpCode } = require('../src/totp.cjs');
 
 async function launch(t) {
   // 优先用系统 Edge（本机已装）；没有则回退 Playwright 自带 Chromium
@@ -114,6 +115,51 @@ test('UI：登录 → 运行样例 → 审批页 → 上传 → 改密重登 →
   await page.waitForURL((url) => !url.pathname.endsWith('/login.html'));
   await page.waitForSelector('#current-user:not([hidden])');
   assert.match(await page.textContent('#current-user'), /admin/);
+
+  assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
+});
+
+test('UI 两步验证：启用 → 登出 → 无码被拒 → 动态码登录', { timeout: 90000 }, async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'alice', role: '员工', salt, hash }] });
+  const started = await startServer({ port: 0, auth });
+  const browser = await launch(t);
+  t.after(() => started.close());
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+
+  await page.goto(started.url, { waitUntil: 'domcontentloaded' });
+  await page.waitForURL(/\/login\.html/);
+  await page.fill('#username', 'alice');
+  await page.fill('#password', 'password123');
+  await page.click('#submit');
+  await page.waitForSelector('#current-user:not([hidden])');
+
+  await page.click('#btn-password');
+  await page.waitForSelector('#password-dialog[open]');
+  await page.click('#btn-totp');
+  await page.waitForSelector('#totp-dialog[open]');
+  await page.click('#totp-setup');
+  await page.waitForSelector('#totp-enable');
+  const secret = (await page.textContent('#totp-body .mono')).trim();
+  assert.match(secret, /^[A-Z2-7]+$/);
+  await page.fill('#totp-code', totpCode(secret));
+  await page.click('#totp-enable');
+  await page.waitForFunction(() => !document.getElementById('totp-dialog').open);
+
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await page.fill('#username', 'alice');
+  await page.fill('#password', 'password123');
+  await page.click('#submit');
+  await page.waitForSelector('#err:not(:empty)');
+  assert.match(await page.textContent('#err'), /不正确/);
+
+  await page.fill('#totp', totpCode(secret));
+  await page.click('#submit');
+  await page.waitForURL((url) => !url.pathname.endsWith('/login.html'));
+  await page.waitForSelector('#current-user:not([hidden])');
 
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });

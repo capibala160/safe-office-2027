@@ -233,6 +233,16 @@ function createConsoleServer({
   const loginAttempts = new Map();
   const loginRateLimited = (key) => rateLimited(loginAttempts, key, 5, 60 * 1000);
   const passwordAttempts = new Map();
+  const twoFactorAttempts = new Map();
+  const mapAuthError = (err) => {
+    if (err.code === 'USER_NOT_FOUND') return new ConsoleError('NOT_FOUND', err.message, 404);
+    if (err.code === 'TOTP_ENABLED' || err.code === 'TOTP_SETUP_REQUIRED') {
+      return new ConsoleError('CONFLICT', err.message, 409);
+    }
+    if (err.code === 'INVALID_TOTP') return new ConsoleError('INVALID_TOTP', err.message, 401);
+    if (err.code === 'INVALID_CREDENTIALS') return new ConsoleError('INVALID_CREDENTIALS', err.message, 401);
+    return new ConsoleError('BAD_REQUEST', err.message, 400);
+  };
   const ROLE_APPROVE = new Set(['员工', '管理员']);
   const ROLE_DEVICE = new Set(['设备助手', '管理员']);
   const ROLE_ADMIN = new Set(['管理员']);
@@ -310,7 +320,7 @@ function createConsoleServer({
         throw new ConsoleError('RATE_LIMITED', '登录尝试过多，请 1 分钟后再试', 429);
       }
       const body = await readJson(req);
-      const result = auth.login(body.username, body.password);
+      const result = auth.login(body.username, body.password, body.code);
       if (!result) throw new ConsoleError('INVALID_CREDENTIALS', '用户名或密码不正确', 401);
       setSessionCookie(req, res, result.token, auth.ttlMs);
       return sendJson(res, 200, { ok: true, user: result.user, expiresAt: new Date(result.expiresAt).toISOString() });
@@ -324,7 +334,13 @@ function createConsoleServer({
       if (!auth) return sendJson(res, 200, { ok: true, authEnabled: false, user: null });
       const session = auth.verify(cookieToken);
       if (!session) throw new ConsoleError('AUTH_REQUIRED', '未登录', 401);
-      return sendJson(res, 200, { ok: true, authEnabled: true, user: { username: session.username, role: session.role }, expiresAt: new Date(session.expiresAt).toISOString() });
+      const info = auth.userInfo(session.username);
+      return sendJson(res, 200, {
+        ok: true,
+        authEnabled: true,
+        user: { username: session.username, role: session.role, totpEnabled: !!(info && info.totpEnabled) },
+        expiresAt: new Date(session.expiresAt).toISOString(),
+      });
     }
     if (auth && !AUTH_PUBLIC.has(pathname)) {
       const session = auth.verify(cookieToken);
@@ -371,6 +387,49 @@ function createConsoleServer({
             throw new ConsoleError('INVALID_CREDENTIALS', err.message, 401);
           }
           throw new ConsoleError('BAD_REQUEST', err.message, 400);
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+      // —— 两步验证（TOTP）——
+      if (pathname.startsWith('/api/2fa/') && method === 'POST') {
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+        if (rateLimited(twoFactorAttempts, clientIp(req), 5, 60 * 1000)) {
+          throw new ConsoleError('RATE_LIMITED', '两步验证尝试过多，请 1 分钟后再试', 429);
+        }
+        const body = await readJson(req);
+        try {
+          if (pathname === '/api/2fa/setup') {
+            return sendJson(res, 200, { ok: true, ...auth.beginTotpSetup(req.user.username) });
+          }
+          if (pathname === '/api/2fa/enable') {
+            return sendJson(res, 200, { ok: true, ...auth.enableTotp(req.user.username, body.code) });
+          }
+          if (pathname === '/api/2fa/disable') {
+            return sendJson(res, 200, {
+              ok: true,
+              ...auth.disableTotp(req.user.username, body.password, body.code),
+            });
+          }
+        } catch (err) {
+          throw mapAuthError(err);
+        }
+        throw new ConsoleError('NOT_FOUND', `未知接口：${pathname}`, 404);
+      }
+      // —— 用户管理（仅管理员）——
+      if (pathname === '/api/users' && method === 'GET') {
+        requireRole(req, ROLE_ADMIN, '读取用户列表');
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+        return sendJson(res, 200, { ok: true, items: auth.listUsers() });
+      }
+      const userReset = pathname.match(/^\/api\/users\/([^/]+)\/reset-password$/);
+      if (userReset) requireRole(req, ROLE_ADMIN, '重置用户密码');
+      if (userReset && method === 'POST') {
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+        const body = await readJson(req);
+        try {
+          auth.adminResetPassword(decodeURIComponent(userReset[1]), body.newPassword);
+        } catch (err) {
+          throw mapAuthError(err);
         }
         return sendJson(res, 200, { ok: true });
       }
@@ -723,9 +782,13 @@ if (require.main === module) {
   const documentsDb = process.env.SAFE_OFFICE_DOCS_DB
     || path.join(__dirname, 'data', 'documents.db');
   const usersFile = process.env.SAFE_OFFICE_USERS_FILE || path.join(__dirname, 'data', 'users.json');
+  const sessionsFile = process.env.SAFE_OFFICE_SESSIONS_FILE || path.join(__dirname, 'data', 'sessions.json');
   let auth = null;
   try {
-    auth = createAuthFromFile(usersFile);
+    auth = createAuthFromFile(usersFile, { sessionFile: sessionsFile });
+    if (auth && auth.sessionLoadError) {
+      console.warn(`⚠ 会话文件恢复失败（${sessionsFile}）：${auth.sessionLoadError}；旧会话已丢弃`);
+    }
   } catch (err) {
     console.error(`✗ 用户表加载失败（${usersFile}）：${err.message}`);
     process.exit(1);
@@ -778,7 +841,10 @@ if (require.main === module) {
     const model = service.getState().model;
     console.log(`  模型：${model.mode}${model.model ? ` / ${model.model}` : ''}`);
     if (smtpMailer) console.log('  邮件：SMTP 真实发送（收件人白名单已启用）');
-    if (auth) console.log(`  登录：已启用（${auth.users.size} 个用户，${usersFile}）`);
+    if (auth) {
+      console.log(`  登录：已启用（${auth.users.size} 个用户，${usersFile}）`);
+      console.log(`  会话：持久化 → ${sessionsFile}（只存 token 的 SHA-256）`);
+    }
     else console.log('  登录：未启用（本地演示；可用 add-user.cjs 建用户）');
     if (!allowVirtualConfirm) {
       console.log('  虚拟批准：已关闭（检测到真实动作）');

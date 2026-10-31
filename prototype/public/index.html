@@ -13,7 +13,7 @@
         <span class="brand-mark">安</span>
         <div class="brand-text">
           <strong>安全智慧办公</strong>
-          <small>办公套件控制台 · v0.31</small>
+          <small>办公套件控制台 · v0.32</small>
         </div>
       </div>
       <nav id="nav" class="nav" aria-label="主导航"></nav>
@@ -80,11 +80,19 @@
     <input class="input" id="new-password" type="password" autocomplete="new-password">
     <label class="label" for="confirm-password">确认新密码</label>
     <input class="input" id="confirm-password" type="password" autocomplete="new-password">
+    <div class="spread mt12"><span class="sub-text">两步验证（TOTP）</span><button class="btn ghost small" id="btn-totp" type="button">管理</button></div>
     <div class="err" id="password-error" role="alert"></div>
     <div class="btn-row mt12">
       <button class="btn" id="password-save" type="button">保存</button>
       <button class="btn ghost" id="password-cancel" type="button">取消</button>
     </div>
+  </dialog>
+
+  <dialog id="totp-dialog" class="dialog">
+    <h2>两步验证</h2>
+    <div id="totp-body"></div>
+    <div class="err" id="totp-error" role="alert"></div>
+    <div class="btn-row mt12"><button class="btn ghost" id="totp-close" type="button">关闭</button></div>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

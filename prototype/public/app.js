@@ -33,6 +33,7 @@
     autoMode: 'manual',
     autoSafe: null,
     route: 'dashboard',
+    authUser: null,
     pendingSample: null,
     opFilter: '',
     operationId: null,
@@ -261,6 +262,108 @@
     }
   }
 
+  // 账号相关请求：失败信息就地显示，不触发 API 的 401 跳转
+  async function accountRequest(path, body = {}) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error((data.error && data.error.message) || `HTTP ${res.status}`);
+      err.code = data.error && data.error.code;
+      throw err;
+    }
+    return data;
+  }
+
+  // 两步验证弹窗：未启用 → 生成密钥并确认；已启用 → 密码 + 动态码关闭
+  async function openTotpDialog() {
+    const dialog = document.getElementById('totp-dialog');
+    const body = document.getElementById('totp-body');
+    const error = document.getElementById('totp-error');
+    if (!dialog || !body || !error) return;
+    error.textContent = '';
+    body.innerHTML = '<div class="empty">加载中…</div>';
+    dialog.showModal();
+    try {
+      const me = await fetch('/api/me', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null));
+      renderTotpState(!!(me && me.user && me.user.totpEnabled), body, error);
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  }
+
+  function renderTotpState(enabled, body, error) {
+    if (enabled) {
+      body.innerHTML = `<div class="sub-text">已启用。关闭需要密码 + 当前动态验证码。</div>
+        <label class="label mt12" for="totp-password">密码</label>
+        <input class="input" id="totp-password" type="password" autocomplete="current-password">
+        <label class="label" for="totp-code">动态验证码</label>
+        <input class="input" id="totp-code" inputmode="numeric" maxlength="8" autocomplete="one-time-code">
+        <div class="btn-row mt12"><button class="btn danger" id="totp-disable" type="button">关闭两步验证</button></div>`;
+      body.querySelector('#totp-disable').addEventListener('click', async () => {
+        const button = body.querySelector('#totp-disable');
+        button.disabled = true;
+        error.textContent = '';
+        try {
+          await accountRequest('/api/2fa/disable', {
+            password: document.getElementById('totp-password').value,
+            code: document.getElementById('totp-code').value.trim(),
+          });
+          store.authUser = { ...(store.authUser || {}), totpEnabled: false };
+          document.getElementById('totp-dialog').close();
+          toast('两步验证已关闭', 'ok');
+        } catch (err) {
+          error.textContent = err.message;
+          button.disabled = false;
+        }
+      });
+      return;
+    }
+    body.innerHTML = `<div class="sub-text">未启用。启用后登录需要密码 + 认证器动态码。</div>
+      <div class="btn-row mt12"><button class="btn" id="totp-setup" type="button">生成密钥</button></div>`;
+    body.querySelector('#totp-setup').addEventListener('click', async () => {
+      const button = body.querySelector('#totp-setup');
+      button.disabled = true;
+      error.textContent = '';
+      try {
+        const setup = await accountRequest('/api/2fa/setup');
+        renderTotpSetup(setup, body, error);
+      } catch (err) {
+        error.textContent = err.message;
+        button.disabled = false;
+      }
+    });
+  }
+
+  function renderTotpSetup(setup, body, error) {
+    body.innerHTML = `<div class="sub-text">1. 在认证器里手动输入密钥：</div>
+      <div class="mono mt8">${esc(setup.secret)}</div>
+      <div class="sub-text mt8">或粘贴 otpauth URI：</div>
+      <div class="mono mt8">${esc(setup.uri)}</div>
+      <label class="label mt12" for="totp-code">2. 输入认证器显示的 6 位码</label>
+      <input class="input" id="totp-code" inputmode="numeric" maxlength="8" autocomplete="one-time-code">
+      <div class="btn-row mt12"><button class="btn" id="totp-enable" type="button">确认启用</button></div>`;
+    body.querySelector('#totp-enable').addEventListener('click', async () => {
+      const button = body.querySelector('#totp-enable');
+      button.disabled = true;
+      error.textContent = '';
+      try {
+        await accountRequest('/api/2fa/enable', {
+          code: document.getElementById('totp-code').value.trim(),
+        });
+        store.authUser = { ...(store.authUser || {}), totpEnabled: true };
+        document.getElementById('totp-dialog').close();
+        toast('两步验证已启用；下次登录需要动态验证码', 'ok');
+      } catch (err) {
+        error.textContent = err.message;
+        button.disabled = false;
+      }
+    });
+  }
+
   // 改密弹窗：用原生 dialog；失败信息就地显示，不触发 API 的 401 跳转
   function bindPasswordDialog() {
     const dialog = document.getElementById('password-dialog');
@@ -278,6 +381,16 @@
     });
     document.getElementById('password-cancel').addEventListener('click', () => dialog.close());
     dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+    document.getElementById('btn-totp').addEventListener('click', () => {
+      dialog.close();
+      openTotpDialog();
+    });
+    document.getElementById('totp-close').addEventListener('click', () => {
+      document.getElementById('totp-dialog').close();
+    });
+    document.getElementById('totp-dialog').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) event.currentTarget.close();
+    });
 
     save.addEventListener('click', async () => {
       const oldPassword = value('old-password');
@@ -332,6 +445,7 @@
     bindPasswordDialog();
     fetch('/api/me', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((data) => {
       if (data && data.user) {
+        store.authUser = data.user;
         const label = document.getElementById('current-user');
         label.textContent = `${data.user.username}（${data.user.role}）`;
         label.hidden = false;

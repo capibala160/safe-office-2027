@@ -10,6 +10,7 @@ const {
   AuthService, hashPassword, verifyPassword, loadUsers, saveUsers, normalizeUser,
   createAuthFromFile,
 } = require('../src/auth.cjs');
+const { totpCode } = require('../src/totp.cjs');
 
 test('密码：scrypt 哈希可验证，错误密码拒绝；短密码拒绝', () => {
   const { salt, hash } = hashPassword('correct horse battery');
@@ -75,6 +76,72 @@ test('改密：内存模式（无文件）只改内存', () => {
   auth.changePassword('bob', 'password123', 'newpassword123');
   assert.ok(auth.login('bob', 'newpassword123'));
   assert.equal(auth.login('bob', 'password123'), null);
+});
+
+test('会话持久化：只存 token 哈希，重启后仍有效，登出后失效', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-sessions-'));
+  const usersFile = path.join(dir, 'users.json');
+  const sessionsFile = path.join(dir, 'sessions.json');
+  const { salt, hash } = hashPassword('password123');
+  try {
+    saveUsers(usersFile, [{ username: 'alice', role: '员工', salt, hash }]);
+    const first = createAuthFromFile(usersFile, { sessionFile: sessionsFile });
+    const session = first.login('alice', 'password123');
+    const raw = fs.readFileSync(sessionsFile, 'utf8');
+    assert.ok(!raw.includes(session.token), '会话文件不能出现明文 token');
+    assert.match(raw, /tokenHash/);
+
+    const second = createAuthFromFile(usersFile, { sessionFile: sessionsFile });
+    assert.ok(second.verify(session.token), '重启后会话仍有效');
+
+    second.logout(session.token);
+    const third = createAuthFromFile(usersFile, { sessionFile: sessionsFile });
+    assert.equal(third.verify(session.token), null, '登出后重启不能复活');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TOTP：启用后必须带码登录，错码拒绝，关闭后恢复', () => {
+  const now = 1_700_000_000_000;
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({
+    users: [{ username: 'alice', role: '员工', salt, hash }], now: () => now,
+  });
+  const setup = auth.beginTotpSetup('alice');
+  assert.match(setup.secret, /^[A-Z2-7]+$/);
+  assert.match(setup.uri, /^otpauth:\/\/totp\//);
+  assert.throws(() => auth.enableTotp('alice', '000000'), /动态验证码/);
+  const code = totpCode(setup.secret, { now });
+  auth.enableTotp('alice', code);
+
+  assert.equal(auth.login('alice', 'password123'), null, '缺代码拒绝');
+  assert.equal(auth.login('alice', 'password123', '000000'), null, '错码拒绝');
+  assert.ok(auth.login('alice', 'password123', code), '正确代码放行');
+
+  assert.throws(() => auth.disableTotp('alice', 'wrong-password', code), /密码/);
+  assert.throws(() => auth.disableTotp('alice', 'password123', '000000'), /动态验证码/);
+  auth.disableTotp('alice', 'password123', code);
+  assert.ok(auth.login('alice', 'password123'), '关闭后恢复单因子');
+});
+
+test('管理员重置：旧密码失效、目标会话全部失效、新密码可登录', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-reset-'));
+  const file = path.join(dir, 'users.json');
+  const { salt, hash } = hashPassword('password123');
+  try {
+    saveUsers(file, [{ username: 'alice', role: '员工', salt, hash }]);
+    const auth = createAuthFromFile(file);
+    const session = auth.login('alice', 'password123');
+    auth.adminResetPassword('alice', 'newpassword123');
+    assert.equal(auth.verify(session.token), null, '目标会话失效');
+    assert.equal(auth.login('alice', 'password123'), null, '旧密码失效');
+    assert.ok(auth.login('alice', 'newpassword123'));
+    assert.equal(verifyPassword('newpassword123', loadUsers(file)[0]), true);
+    assert.throws(() => auth.adminResetPassword('nobody', 'newpassword123'), /不存在/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('用户表：保存/读取，权限 0600', () => {

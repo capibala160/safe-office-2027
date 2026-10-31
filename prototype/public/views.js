@@ -882,6 +882,7 @@
     const canAdmin = !authUser || roleName === '管理员';
     const canReport = !authUser || ['管理员', '审计员'].includes(roleName);
     const audit = canReport ? await API.get('/api/audit?limit=50').catch(() => null) : null;
+    const users = canAdmin ? await API.get('/api/users').catch(() => null) : null;
     const risk = gov.risk;
     const policy = gov.policy || {};
     const roles = Object.keys(policy);
@@ -906,6 +907,11 @@
           <div id="gov-tamper-result" class="mt12"></div>
         </section>
       </div>
+      ${users ? `<section class="card"><div class="card-head"><h2>用户管理</h2><span class="sub">${users.items.length} 个</span></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>用户</th><th>角色</th><th>两步验证</th><th>操作</th></tr></thead><tbody>
+          ${users.items.map((u) => `<tr><td class="mono">${esc(u.username)}</td><td>${esc(u.role)}</td><td>${u.totpEnabled ? '已启用' : '未启用'}</td><td><button class="btn ghost small" data-reset-user="${esc(u.username)}">重置密码</button></td></tr>`).join('')}
+        </tbody></table></div>
+      </section>` : ''}
       <section class="card"><div class="card-head"><h2>策略矩阵</h2><span class="sub">未声明 = 拒绝（fail-closed）</span></div><div class="table-wrap"><table class="table"><thead><tr><th>角色</th>${actions.map((a) => `<th>${esc(a)}</th>`).join('')}</tr></thead><tbody>${roles.map((r) => `<tr><td><strong>${esc(r)}</strong></td>${actions.map((a) => `<td>${badge((policy[r] && policy[r][a]) || 'deny')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>办公能力分级</h2><span class="sub">${gov.capabilities.length} 类</span></div><div class="table-wrap"><table class="table"><thead><tr><th>能力</th><th>级别</th><th>工具</th><th>约束</th></tr></thead><tbody>${gov.capabilities.map((cap) => `<tr><td>${esc(cap.name)}</td><td>${badge(cap.level)}</td><td class="mono">${esc(cap.tools.join(', '))}</td><td>${esc(cap.constraints)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>工具注册表</h2><span class="sub">${(gov.tools || []).length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>工具</th><th>能力</th><th>级别</th><th>高危</th><th>转交</th><th>来源</th></tr></thead><tbody>${(gov.tools || []).map((tool) => `<tr><td class="mono">${esc(tool.name)}</td><td>${esc(tool.capability)}</td><td>${badge(tool.level)}</td><td>${tool.highRisk ? '是' : '否'}</td><td>${tool.deferred ? '是' : '否'}</td><td>${esc(tool.source)}</td></tr>`).join('')}</tbody></table></div></section>
@@ -930,6 +936,22 @@
         const res = await API.post('/api/governance/audit-tamper-demo', {});
         root.querySelector('#gov-tamper-result').innerHTML = `<div class="notice ${res.tampered ? 'info' : 'block'}">原链校验：${res.original ? '通过' : '断裂'}；克隆链篡改后：${res.tampered ? '通过（异常）' : '断裂（预期）'}。<div class="sub-text mt8">${esc(res.note || '')}</div></div>`;
       } catch (err) { toast(c.errorText(err), 'error'); }
+    });
+    root.querySelectorAll('[data-reset-user]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const username = btn.dataset.resetUser;
+        const password = window.prompt(`为「${username}」设置新密码（至少 8 位）`);
+        if (!password) return;
+        btn.disabled = true;
+        try {
+          await API.post(`/api/users/${encodeURIComponent(username)}/reset-password`, { newPassword: password });
+          toast(`已重置「${username}」的密码；其现有会话已失效`, 'ok');
+        } catch (err) {
+          toast(c.errorText(err), 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
     });
     root.querySelector('#gov-report')?.addEventListener('click', () => {
       window.open('/api/report', '_blank', 'noopener');
