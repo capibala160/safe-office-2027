@@ -31,6 +31,7 @@ const { parseDsn } = require('./dsn.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer, MailerError } = require('./mailer.cjs');
 const { printText } = require('./print-adapter.cjs');
+const { writeMeeting } = require('./calendar-adapter.cjs');
 const { scanAttachment } = require('./file-scan.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
@@ -38,7 +39,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.36.0';
+const VERSION = '0.37.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -118,6 +119,7 @@ class ConsoleService {
     blobStore = null,
     printer = process.env.SAFE_OFFICE_PRINTER || null,
     printAdapter = printText,
+    calendarDir = process.env.SAFE_OFFICE_CALENDAR_DIR || null,
     blobKey = process.env.SAFE_OFFICE_BLOB_KEY || null,
   } = {}) {
     this.now = now;
@@ -140,6 +142,7 @@ class ConsoleService {
     this._auditRestoreError = null;
     this.printer = printer || null;          // null = 打印保持模拟
     this.printAdapter = typeof printAdapter === 'function' ? printAdapter : printText;
+    this.calendarDir = calendarDir ? String(calendarDir) : null;   // null = 会议预约保持模拟
     this.key = Buffer.from(nearfieldKey);
     this.deviceId = deviceId;
     this.deviceLabel = deviceLabel;
@@ -199,6 +202,9 @@ class ConsoleService {
     this.runtime = new AgentRuntime({
       policy: this.policy, audit: this.audit, risk: this.risk, planner: this.planner, perf: this.perf,
       toolRegistry: this.toolRegistry, toolExecutors: this.toolExecutors,
+      calendarWriter: this.calendarDir
+        ? (input) => writeMeeting({ ...input, dir: this.calendarDir })
+        : null,
     });
     if (this.storeFile !== ':memory:') fs.mkdirSync(path.dirname(this.storeFile), { recursive: true });
     this.store = new OperationStore(this.storeFile, { now: () => new Date(this.now()).toISOString() });
@@ -669,13 +675,19 @@ class ConsoleService {
     const agentEvents = this.audit.entries
       .filter((e) => e.kind === '执行' && e.detail && e.detail.action === 'scheduleMeeting')
       .filter((e) => canSeeAll || e.actor === actor)
-      .map((e, i) => ({
-        id: `cal-agent-${e.seq}-${i}`,
-        title: (e.detail.args && e.detail.args.title) || '预约会议',
-        at: (e.detail.args && e.detail.args.at) || '',
-        source: 'agent',
-        seq: e.seq,
-      }));
+      .map((e, i) => {
+        const outcome = (e.detail && e.detail.outcome) || '';
+        const fileMatch = /\.ics 已写入 (.+)$/.exec(outcome);
+        return {
+          id: `cal-agent-${e.seq}-${i}`,
+          title: (e.detail.args && e.detail.args.title) || '预约会议',
+          at: (e.detail.args && e.detail.args.at) || '',
+          source: 'agent',
+          real: !!fileMatch,                       // v0.37：是否真写了 .ics
+          file: fileMatch ? fileMatch[1].trim() : null,
+          seq: e.seq,
+        };
+      });
     return [...this.business.calendarSeed, ...agentEvents];
   }
 

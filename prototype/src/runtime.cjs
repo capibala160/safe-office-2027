@@ -27,7 +27,10 @@ const { verifyAgentManifest } = require('./agents.cjs');
 
 class AgentRuntime {
   // disabledLayers：仅评测消融用（如 ['gate2','gate4']）。默认空集合，行为与之前完全一致。
-  constructor({ policy, audit, risk, planner, perf, toolRegistry = null, toolExecutors = null, disabledLayers = [] }) {
+  constructor({
+    policy, audit, risk, planner, perf, toolRegistry = null, toolExecutors = null,
+    disabledLayers = [], calendarWriter = null,
+  }) {
     this.disabledLayers = new Set(disabledLayers);
     this.policy = policy;
     this.audit = audit;
@@ -44,6 +47,8 @@ class AgentRuntime {
     this.snapshots = [];    // 高危执行前的状态快照（L2 闸4：可一键回滚）
     this.confirmations = new ConfirmationService();
     this.tasks = new Map(); // 幂等键：taskId → 任务执行记录（防超时重试重复执行）
+    // v0.37：会议预约的真实副作用（写 .ics）；null = 保持模拟
+    this.calendarWriter = typeof calendarWriter === 'function' ? calendarWriter : null;
   }
 
   _ablate(layer) {
@@ -228,7 +233,7 @@ class AgentRuntime {
         }
         try {
           if (onStage) onStage('执行', { step: i + 1, total: steps.length });
-          lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred, operator }));
+          lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred, operator, taskId }));
         } catch (err) {
           const fault = classifyModelFault(err);
           const notExecuted = steps.length - i - 1;
@@ -548,7 +553,29 @@ class AgentRuntime {
       delete this.knowledge[args.id];
       effect = `文档「${doc ? doc.title : args.id}」已删除（可回滚）`;
     } else if (action === 'scheduleMeeting') {
-      effect = `会议「${args.title}」已预约（${args.at}）`;
+      // v0.37：配置了日历目录就真写 .ics；未配置明确标模拟，不冒充
+      if (this.calendarWriter) {
+        try {
+          const written = await this.calendarWriter({
+            title: args.title,
+            at: args.at,
+            id: `${ctx.taskId || 'task'}-${n}`,
+            description: '由安全智慧办公 Agent 预约（已经过策略与沙箱检查）',
+          });
+          if (written && written.mode === 'written') {
+            effect = `会议「${args.title}」已预约（${args.at}）→ .ics 已写入 ${written.file}`;
+            this.audit.append('日历写入', { n, file: written.file, uid: written.uid });
+          } else {
+            effect = `会议「${args.title}」已预约（${args.at}）〔模拟：未配置日历目录〕`;
+          }
+        } catch (err) {
+          this.risk.add(10, '日历写入失败');
+          this.audit.append('执行失败', { n, action, reason: err.message });
+          effect = `会议预约失败：${err.message}（未伪造成功）`;
+        }
+      } else {
+        effect = `会议「${args.title}」已预约（${args.at}）`;
+      }
     } else if (action === 'readContact') {
       const c = CONTACTS[args.name];
       if (!c) {

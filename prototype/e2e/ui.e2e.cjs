@@ -373,3 +373,61 @@ test('UI MCP 接入：管理员在治理页发现并注册 MCP 工具', { timeou
 
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });
+
+test('UI 设备确认：员工发起挑战 → 设备助手在设备页批准 → 操作已执行', { timeout: 90000 }, async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('emp', '员工'), mk('dev', '设备助手')] });
+  const started = await startServer({ port: 0, auth });
+  const browser = await launch(t);
+  t.after(() => started.close());
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+
+  const login = async (name) => {
+    await page.goto(started.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForURL(/\/login\.html/);
+    await page.fill('#username', name);
+    await page.fill('#password', 'password123');
+    await page.click('#submit');
+    await page.waitForSelector('#current-user:not([hidden])');
+  };
+
+  // 员工：冻结一条外发，并在设备页发起挑战
+  await login('emp');
+  await page.waitForSelector('[data-sample="external-confirm"]');
+  await page.click('[data-sample="external-confirm"]');
+  await page.waitForSelector('#dash-result [data-op-action="challenge"]', { timeout: 15000 });
+  const op = started.service.store.listOperations()[0];
+  assert.ok(op && op.state === 'frozen');
+
+  await page.goto(`${started.url}/#/device`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#dev-op');
+  await page.selectOption('#dev-op', op.operationId);
+  await page.click('#dev-challenge');
+  await page.waitForSelector('[data-dev-decide="approve"]', { timeout: 15000 });
+
+  // 设备助手：换人批准（四眼原则：不能是自己发起的）
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await login('dev');
+  await page.goto(`${started.url}/#/device`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-dev-decide="approve"]', { timeout: 15000 });
+  await page.click('[data-dev-decide="approve"]');
+  await page.waitForFunction(() => {
+    const el = document.getElementById('device-result');
+    return el && el.innerText.includes('已批准');
+  }, null, { timeout: 15000 });
+
+  const executed = started.service.store.getOperation(op.operationId);
+  assert.equal(executed.state, 'executed');
+  assert.equal(started.service.store.getOutboxByOperation(op.operationId).state, 'sent');
+
+  await page.goto(`${started.url}/#/approvals`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => document.body.innerText.includes('已执行'), null, { timeout: 15000 });
+
+  assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
+});

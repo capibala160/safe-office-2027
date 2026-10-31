@@ -497,7 +497,7 @@
     root.innerHTML = `${page('日历', '预约动作由 Agent 执行；Mock 计划为固定演示数据')}
       <section class="card">
         <div class="card-head"><h2>日程</h2><span class="sub">${items.length} 条</span></div>
-        <div class="stack">${items.map((e) => `<div class="spread"><div><strong>${esc(e.title)}</strong><div class="sub-text">${esc(e.at)} · ${e.source === 'seed' ? '种子数据' : 'Agent 预约'}</div></div><span class="badge info">${esc(e.source)}</span></div>`).join('')}</div>
+        <div class="stack">${items.map((e) => `<div class="spread"><div><strong>${esc(e.title)}</strong><div class="sub-text">${esc(e.at)} · ${e.source === 'seed' ? '种子数据' : (e.real ? `Agent 预约 · .ics 已落盘` : 'Agent 预约 · 模拟')}${e.file ? ` · ${esc(e.file)}` : ''}</div></div><span class="badge ${e.real ? 'pass' : 'info'}">${esc(e.source === 'seed' ? e.source : (e.real ? '已落盘' : '模拟'))}</span></div>`).join('')}</div>
         <div class="btn-row mt12"><button class="btn" id="cal-run">预约项目对齐会</button><button class="btn ghost" id="cal-refresh">刷新日程</button></div>
         <div class="sub-text mt8">注意：MockLLM 的预约计划固定为“项目对齐会 / 2026-10-20 14:00”，用于演示。</div>
       </section>
