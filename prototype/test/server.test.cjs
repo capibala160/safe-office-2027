@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const { startServer, DEFAULT_COMMAND_BODY_LIMIT } = require('../server.cjs');
 const { AuthService, hashPassword } = require('../src/auth.cjs');
 const { totpCode } = require('../src/totp.cjs');
+const { DocumentStore } = require('../src/ingest.cjs');
 
 async function boot(t) {
   const started = await startServer({ port: 0 });
@@ -40,7 +41,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.32.0');
+  assert.equal(data.version, '0.33.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -631,6 +632,90 @@ test('用户管理：管理员可列出/重置，非管理员 403', async (t) =>
     body: JSON.stringify({ newPassword: 'whatever123' }),
   });
   assert.equal(forbidden.status, 403);
+});
+
+test('租户隔离：文档/操作/运行历史互不可见，管理员与审批角色可见', async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({
+    users: [mk('alice', '员工'), mk('bob', '员工'), mk('admin', '管理员'), mk('device', '设备助手')],
+  });
+  const started = await startServer({
+    port: 0, auth, documentsStore: new DocumentStore(':memory:'),
+  });
+  t.after(() => started.close());
+  const cookie = (name) => `sfc_session=${auth.login(name, 'password123').token}`;
+
+  // 员工可以导入自己的资料（v0.33 起；owner=登录用户）
+  const imported = await fetch(`${started.url}/api/documents/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('alice') },
+    body: JSON.stringify({
+      filename: 'alice-note.txt',
+      level: '内部',
+      contentBase64: Buffer.from('Alice 私有资料\n只给 alice 看').toString('base64'),
+    }),
+  });
+  assert.equal(imported.status, 200);
+  const aliceDoc = (await imported.json()).document;
+  assert.match(aliceDoc.id, /^IMP-/);
+
+  const aliceDocs = await fetch(`${started.url}/api/documents`, { headers: { Cookie: cookie('alice') } });
+  assert.ok((await aliceDocs.json()).items.some((d) => d.id === aliceDoc.id), 'alice 能看到自己导入的资料');
+  const bobDocs = await fetch(`${started.url}/api/documents`, { headers: { Cookie: cookie('bob') } });
+  assert.ok(!(await bobDocs.json()).items.some((d) => d.id === aliceDoc.id), 'bob 不能看到 alice 的资料');
+  const adminDocs = await fetch(`${started.url}/api/documents`, { headers: { Cookie: cookie('admin') } });
+  assert.ok((await adminDocs.json()).items.some((d) => d.id === aliceDoc.id), '管理员跨租户可见');
+  assert.equal((await fetch(`${started.url}/api/documents/${aliceDoc.id}`, { headers: { Cookie: cookie('bob') } })).status, 404);
+
+  // bob 显式申请 alice 的文档 ID：令牌会把它裁掉
+  const crossRun = await fetch(`${started.url}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('bob') },
+    body: JSON.stringify({
+      command: '读取 Alice 私有资料', role: '员工', tools: ['readDoc'], documentIds: [aliceDoc.id],
+    }),
+  });
+  assert.equal(crossRun.status, 200);
+  const cross = await crossRun.json();
+  assert.ok(!cross.documentIds.includes(aliceDoc.id), '跨租户文档不能进令牌');
+  assert.ok(cross.deniedDocs.includes(aliceDoc.id), '裁剪要留痕');
+
+  // alice 发起外发 → 冻结操作
+  const sample = started.service.getDemoSamples().find((s) => s.id === 'external-confirm');
+  const runRes = await fetch(`${started.url}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('alice') },
+    body: JSON.stringify(sample),
+  });
+  assert.equal(runRes.status, 200);
+  const run = await runRes.json();
+  const op = run.operations[0];
+  assert.ok(op, '应产生冻结操作');
+
+  const aliceOps = await fetch(`${started.url}/api/operations`, { headers: { Cookie: cookie('alice') } });
+  assert.ok((await aliceOps.json()).items.some((o) => o.operationId === op.operationId));
+  const bobOps = await fetch(`${started.url}/api/operations`, { headers: { Cookie: cookie('bob') } });
+  assert.ok(!(await bobOps.json()).items.some((o) => o.operationId === op.operationId), 'bob 不能看到 alice 的操作');
+  assert.equal((await fetch(`${started.url}/api/operations/${op.operationId}`, { headers: { Cookie: cookie('bob') } })).status, 404);
+  assert.equal((await fetch(`${started.url}/api/operations/${op.operationId}`, { headers: { Cookie: cookie('admin') } })).status, 200);
+  assert.equal((await fetch(`${started.url}/api/operations/${op.operationId}`, { headers: { Cookie: cookie('device') } })).status, 200, '设备助手需要审批队列');
+
+  // 运行历史
+  assert.equal((await fetch(`${started.url}/api/commands/${run.runId}`, { headers: { Cookie: cookie('bob') } })).status, 404);
+  const bobRuns = await fetch(`${started.url}/api/commands`, { headers: { Cookie: cookie('bob') } });
+  assert.ok(!(await bobRuns.json()).items.some((r) => r.runId === run.runId));
+  const adminRuns = await fetch(`${started.url}/api/commands`, { headers: { Cookie: cookie('admin') } });
+  assert.ok((await adminRuns.json()).items.some((r) => r.runId === run.runId));
+
+  // 快照计数：bob 的待确认数不应包含 alice 的操作
+  const bobState = await (await fetch(`${started.url}/api/state`, { headers: { Cookie: cookie('bob') } })).json();
+  assert.equal(bobState.counts.pendingOperations, 0);
+  assert.ok(bobState.audit.recent.every((e) => e.actor !== 'alice'), 'bob 看不到 alice 的审计条目');
+  const aliceState = await (await fetch(`${started.url}/api/state`, { headers: { Cookie: cookie('alice') } })).json();
+  assert.equal(aliceState.counts.pendingOperations, 1);
 });
 
 test('坏 Cookie：不崩溃，返回 401/200', async (t) => {

@@ -82,6 +82,7 @@ class AuditLog {
     this.entries = [];
     this.prevHash = 'GENESIS';
     this.onAppend = onAppend;
+    this.actor = null; // 当前登录用户；由控制台在命令执行期间设置
   }
   append(kind, detail) {
     const rec = {
@@ -92,6 +93,7 @@ class AuditLog {
       prevHash: this.prevHash,
     };
     rec.detail = structuredClone(detail);
+    if (this.actor) rec.actor = String(this.actor);
     rec.hash = crypto.createHash('sha256').update(JSON.stringify(rec)).digest('hex');
     this.prevHash = rec.hash;
     this.entries.push(rec);
@@ -176,6 +178,7 @@ class AuditLog {
       if (e.seq !== i + 1) return false;
       if (e.prevHash !== prev) return false;
       const payload = { seq: e.seq, kind: e.kind, detail: e.detail, ts: e.ts, prevHash: e.prevHash };
+      if (e.actor) payload.actor = e.actor; // v0.33 起才有；旧条目无此字段，哈希保持兼容
       const h = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
       if (e.hash !== h) return false;
       prev = e.hash;

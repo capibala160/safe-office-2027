@@ -575,8 +575,8 @@
       </section>
       <section class="card">
         <div class="card-head"><h2>文件列表</h2><span class="sub">${docs.length} 项</span></div>
-        <div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>类型</th><th>标题</th><th>密级</th><th>状态</th><th>操作</th></tr></thead><tbody>
-          ${docs.map((d) => `<tr><td class="mono">${esc(d.id)}</td><td>${esc(d.type)}</td><td>${esc(d.title)}</td><td>${badge(d.level)}</td><td>${esc(d.status)}</td><td class="row-actions"><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button>${d.type === 'document' && !d.deleted ? `<button class="btn ghost small" data-doc-task="minutes" data-id="${esc(d.id)}" data-title="${esc(d.title)}">整理纪要</button><button class="btn ghost small" data-doc-task="email" data-id="${esc(d.id)}" data-title="${esc(d.title)}">起草邮件</button>` : ''}</td></tr>`).join('')}
+        <div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>类型</th><th>标题</th><th>密级</th><th>归属</th><th>状态</th><th>操作</th></tr></thead><tbody>
+          ${docs.map((d) => `<tr><td class="mono">${esc(d.id)}</td><td>${esc(d.type)}</td><td>${esc(d.title)}</td><td>${badge(d.level)}</td><td>${esc(d.owner || '共享')}</td><td>${esc(d.status)}</td><td class="row-actions"><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button>${d.type === 'document' && !d.deleted ? `<button class="btn ghost small" data-doc-task="minutes" data-id="${esc(d.id)}" data-title="${esc(d.title)}">整理纪要</button><button class="btn ghost small" data-doc-task="email" data-id="${esc(d.id)}" data-title="${esc(d.title)}">起草邮件</button>` : ''}</td></tr>`).join('')}
         </tbody></table></div>
         <div class="btn-row mt12"><button class="btn danger small" id="files-delete">删除周例会纪要（M2）</button><button class="btn ghost small" id="files-rollback">回滚最近快照</button></div>
         <div class="sub-text mt8">MockLLM 的单删计划固定为 M2；批量删除样例在命令台。删除确认后由假执行器标记 deleted。</div>

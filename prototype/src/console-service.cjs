@@ -36,7 +36,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.32.0';
+const VERSION = '0.33.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -164,7 +164,7 @@ class ConsoleService {
     // 导入的真实资料并入文档视图（样例文档保持静态）
     if (this.documentsStore) {
       registerDocuments(this.documentsStore.list().map((doc) => ({
-        id: doc.id, title: doc.title, level: doc.level, body: doc.body,
+        id: doc.id, title: doc.title, level: doc.level, body: doc.body, owner: doc.owner || '',
       })));
     }
     if (this._auditRestoreError) {
@@ -426,15 +426,23 @@ class ConsoleService {
   }
 
   // ---------- 只读快照 ----------
-  getState() {
-    const operations = this.store.listOperations();
-    const pendingChallenges = [...this.challenges.values()].filter((c) => c.state === 'pending');
+  getState({ actor = null, role = null } = {}) {
+    const allOperations = this.store.listOperations();
+    const operations = allOperations.filter((o) => this._operationVisible(o, actor, role));
+    const visibleOpIds = new Set(operations.map((o) => o.operationId));
+    const pendingChallenges = [...this.challenges.values()]
+      .filter((c) => c.state === 'pending' && visibleOpIds.has(c.operationId));
+    const runs = this.runs.filter((r) => this._runVisible(r, actor, role));
+    const canSeeAllAudit = !actor || ['管理员', '审计员'].includes(role);
+    const recentAudit = this.audit.entries
+      .filter((e) => canSeeAllAudit || e.actor === actor)
+      .slice(-8);
     return {
       version: VERSION,
       startedAt: this._iso(this.startedAt),
       uptimeSec: Math.max(0, Math.floor((this.now() - this.startedAt) / 1000)),
       counts: {
-        documents: Object.keys(allDocuments()).length,
+        documents: Object.values(allDocuments()).filter((d) => this._docRowVisible(d, actor, role)).length,
         images: Object.keys(IMAGES).length,
         audios: Object.keys(AUDIOS).length,
         operations: operations.length,
@@ -442,7 +450,7 @@ class ConsoleService {
         emails: operations.filter((o) => o.protocolAction === 1).length,
         audit: this.audit.entries.length,
         pendingChallenges: pendingChallenges.length,
-        runs: this.runs.length,
+        runs: runs.length,
       },
       audit: {
         verified: this.audit.verify(),
@@ -451,8 +459,8 @@ class ConsoleService {
         restoreError: this._auditRestoreError || null,
         checkpointFile: this.auditCheckpointFile || null,
         checkpoint: this.audit.checkpoint(),
-        recent: this.audit.entries.slice(-8).map((e) => ({
-          seq: e.seq, kind: e.kind, ts: e.ts, detail: e.detail,
+        recent: recentAudit.map((e) => ({
+          seq: e.seq, kind: e.kind, ts: e.ts, detail: e.detail, actor: e.actor || null,
         })),
       },
       risk: {
@@ -460,10 +468,11 @@ class ConsoleService {
         threshold: this.risk.threshold,
         frozen: this.risk.frozen,
         freezeCount: this.risk.freezeCount,
-        recentEvents: this.risk.events.slice(-5),
-        reviews: this.risk.reviews.slice(-3),
+        // 风险事件原因可能带文档标题：非管理员/审计员只给聚合分，不给明细
+        recentEvents: canSeeAllAudit ? this.risk.events.slice(-5) : [],
+        reviews: canSeeAllAudit ? this.risk.reviews.slice(-3) : [],
       },
-      device: this.getDevice(),
+      device: this.getDevice({ actor, role }),
       model: this._modelInfo(),
       recovery: this.recoveryInfo || null,
       autoMode: this.autoMode,
@@ -476,18 +485,20 @@ class ConsoleService {
     };
   }
 
-  getBootstrap() {
+  getBootstrap({ actor = null, role = null } = {}) {
     return {
-      state: this.getState(),
+      state: this.getState({ actor, role }),
       roles: Object.entries(ROLE_DEFS).map(([name, def]) => ({ name, ...def })),
       tools: this.toolRegistry.publicList(),
       roleTools: Object.fromEntries(
-        Object.keys(ROLE_DEFS).map((role) => [role, this.toolRegistry.toolsForRole(role, this.policy)]),
+        Object.keys(ROLE_DEFS).map((r) => [r, this.toolRegistry.toolsForRole(r, this.policy)]),
       ),
-      roleDocs: Object.fromEntries(Object.keys(ROLE_DEFS).map((r) => [r, roleDocIds(r)])),
+      roleDocs: Object.fromEntries(Object.keys(ROLE_DEFS).map((r) => [
+        r, roleDocIds(r).filter((id) => this._docVisibleTo(id, actor, role)),
+      ])),
       capabilities: CAPABILITIES,
       riskLevels: RISK_LEVELS,
-      documents: this.listDocuments(),
+      documents: this.listDocuments({ actor, role }),
       contacts: this.listContacts(),
       samples: this.getDemoSamples(),
       autoModes: [
@@ -495,8 +506,8 @@ class ConsoleService {
         { id: 'auto-safe', label: '低风险自动', desc: `仅 ${this.autoSafeDomains.join('、')} 的内部级外发自动确认（配额 ${this.autoSafeQuota} 次）；其他高危仍需设备` },
         { id: 'auto-full', label: '全自动（演示）', desc: '所有转交动作自动批准，绕过设备确认；仅用于对照演示' },
       ],
-      operations: this.listOperations().items,
-      pendingChallenges: this.getDevice().pending,
+      operations: this.listOperations({ actor, role }).items,
+      pendingChallenges: this.getDevice({ actor, role }).pending,
     };
   }
 
@@ -569,13 +580,21 @@ class ConsoleService {
   }
 
   // ---------- 文档 / 通讯录 / 日历 ----------
-  listDocuments() {
+  _docRowVisible(doc, actor, role) {
+    if (!actor || !doc || !doc.owner) return true;
+    if (doc.owner === actor) return true;
+    return ['管理员', '审计员'].includes(role);
+  }
+
+  listDocuments({ actor = null, role = null } = {}) {
     const items = [];
     for (const d of Object.values(allDocuments())) {
+      if (!this._docRowVisible(d, actor, role)) continue;
       items.push({
         id: d.id, type: 'document', title: d.title, level: d.level,
         status: this.business.deletedDocIds.has(d.id) ? 'deleted' : 'available',
         deleted: this.business.deletedDocIds.has(d.id), tainted: false, generated: false,
+        owner: d.owner || '',
       });
     }
     for (const i of Object.values(IMAGES)) {
@@ -586,18 +605,22 @@ class ConsoleService {
     }
     for (const k of Object.values(this.runtime.knowledge)) {
       if (!(k.generated || k.transcript || k.ocr)) continue;
+      if (!this._docRowVisible(k, actor, role)) continue;
       items.push({
         id: k.id, type: k.generated ? 'draft' : k.transcript ? 'transcript' : 'ocr',
         title: k.title, level: k.level, status: 'available', deleted: false,
-        tainted: !!k.tainted, generated: !!k.generated,
+        tainted: !!k.tainted, generated: !!k.generated, owner: k.owner || '',
       });
     }
     return items;
   }
 
-  getDocument(id) {
+  getDocument(id, { actor = null, role = null } = {}) {
     const knowledge = this.runtime.knowledge[id];
     if (knowledge) {
+      if (!this._docRowVisible(knowledge, actor, role)) {
+        throw new ConsoleError('NOT_FOUND', `文档不存在：${id}`, 404);
+      }
       return {
         id: knowledge.id,
         title: knowledge.title,
@@ -614,6 +637,9 @@ class ConsoleService {
     }
     const meta = getDocumentById(id) || IMAGES[id] || AUDIOS[id];
     if (!meta) throw new ConsoleError('NOT_FOUND', `文档不存在：${id}`, 404);
+    if (!this._docRowVisible(meta, actor, role)) {
+      throw new ConsoleError('NOT_FOUND', `文档不存在：${id}`, 404);
+    }
     return {
       id, title: meta.title, level: meta.level, body: null, originalBody: null,
       tainted: false, generated: false, status: this.business.deletedDocIds.has(id) ? 'deleted' : 'not-read',
@@ -628,9 +654,11 @@ class ConsoleService {
     }));
   }
 
-  listCalendar() {
+  listCalendar({ actor = null, role = null } = {}) {
+    const canSeeAll = !actor || ['管理员', '审计员'].includes(role);
     const agentEvents = this.audit.entries
       .filter((e) => e.kind === '执行' && e.detail && e.detail.action === 'scheduleMeeting')
+      .filter((e) => canSeeAll || e.actor === actor)
       .map((e, i) => ({
         id: `cal-agent-${e.seq}-${i}`,
         title: (e.detail.args && e.detail.args.title) || '预约会议',
@@ -648,12 +676,19 @@ class ConsoleService {
     return task;
   }
 
+  _runVisible(run, actor, role) {
+    if (!actor || !run || !run.operator) return true;
+    if (['管理员', '审计员'].includes(role)) return true;
+    return run.operator === actor;
+  }
+
   // 异步任务：立即返回 runId，前端轮询进度；离开页面任务照常跑完
   startCommand(input = {}) {
     this._normalizeCommandInput(input); // 参数错误立刻 400，不进队列
     const runId = `RUN-${++this.seq}`;
     const live = {
       runId,
+      operator: input.operator ? String(input.operator).slice(0, 64) : null,
       command: String(input.command || ''),
       role: input.role || '员工',
       stage: '排队',
@@ -695,8 +730,15 @@ class ConsoleService {
     return { runId, stage: live.stage, status: live.status };
   }
 
-  getRun(runId) {
+  listRuns({ actor = null, role = null } = {}) {
+    return this.runs.filter((run) => this._runVisible(run, actor, role));
+  }
+
+  getRun(runId, { actor = null, role = null } = {}) {
     const live = this.liveRuns.get(runId);
+    if (live && !this._runVisible(live, actor, role)) {
+      throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
+    }
     if (live) {
       return {
         runId: live.runId,
@@ -713,7 +755,9 @@ class ConsoleService {
       };
     }
     const done = this.runs.find((r) => r.runId === runId);
-    if (!done) throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
+    if (!done || !this._runVisible(done, actor, role)) {
+      throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
+    }
     const pending = (done.operations || []).filter((o) => o.state === 'frozen').length;
     return {
       runId,
@@ -730,11 +774,17 @@ class ConsoleService {
     };
   }
 
-  cancelRun(runId) {
+  cancelRun(runId, { actor = null, role = null } = {}) {
     const live = this.liveRuns.get(runId);
     if (!live) {
       const done = this.runs.find((r) => r.runId === runId);
+      if (done && !this._runVisible(done, actor, role)) {
+        throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
+      }
       if (done) throw new ConsoleError('CONFLICT', '任务已结束，不能取消', 409);
+      throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
+    }
+    if (!this._runVisible(live, actor, role)) {
       throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
     }
     if (live.status !== 'running') throw new ConsoleError('CONFLICT', `任务已结束（${live.stage}），不能取消`, 409);
@@ -842,13 +892,28 @@ class ConsoleService {
     return this.fulfillment.send(outboxId);
   }
 
-  _issueAgentAndToken({ command, role, tools, documentIds, domains, maxCalls, modelLocation }) {
+  // 租户隔离：共享样例文档（无 owner）所有人可见；导入资料只看自己的（管理员/审计员例外）
+  _docVisibleTo(id, actor, role) {
+    if (!actor) return true;
+    const doc = getDocumentById(id);
+    if (!doc) return true;
+    if (!doc.owner) return true;
+    if (doc.owner === actor) return true;
+    return ['管理员', '审计员'].includes(role);
+  }
+
+  _issueAgentAndToken({
+    command, role, tools, documentIds, domains, maxCalls, modelLocation, operator = null,
+  }) {
     const roleTools = this.toolRegistry.toolsForRole(role, this.policy);
     const roleDocs = roleDocIds(role);
     const requestedTools = tools === null ? roleTools.slice() : tools;
     const requestedDocs = documentIds === null ? roleDocs.slice() : documentIds;
+    // 其他租户的文档不能进令牌——否则规划上下文会读到别人的正文
+    const tenantDeniedDocs = requestedDocs.filter((d) => !this._docVisibleTo(d, operator, role));
+    const visibleDocs = requestedDocs.filter((d) => this._docVisibleTo(d, operator, role));
     const agentTools = requestedTools.filter((t) => roleTools.includes(t) && this.toolRegistry.has(t));
-    const agentDocs = requestedDocs.filter((d) => roleDocs.includes(d));
+    const agentDocs = visibleDocs.filter((d) => roleDocs.includes(d));
     const agent = defineAgent({
       agentId: `console-${role}-${++this.agentSeq}`,
       role,
@@ -858,7 +923,7 @@ class ConsoleService {
     }, { registry: this.toolRegistry, policy: this.policy });
     const issued = issueToken(agent, {
       tools: requestedTools,
-      documentIds: requestedDocs,
+      documentIds: visibleDocs,
       allowedExternalDomains: domains,
       maxCalls,
       issuedFor: command,
@@ -867,7 +932,7 @@ class ConsoleService {
       agent,
       token: issued.token,
       deniedTools: issued.deniedTools,
-      deniedDocs: issued.deniedDocs,
+      deniedDocs: [...(issued.deniedDocs || []), ...tenantDeniedDocs],
     };
   }
 
@@ -878,8 +943,13 @@ class ConsoleService {
     const startedAt = this.now();
     const operator = input.operator ? String(input.operator).slice(0, 64) : null;
     const auditStart = this.audit.entries.length;
+    const previousAuditActor = this.audit.actor;
+    this.audit.actor = operator || null;
+    try {
     if (operator) this.audit.append('操作者', { operator, runId });
-    const { agent, token, deniedTools, deniedDocs } = this._issueAgentAndToken({ ...options, command: options.command });
+    const { agent, token, deniedTools, deniedDocs } = this._issueAgentAndToken({
+      ...options, command: options.command, operator,
+    });
     const deferred = [];
     const sandbox = options.sandboxPreset === 'physical'
       ? { ...DEFAULT_SANDBOX, name: '演示：开放物理通道', physical: true }
@@ -898,6 +968,7 @@ class ConsoleService {
       onDeferred: (descriptor) => deferred.push(descriptor),
       onStage,
       shouldAbort,
+      operator,
     });
 
     // 运行期间工作区被重置：这一轮的结果属于上一个工作区，整轮丢弃（不写操作、不写审计）
@@ -993,6 +1064,9 @@ class ConsoleService {
     if (this.runs.length > 50) this.runs.pop();
     this._persistConsoleState();
     return { ok: true, ...run };
+    } finally {
+      this.audit.actor = previousAuditActor || null;
+    }
   }
 
   _freezeDeferred(runId, d, auditStart, attachments = [], operator = null) {
@@ -1100,8 +1174,27 @@ class ConsoleService {
   }
 
   // ---------- 操作 ----------
-  listOperations({ state = null } = {}) {
-    const all = this.store.listOperations();
+  // 租户隔离：员工只看自己发起的操作；管理员/审计员/设备助手跨租户（后两者需要审批队列）
+  _canSeeAllOperations(role) {
+    return ['管理员', '审计员', '设备助手'].includes(role);
+  }
+
+  _operationVisible(operation, actor, role) {
+    if (!actor || !operation || !operation.createdBy) return true;
+    if (this._canSeeAllOperations(role)) return true;
+    return operation.createdBy === actor;
+  }
+
+  _assertOperationVisible(id, actor, role) {
+    const operation = this.store.getOperation(id);
+    if (!operation || !this._operationVisible(operation, actor, role)) {
+      throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+    }
+    return operation;
+  }
+
+  listOperations({ state = null, actor = null, role = null } = {}) {
+    const all = this.store.listOperations().filter((o) => this._operationVisible(o, actor, role));
     const filtered = state ? all.filter((o) => o.state === state) : all;
     const counts = {};
     for (const o of all) counts[o.state] = (counts[o.state] || 0) + 1;
@@ -1109,9 +1202,8 @@ class ConsoleService {
   }
 
   // 导出已批准操作的正文：导出前重算冻结记录，保证"导出的就是被批准的那一份"
-  getOperationBody(id) {
-    const operation = this.store.getOperation(id);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+  getOperationBody(id, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(id, actor, role);
     if (operation.state === 'frozen') throw new ConsoleError('CONFLICT', '操作尚未批准，不能导出正文', 409);
     if (operation.state === 'rejected' || operation.state === 'expired') {
       throw new ConsoleError('CONFLICT', `操作已${operation.state === 'rejected' ? '拒绝' : '过期'}，不能导出正文`, 409);
@@ -1133,9 +1225,8 @@ class ConsoleService {
 
   // 草稿编辑：改正文 → 重新计算 bodyHash/operationHash → 旧挑战作废 → 必须重新确认
   // 已确认/已执行的操作不能改（否则等于绕过确认），只能新建一条。
-  editOperationBody(id, { body, editor = '用户', note = '' } = {}) {
-    const current = this.store.getOperation(id);
-    if (!current) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+  editOperationBody(id, { body, editor = '用户', note = '', actor = null, role = null } = {}) {
+    const current = this._assertOperationVisible(id, actor, role);
     if (current.state !== 'frozen') {
       throw new ConsoleError('CONFLICT', `操作状态为 ${current.state}，不能再编辑（已确认/已执行的记录只能新建）`, 409);
     }
@@ -1210,9 +1301,8 @@ class ConsoleService {
     };
   }
 
-  listOperationRevisions(id) {
-    const operation = this.store.getOperation(id);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+  listOperationRevisions(id, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(id, actor, role);
     return {
       operationId: id,
       current: {
@@ -1227,9 +1317,8 @@ class ConsoleService {
   }
 
   // 下载已批准操作的附件：先验冻结记录，再验内容哈希
-  getAttachment(id, sha256) {
-    const operation = this.store.getOperation(id);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+  getAttachment(id, sha256, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(id, actor, role);
     if (!['confirmed', 'executing', 'executed', 'failed'].includes(operation.state)) {
       throw new ConsoleError('CONFLICT', '操作尚未批准，不能下载附件', 409);
     }
@@ -1246,9 +1335,8 @@ class ConsoleService {
     return { name: target.name, mime: blob.mime, size: blob.size, content: blob.content };
   }
 
-  getOperation(id) {
-    const operation = this.store.getOperation(id);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+  getOperation(id, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(id, actor, role);
     const meta = this.operationMeta.get(id) || {};
     const events = this.store.listEvents().filter((e) => e.operationId === id);
     const auditFrom = Number.isInteger(meta.auditFrom) ? meta.auditFrom : Math.max(0, this.audit.entries.length - 50);
@@ -1312,18 +1400,16 @@ class ConsoleService {
     };
   }
 
-  rejectOperation(id, { actor = null } = {}) {
-    const operation = this.store.getOperation(id);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+  rejectOperation(id, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(id, actor, role);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能拒绝`, 409);
     const rejected = this.store.setOperationState(id, 'rejected');
     if (actor) this.audit.append('操作拒绝', { operationId: id, actor });
     return { ok: true, operation: this._operationView(rejected) };
   }
 
-  async sendOperation(id) {
-    const operation = this.store.getOperation(id);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${id}`, 404);
+  async sendOperation(id, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(id, actor, role);
     const outbox = this.store.getOutboxByOperation(id);
     if (!outbox) throw new ConsoleError('CONFLICT', '操作还没有 outbox；请先完成确认', 409);
     const sent = await this._sendChecked(operation, outbox.outboxId);
@@ -1350,9 +1436,8 @@ class ConsoleService {
   }
 
   // ---------- WS63 挑战 ----------
-  beginChallenge(operationId) {
-    const operation = this.store.getOperation(operationId);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${operationId}`, 404);
+  beginChallenge(operationId, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(operationId, actor, role);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能确认`, 409);
     const nowSec = this._nowSec();
     for (const c of this.challenges.values()) {
@@ -1456,15 +1541,14 @@ class ConsoleService {
     throw new ConsoleError('FORBIDDEN', `四眼原则：操作由「${operation.createdBy}」发起，不能由本人批准`, 403);
   }
 
-  async decideChallenge(challengeId, decision, { actor = null } = {}) {
+  async decideChallenge(challengeId, decision, { actor = null, role = null } = {}) {
     if (decision !== 'approve' && decision !== 'cancel') {
       throw new ConsoleError('BAD_REQUEST', "decision 必须是 'approve' 或 'cancel'");
     }
     const challenge = this.challenges.get(challengeId);
     if (!challenge) throw new ConsoleError('NOT_FOUND', `挑战不存在：${challengeId}`, 404);
     if (challenge.state !== 'pending') throw new ConsoleError('CONFLICT', `挑战状态 ${challenge.state} 不能决定`, 409);
-    const operation = this.store.getOperation(challenge.operationId);
-    if (!operation) throw new ConsoleError('NOT_FOUND', '操作不存在', 404);
+    const operation = this._assertOperationVisible(challenge.operationId, actor, role);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能确认`, 409);
     if (decision === 'approve') this._assertNotSelfApproval(operation, actor);
 
@@ -1635,9 +1719,8 @@ class ConsoleService {
     return { ok: false, outcome: 'replay', code: 'STATE', message: '重复决定未生效', operation: this._operationView(operation) };
   }
 
-  verifyTamper(operationId) {
-    const operation = this.store.getOperation(operationId);
-    if (!operation) throw new ConsoleError('NOT_FOUND', `操作不存在：${operationId}`, 404);
+  verifyTamper(operationId, { actor = null, role = null } = {}) {
+    const operation = this._assertOperationVisible(operationId, actor, role);
     const tampered = { ...operation, body: `${operation.body}（被改）` };
     return {
       ok: true,
@@ -1709,9 +1792,10 @@ class ConsoleService {
     return result;
   }
 
-  getDevice() {
+  getDevice({ actor = null, role = null } = {}) {
+    const visible = (operationId) => this._operationVisible(this.store.getOperation(operationId), actor, role);
     const pending = [...this.challenges.values()]
-      .filter((c) => c.state === 'pending')
+      .filter((c) => c.state === 'pending' && visible(c.operationId))
       .map((c) => this._challengeView(c));
     return {
       device: {
@@ -1721,7 +1805,9 @@ class ConsoleService {
       },
       pairing: this.pairingCode ? { code: this.pairingCode, note: '确认端配对码（局域网内可见）' } : null,
       pending,
-      history: this.challengeHistory.slice(0, 12),
+      history: this.challengeHistory
+        .filter((h) => !h.operationId || visible(h.operationId))
+        .slice(0, 12),
       lastDecision: this.lastDecision ? {
         challengeId: this.lastDecision.challengeId,
         operationId: this.lastDecision.operationId,
@@ -1742,21 +1828,25 @@ class ConsoleService {
     return matrix;
   }
 
-  getGovernance() {
-    const operations = this.store.listOperations();
+  getGovernance({ actor = null, role = null } = {}) {
+    const canSeeAll = !actor || ['管理员', '审计员'].includes(role);
+    const operations = this.store.listOperations().filter((o) => this._operationVisible(o, actor, role));
     return {
       risk: {
         score: this.risk.score, threshold: this.risk.threshold, frozen: this.risk.frozen,
-        freezeCount: this.risk.freezeCount, events: this.risk.events.slice(-20),
-        reviews: this.risk.reviews.slice(-10),
+        freezeCount: this.risk.freezeCount,
+        events: canSeeAll ? this.risk.events.slice(-20) : [],
+        reviews: canSeeAll ? this.risk.reviews.slice(-10) : [],
       },
       audit: {
         count: this.audit.entries.length, verified: this.audit.verify(),
-        checkpoint: this.audit.checkpoint(), entries: this.audit.entries.slice(-100),
+        checkpoint: this.audit.checkpoint(),
+        entries: canSeeAll ? this.audit.entries.slice(-100) : [],
       },
       events: {
         count: this.store.listEvents().length, verified: this.store.verifyEvents(),
-        checkpoint: this.store.eventCheckpoint(), items: this.store.listEvents().slice(-50),
+        checkpoint: this.store.eventCheckpoint(),
+        items: canSeeAll ? this.store.listEvents().slice(-50) : [],
       },
       policy: this._policyMatrix(),
       tools: this.toolRegistry.publicList(),
@@ -1870,9 +1960,9 @@ class ConsoleService {
     }
   }
 
-  listEmails() {
+  listEmails({ actor = null, role = null } = {}) {
     const operations = this.store.listOperations()
-      .filter((o) => o.protocolAction === 1)
+      .filter((o) => o.protocolAction === 1 && this._operationVisible(o, actor, role))
       .map((o) => this._operationView(o));
     return {
       items: operations,

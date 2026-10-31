@@ -183,25 +183,33 @@ class DocumentStore {
         body TEXT NOT NULL,
         source_path TEXT NOT NULL,
         sha256 TEXT NOT NULL,
-        imported_at TEXT NOT NULL
+        imported_at TEXT NOT NULL,
+        owner TEXT NOT NULL DEFAULT ''
       );
     `);
+    // v0.33 之前导入的资料没有 owner：保留为 ''（旧资料视为共享，避免升级后突然消失）
+    const columns = this.db.prepare('PRAGMA table_info(documents)').all().map((c) => c.name);
+    if (!columns.includes('owner')) {
+      this.db.exec("ALTER TABLE documents ADD COLUMN owner TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   upsert(doc) {
     this.db.prepare(`
-      INSERT INTO documents (doc_id, title, level, body, source_path, sha256, imported_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO documents (doc_id, title, level, body, source_path, sha256, imported_at, owner)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(doc_id) DO UPDATE SET
         title = excluded.title, level = excluded.level, body = excluded.body,
-        source_path = excluded.source_path, sha256 = excluded.sha256, imported_at = excluded.imported_at
-    `).run(doc.id, doc.title, doc.level, doc.body, doc.sourcePath, doc.sha256, doc.importedAt);
+        source_path = excluded.source_path, sha256 = excluded.sha256,
+        imported_at = excluded.imported_at, owner = excluded.owner
+    `).run(doc.id, doc.title, doc.level, doc.body, doc.sourcePath, doc.sha256, doc.importedAt, doc.owner || '');
     return doc;
   }
 
   list() {
     return this.db.prepare(`
-      SELECT doc_id, title, level, body, source_path, sha256, imported_at FROM documents ORDER BY imported_at
+      SELECT doc_id, title, level, body, source_path, sha256, imported_at, owner
+        FROM documents ORDER BY imported_at
     `).all().map((row) => ({
       id: row.doc_id,
       title: row.title,
@@ -210,6 +218,7 @@ class DocumentStore {
       sourcePath: row.source_path,
       sha256: row.sha256,
       importedAt: row.imported_at,
+      owner: row.owner || '',
     }));
   }
 
@@ -219,6 +228,7 @@ class DocumentStore {
     return {
       id: row.doc_id, title: row.title, level: row.level, body: row.body,
       sourcePath: row.source_path, sha256: row.sha256, importedAt: row.imported_at,
+      owner: row.owner || '',
     };
   }
 
@@ -234,20 +244,26 @@ class DocumentStore {
 
 // 导入一个文件：id 由内容哈希派生，同一份文件重复导入不会产生副本
 // 密级必须由导入的人显式指定——默认成"内部"会把机密文档静默降级
-function importBuffer(store, { filename, buffer, level, now = () => new Date().toISOString() } = {}) {
+function importBuffer(store, {
+  filename, buffer, level, owner = '', now = () => new Date().toISOString(),
+} = {}) {
   const safeLevel = normalizeLevel(level);
   if (!safeLevel) throw new Error(`密级必须是 ${LEVELS.join(' / ')}`);
   if (!Buffer.isBuffer(buffer)) throw new Error('缺少文件内容');
   const { title, body } = parseBuffer(buffer, filename);
   const hash = sha256Hex(buffer);
+  const tenant = String(owner || '').trim();
+  // 租户隔离：同一份文件被不同用户导入 → 不同 ID，互不覆盖
+  const idHash = tenant ? sha256Hex(`${tenant}\n${hash}`) : hash;
   const doc = {
-    id: `IMP-${hash.slice(0, 8)}`,
+    id: `IMP-${idHash.slice(0, 8)}`,
     title,
     level: safeLevel,
     body,
     sourcePath: String(filename || ''),
     sha256: hash,
     importedAt: now(),
+    owner: tenant,
   };
   return store.upsert(doc);
 }

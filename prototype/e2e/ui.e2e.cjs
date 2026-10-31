@@ -164,6 +164,51 @@ test('UI 两步验证：启用 → 登出 → 无码被拒 → 动态码登录',
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });
 
+test('UI 租户隔离：alice 导入的资料 bob 看不到', { timeout: 90000 }, async (t) => {
+  const mk = (username) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role: '员工', salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('alice'), mk('bob')] });
+  const started = await startServer({ port: 0, auth, documentsStore: new DocumentStore(':memory:') });
+  const browser = await launch(t);
+  t.after(() => started.close());
+  const page = await browser.newPage();
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+
+  const login = async (name) => {
+    await page.goto(started.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForURL(/\/login\.html/);
+    await page.fill('#username', name);
+    await page.fill('#password', 'password123');
+    await page.click('#submit');
+    await page.waitForSelector('#current-user:not([hidden])');
+  };
+
+  await login('alice');
+  await page.goto(`${started.url}/#/files`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#doc-file');
+  await page.setInputFiles('#doc-file', {
+    name: 'tenant-a.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('租户A私有资料\n只有 alice 可见', 'utf8'),
+  });
+  await page.selectOption('#doc-level', '内部');
+  await page.click('#doc-import');
+  await page.waitForFunction(() => document.body.innerText.includes('租户A私有资料'), null, { timeout: 15000 });
+
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await login('bob');
+  await page.goto(`${started.url}/#/files`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#doc-file');
+  await page.waitForFunction(() => document.body.innerText.includes('共享'), null, { timeout: 15000 });
+  assert.ok(!(await page.textContent('body')).includes('租户A私有资料'), 'bob 不能看到 alice 的资料');
+
+  assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
+});
+
 test('UI 手机确认：员工发起外发 → 手机配对 → 批准 → 控制台已执行', { timeout: 90000 }, async (t) => {
   const { salt, hash } = hashPassword('password123');
   const auth = new AuthService({ users: [{ username: 'alice', role: '员工', salt, hash }] });

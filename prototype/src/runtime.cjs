@@ -103,7 +103,7 @@ class AgentRuntime {
     return snap;
   }
 
-  async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null, deferActions = null, onDeferred = null, onStage = null, shouldAbort = null } = {}) {
+  async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null, deferActions = null, onDeferred = null, onStage = null, shouldAbort = null, operator = null } = {}) {
     let role = requestedRole || '员工';
     // —— Agent 身份校验（v0.9）：清单可信 → 角色一致 → 令牌绑定该 Agent ——
     if (agent) {
@@ -228,7 +228,7 @@ class AgentRuntime {
         }
         try {
           if (onStage) onStage('执行', { step: i + 1, total: steps.length });
-          lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred }));
+          lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred, operator }));
         } catch (err) {
           const fault = classifyModelFault(err);
           const notExecuted = steps.length - i - 1;
@@ -253,6 +253,10 @@ class AgentRuntime {
 
   async execStep(step, n, ctx) {
     const { action, args } = step;
+    // 租户可见性：管理员/审计员跨租户；其余只看自己的知识条目（无 owner 的旧条目视为共享）
+    const tenantVisible = (doc) => !doc.owner
+      || doc.owner === ctx.operator
+      || ['管理员', '审计员'].includes(ctx.role);
     this.audit.append('计划步骤', { n, action, args, fromDoc: step.fromDoc || null });
     if (this.toolRegistry && !this.toolRegistry.has(action)) {
       this.risk.add(15, `工具未注册 ${action}`);
@@ -322,7 +326,7 @@ class AgentRuntime {
       const doc = getDocumentById(args.id);
       if (!doc) return `  [${n}] readDoc(${args.id}) ⛔ 文档不存在`;
       const san = this._sanitize(doc.body);
-      this.knowledge[doc.id] = { ...doc, cleaned: san.cleaned, tainted: !san.safe };
+      this.knowledge[doc.id] = { ...doc, owner: ctx.operator || '', cleaned: san.cleaned, tainted: !san.safe };
       // 读入事实先入审计（即使内容被隔离，调用链也要有"读过什么"的证据）
       this.audit.append('读入文档', { docId: doc.id, level: doc.level, tainted: !san.safe });
       if (!san.safe) {
@@ -338,7 +342,7 @@ class AgentRuntime {
       const img = IMAGES[args.id];
       if (!img) return `  [${n}] recognizeImage(${args.id}) ⛔ 图片不存在`;
       const san = this._sanitize(img.ocrText);
-      this.knowledge[`img_${img.id}`] = { id: `img_${img.id}`, title: `${img.title}（识别稿）`, level: img.level, body: san.cleaned, cleaned: san.cleaned, sourceIds: [img.id], tainted: !san.safe, ocr: true };
+      this.knowledge[`img_${img.id}`] = { id: `img_${img.id}`, title: `${img.title}（识别稿）`, level: img.level, body: san.cleaned, cleaned: san.cleaned, sourceIds: [img.id], tainted: !san.safe, ocr: true, owner: ctx.operator || '' };
       // 识别事实先入审计（即使文本被隔离）
       this.audit.append('图片识别', { n, imageId: img.id, level: img.level, tainted: !san.safe });
       if (!san.safe) {
@@ -365,7 +369,7 @@ class AgentRuntime {
       }
     }
     if (action === 'shareScreen') {
-      const conf = Object.values(this.knowledge).find((d) => d.level === '机密');
+      const conf = Object.values(this.knowledge).find((d) => d.level === '机密' && tenantVisible(d));
       if (conf) {
         this.risk.add(20, `禁止共享：知识库存在机密材料「${conf.title}」`);
         this.audit.append('共享拒绝', { n, conflicting: conf.id, reason: '知识库存在机密材料' });
@@ -402,7 +406,7 @@ class AgentRuntime {
 
     // —— 闸5：输出检测（出站内容→机密碎片比对 / 不合规话术 / PII 兜底）——
     if (payload !== null && !this._ablate('gate5')) {
-      const confDocs = Object.values(this.knowledge).filter((d) => d.level === '机密');
+      const confDocs = Object.values(this.knowledge).filter((d) => d.level === '机密' && tenantVisible(d));
       const oc = this.perf.measure('闸5 输出检测', () =>
         checkAgentOutput(payload, {
           level: '外发', confidentialDocs: confDocs,
@@ -530,7 +534,7 @@ class AgentRuntime {
         } else {
           const id = `draft_${doc.id}`;
           this.knowledge[id] = { id, title: `${doc.title}（正式稿）`, level: doc.level,
-            body: oc.content, cleaned: oc.content, sourceIds: doc.sourceIds || [doc.id], generated: true };
+            body: oc.content, cleaned: oc.content, sourceIds: doc.sourceIds || [doc.id], generated: true, owner: ctx.operator || '' };
           this.audit.append('生成稿', { id, sourceIds: this.knowledge[id].sourceIds, level: doc.level });
           effect = `生成正式稿 ${id}《${doc.title}》`;
         }
@@ -563,7 +567,7 @@ class AgentRuntime {
         effect = `录音 ${args.id} 不存在`;
       } else {
         const san = this._sanitize(a.body);
-        this.knowledge[`tr_${a.id}`] = { id: `tr_${a.id}`, title: `${a.title}（转写稿）`, level: a.level, body: san.cleaned, cleaned: san.cleaned, sourceIds: [a.id], tainted: !san.safe, transcript: true };
+        this.knowledge[`tr_${a.id}`] = { id: `tr_${a.id}`, title: `${a.title}（转写稿）`, level: a.level, body: san.cleaned, cleaned: san.cleaned, sourceIds: [a.id], tainted: !san.safe, transcript: true, owner: ctx.operator || '' };
         if (!san.safe) {
           this.risk.add(25, `转写文本检出注入并隔离：${san.reasons.join('、')}`);
           this.audit.append('闸1触发', { n, source: `转写 ${a.id}`, level: a.level, reasons: san.reasons });

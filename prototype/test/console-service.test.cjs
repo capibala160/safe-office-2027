@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.32.0');
+  assert.equal(bootstrap.state.version, '0.33.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -98,13 +98,15 @@ test('四眼原则：发起人不能批准自己的操作，换人后可批准',
 
   const challenge = service.beginChallenge(op.operationId);
   await assert.rejects(
-    () => service.decideChallenge(challenge.challengeId, 'approve', { actor: 'alice' }),
+    () => service.decideChallenge(challenge.challengeId, 'approve', { actor: 'alice', role: '员工' }),
     /四眼原则/,
   );
   assert.equal(service.store.getOperation(op.operationId).state, 'frozen', '被拒后操作仍冻结');
   assert.equal(service.mailer.calls.length, 0);
 
-  const approved = await service.decideChallenge(challenge.challengeId, 'approve', { actor: 'bob' });
+  const approved = await service.decideChallenge(challenge.challengeId, 'approve', {
+    actor: 'bob', role: '设备助手',
+  });
   assert.equal(approved.outcome, 'approved');
   assert.equal(approved.operation.state, 'executed');
   assert.ok(service.audit.entries.some((e) => e.kind === '四眼原则拒绝'));

@@ -208,6 +208,14 @@ function clearSessionCookie(req, res) {
   setSessionCookie(req, res, '', 0);
 }
 
+// 租户上下文：服务层用它过滤文档/操作/运行历史；未启用登录时 actor=null（保持旧行为）
+function userContext(req) {
+  return {
+    actor: req.user ? req.user.username : null,
+    role: req.user ? req.user.role : null,
+  };
+}
+
 // 登录用户只能用自己的角色执行命令，不能靠改 body 提权
 function applyUserToCommand(req, body) {
   if (!req.user) return;
@@ -248,7 +256,10 @@ function createConsoleServer({
   const ROLE_ADMIN = new Set(['管理员']);
   const ROLE_REVIEW = new Set(['管理员', '审计员']);
   const ROLE_DOC_READ = new Set(['员工', '管理员', '审计员']);
+  const ROLE_DOC_WRITE = new Set(['员工', '管理员']);
   const ROLE_STAFF = ROLE_DOC_READ;
+  // 设备助手需要看到待审批队列与操作详情（但不读文档正文/审计）
+  const ROLE_OP_READ = new Set(['员工', '管理员', '审计员', '设备助手']);
   const ROLE_AUDIT = new Set(['管理员', '审计员']);
   function requireRole(req, roles, action) {
     if (!auth) return; // 未启用登录：保持本地演示行为
@@ -440,10 +451,10 @@ function createConsoleServer({
         });
       }
       if (pathname === '/api/bootstrap' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getBootstrap() });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getBootstrap(userContext(req)) });
       }
       if (pathname === '/api/state' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getState() });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getState(userContext(req)) });
       }
       if (pathname === '/api/commands' && method === 'POST') {
         const body = await readJson(req, commandBodyLimit);
@@ -451,7 +462,7 @@ function createConsoleServer({
         return sendJson(res, 200, await service.runCommand(body));
       }
       if (pathname === '/api/commands' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, items: service.runs.slice(0, 50) });
+        return sendJson(res, 200, { ok: true, items: service.listRuns(userContext(req)).slice(0, 50) });
       }
       // 异步任务：起跑即返回 runId；轮询进度 / 取消
       if (pathname === '/api/commands/async' && method === 'POST') {
@@ -461,15 +472,15 @@ function createConsoleServer({
       }
       const runMatch = pathname.match(/^\/api\/commands\/([^/]+)$/);
       if (runMatch && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.getRun(decodeURIComponent(runMatch[1])) });
+        return sendJson(res, 200, { ok: true, ...service.getRun(decodeURIComponent(runMatch[1]), userContext(req)) });
       }
       const runCancel = pathname.match(/^\/api\/commands\/([^/]+)\/cancel$/);
       if (runCancel && method === 'POST') {
-        return sendJson(res, 200, service.cancelRun(decodeURIComponent(runCancel[1])));
+        return sendJson(res, 200, service.cancelRun(decodeURIComponent(runCancel[1]), userContext(req)));
       }
       // 浏览器上传导入：请求体为 base64，服务端做扩展名白名单 + 魔数/编码嗅探 + 大小上限
       if (pathname === '/api/documents/import' && method === 'POST') {
-        requireRole(req, ROLE_ADMIN, '导入资料');
+        requireRole(req, ROLE_DOC_WRITE, '导入资料');
         if (!service.documentsStore) {
           throw new ConsoleError('CONFLICT', '文档库未启用：请用 npm start 启动（内存模式不接导入）', 409);
         }
@@ -487,9 +498,14 @@ function createConsoleServer({
             const scan = scanAttachment(buffer, { filename });
             if (!scan.ok) throw new ConsoleError('BAD_REQUEST', scan.reason);
           }
-          const doc = importBuffer(service.documentsStore, { filename, buffer, level: body.level });
+          const doc = importBuffer(service.documentsStore, {
+            filename, buffer, level: body.level,
+            owner: req.user ? req.user.username : '',
+          });
           // 立即并入文档视图，不用重启
-          registerDocuments([{ id: doc.id, title: doc.title, level: doc.level, body: doc.body }]);
+          registerDocuments([{
+            id: doc.id, title: doc.title, level: doc.level, body: doc.body, owner: doc.owner || '',
+          }]);
           return sendJson(res, 200, {
             ok: true,
             document: { id: doc.id, title: doc.title, level: doc.level, bytes: Buffer.byteLength(doc.body, 'utf8') },
@@ -500,16 +516,16 @@ function createConsoleServer({
       }
       if (pathname === '/api/documents' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取文档列表');
-        return sendJson(res, 200, { ok: true, items: service.listDocuments() });
+        return sendJson(res, 200, { ok: true, items: service.listDocuments(userContext(req)) });
       }
       const docMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
       if (docMatch) requireRole(req, ROLE_STAFF, '读取文档');
       if (docMatch && method === 'GET') {
-        return sendJson(res, 200, { ok: true, document: service.getDocument(decodeURIComponent(docMatch[1])) });
+        return sendJson(res, 200, { ok: true, document: service.getDocument(decodeURIComponent(docMatch[1]), userContext(req)) });
       }
       if (pathname === '/api/emails' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取邮件列表');
-        return sendJson(res, 200, { ok: true, ...service.listEmails() });
+        return sendJson(res, 200, { ok: true, ...service.listEmails(userContext(req)) });
       }
       const outboxMatch = pathname.match(/^\/api\/outbox\/([^/]+)\/reconcile$/);
       if (outboxMatch) requireRole(req, ROLE_STAFF, '核对发件');
@@ -519,62 +535,62 @@ function createConsoleServer({
       }
       if (pathname === '/api/calendar' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取日历');
-        return sendJson(res, 200, { ok: true, items: service.listCalendar() });
+        return sendJson(res, 200, { ok: true, items: service.listCalendar(userContext(req)) });
       }
       if (pathname === '/api/contacts' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取通讯录');
         return sendJson(res, 200, { ok: true, items: service.listContacts() });
       }
       if (pathname === '/api/operations' && method === 'GET') {
-        requireRole(req, ROLE_STAFF, '读取操作列表');
-        return sendJson(res, 200, { ok: true, ...service.listOperations({ state: query.get('state') || null }) });
+        requireRole(req, ROLE_OP_READ, '读取操作列表');
+        return sendJson(res, 200, { ok: true, ...service.listOperations({ state: query.get('state') || null, ...userContext(req) }) });
       }
       const opMatch = pathname.match(/^\/api\/operations\/([^/]+)$/);
-      if (opMatch) requireRole(req, ROLE_STAFF, '读取操作详情');
+      if (opMatch) requireRole(req, ROLE_OP_READ, '读取操作详情');
       if (opMatch && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.getOperation(decodeURIComponent(opMatch[1])) });
+        return sendJson(res, 200, { ok: true, ...service.getOperation(decodeURIComponent(opMatch[1]), userContext(req)) });
       }
       const opBody = pathname.match(/^\/api\/operations\/([^/]+)\/body$/);
       if (opBody) requireRole(req, ROLE_DOC_READ, '读取操作正文');
       if (opBody && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.getOperationBody(decodeURIComponent(opBody[1])) });
+        return sendJson(res, 200, { ok: true, ...service.getOperationBody(decodeURIComponent(opBody[1]), userContext(req)) });
       }
       if (opBody && method === 'POST') {
         const body = await readJson(req);
-        return sendJson(res, 200, service.editOperationBody(decodeURIComponent(opBody[1]), body));
+        return sendJson(res, 200, service.editOperationBody(decodeURIComponent(opBody[1]), { ...body, ...userContext(req) }));
       }
       const opRevisions = pathname.match(/^\/api\/operations\/([^/]+)\/revisions$/);
       if (opRevisions) requireRole(req, ROLE_DOC_READ, '读取操作历史');
       if (opRevisions && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.listOperationRevisions(decodeURIComponent(opRevisions[1])) });
+        return sendJson(res, 200, { ok: true, ...service.listOperationRevisions(decodeURIComponent(opRevisions[1]), userContext(req)) });
       }
       const opAttachment = pathname.match(/^\/api\/operations\/([^/]+)\/attachments\/([^/]+)$/);
       if (opAttachment) requireRole(req, ROLE_DOC_READ, '下载附件');
       if (opAttachment && method === 'GET') {
         const file = service.getAttachment(
-          decodeURIComponent(opAttachment[1]), decodeURIComponent(opAttachment[2]),
+          decodeURIComponent(opAttachment[1]), decodeURIComponent(opAttachment[2]), userContext(req),
         );
         return sendBinary(res, file.content, { filename: file.name, mime: file.mime });
       }
       const opChallenge = pathname.match(/^\/api\/operations\/([^/]+)\/challenge$/);
       if (opChallenge) requireRole(req, ROLE_APPROVE, '发起确认');
       if (opChallenge && method === 'POST') {
-        return sendJson(res, 200, { ok: true, challenge: service.beginChallenge(decodeURIComponent(opChallenge[1])) });
+        return sendJson(res, 200, { ok: true, challenge: service.beginChallenge(decodeURIComponent(opChallenge[1]), userContext(req)) });
       }
       const opReject = pathname.match(/^\/api\/operations\/([^/]+)\/reject$/);
       if (opReject) requireRole(req, ROLE_APPROVE, '驳回操作');
       if (opReject && method === 'POST') {
-        return sendJson(res, 200, service.rejectOperation(decodeURIComponent(opReject[1]), { actor: req.user ? req.user.username : null }));
+        return sendJson(res, 200, service.rejectOperation(decodeURIComponent(opReject[1]), userContext(req)));
       }
       const opTamper = pathname.match(/^\/api\/operations\/([^/]+)\/verify-tamper$/);
       if (opTamper) requireRole(req, ROLE_APPROVE, '校验操作');
       if (opTamper && method === 'POST') {
-        return sendJson(res, 200, service.verifyTamper(decodeURIComponent(opTamper[1])));
+        return sendJson(res, 200, service.verifyTamper(decodeURIComponent(opTamper[1]), userContext(req)));
       }
       const opSend = pathname.match(/^\/api\/operations\/([^/]+)\/send$/);
       if (opSend) requireRole(req, ROLE_APPROVE, '执行操作');
       if (opSend && method === 'POST') {
-        return sendJson(res, 200, await service.sendOperation(decodeURIComponent(opSend[1])));
+        return sendJson(res, 200, await service.sendOperation(decodeURIComponent(opSend[1]), userContext(req)));
       }
       if (pathname === '/api/rollback' && method === 'POST') {
         requireRole(req, ROLE_ADMIN, '回滚');
@@ -582,7 +598,7 @@ function createConsoleServer({
         return sendJson(res, 200, service.rollback(body.seq));
       }
       if (pathname === '/api/device' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.getDevice() });
+        return sendJson(res, 200, { ok: true, ...service.getDevice(userContext(req)) });
       }
       if (pathname === '/api/phone/pair' && method === 'POST') {
         if (!service.pairingCode) {
@@ -620,9 +636,7 @@ function createConsoleServer({
           throw new ConsoleError('CONFLICT', '已启用真实动作，虚拟设备批准入口已关闭；请用手机/WS63 确认', 409);
         }
         const body = await readJson(req);
-        return sendJson(res, 200, await service.decideChallenge(decodeURIComponent(decideMatch[1]), body.decision, {
-          actor: req.user ? req.user.username : null,
-        }));
+        return sendJson(res, 200, await service.decideChallenge(decodeURIComponent(decideMatch[1]), body.decision, userContext(req)));
       }
       const expireMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/expire$/);
       if (expireMatch) requireRole(req, ROLE_DEVICE, '模拟确认超时');
@@ -643,7 +657,7 @@ function createConsoleServer({
       }
       if (pathname === '/api/governance' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取治理数据');
-        return sendJson(res, 200, { ok: true, ...service.getGovernance() });
+        return sendJson(res, 200, { ok: true, ...service.getGovernance(userContext(req)) });
       }
       if (pathname === '/api/governance/review' && method === 'POST') {
         requireRole(req, ROLE_REVIEW, '风险复核');
