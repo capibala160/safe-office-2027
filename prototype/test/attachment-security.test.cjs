@@ -7,8 +7,9 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
+const { DatabaseSync } = require('node:sqlite');
 const { scanAttachment, detectKind } = require('../src/file-scan.cjs');
-const { BlobStore } = require('../src/blob-store.cjs');
+const { BlobStore, sha256Hex } = require('../src/blob-store.cjs');
 const { ConsoleService } = require('../src/console-service.cjs');
 
 test('扫描：文本/PDF/ZIP 放行，可执行扩展名与 PE 魔数拒绝', () => {
@@ -67,6 +68,39 @@ test('加密标记：未开启加密时，SFE1 开头的普通文件不能被误
     assert.equal(got.content.toString('utf8'), plain.toString('utf8'), '应按明文原样返回');
   } finally {
     store.close();
+  }
+});
+
+test('旧库迁移：SFE1 明文不被标密文，SFE1 密文仍标 1', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-blob-migrate-'));
+  const file = path.join(dir, 'blobs.db');
+  const plain = Buffer.from('SFE1 this is plain text from an old database');
+  const plainHash = sha256Hex(plain);
+  const cipher = Buffer.concat([Buffer.from('SFE1'), crypto.randomBytes(48)]);
+  const cipherPlainHash = sha256Hex(Buffer.from('the plaintext behind the cipher'));
+  let store = null;
+  try {
+    const db = new DatabaseSync(file);
+    db.exec(`
+      CREATE TABLE blobs (
+        sha256 TEXT PRIMARY KEY, name TEXT NOT NULL, mime TEXT NOT NULL,
+        size INTEGER NOT NULL, content BLOB NOT NULL, created_at TEXT NOT NULL
+      );
+    `);
+    const insert = db.prepare('INSERT INTO blobs (sha256, name, mime, size, content, created_at) VALUES (?,?,?,?,?,?)');
+    insert.run(plainHash, 'plain.txt', 'text/plain', plain.length, plain, '2026-01-01T00:00:00.000Z');
+    insert.run(cipherPlainHash, 'secret.txt', 'text/plain', 31, cipher, '2026-01-01T00:00:00.000Z');
+    db.close();
+
+    store = new BlobStore(file);
+    const rows = store.db.prepare('SELECT sha256, encrypted FROM blobs').all();
+    const flags = Object.fromEntries(rows.map((r) => [r.sha256, Number(r.encrypted)]));
+    assert.equal(flags[plainHash], 0, '内容哈希等于明文哈希 → 明文');
+    assert.equal(flags[cipherPlainHash], 1, '内容哈希对不上 → 旧密文');
+    assert.equal(store.get(plainHash).content.toString('utf8'), plain.toString('utf8'), '旧明文仍可读');
+  } finally {
+    if (store) store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

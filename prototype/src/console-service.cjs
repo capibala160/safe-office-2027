@@ -425,7 +425,17 @@ class ConsoleService {
   _restoreAudit() {
     this._auditJsonl = true;
     if (!this.auditFile) return new AuditLog();
-    if (!fs.existsSync(this.auditFile)) return new AuditLog();
+    if (!fs.existsSync(this.auditFile)) {
+      // 首次启动：日志和检查点都不存在，属正常。
+      // 历史日志丢失：日志没了但检查点还在——必须报警并隔离检查点，不能当首次启动。
+      const checkpointLeft = [this.auditCheckpointFile, this.auditTenantCheckpointFile]
+        .some((f) => f && fs.existsSync(f));
+      if (checkpointLeft) {
+        this._auditRestoreError = '审计日志文件缺失（检查点仍在）';
+        this._quarantineAudit(this._auditRestoreError);
+      }
+      return new AuditLog();
+    }
     if (!fs.existsSync(this.auditCheckpointFile)) {
       // 有链无检查点 = 检查点被删；不能拿链自带的 head 自证
       this._auditRestoreError = '检查点文件缺失';
@@ -2828,6 +2838,12 @@ class ConsoleService {
     // close() 关掉了自带的附件库；重置后要重新建一个空的
     if (this._ownsBlobStore) this.blobStore = new BlobStore(':memory:', { key: this.blobKey });
     this._clearPersistentFiles();
+    // 重置是显式清空工作区：恢复错误/隔离/停写状态一并清掉，重新开始
+    this._auditRestoreError = null;
+    this._auditQuarantine = null;
+    this.auditRestore = null;
+    this._auditPersistBlocked = false;
+    this.auditPersist = { enabled: !!this.auditFile, ok: true, error: null };
     this.seq = 0;
     this.agentSeq = 0;
     this.runs = [];
@@ -2841,7 +2857,7 @@ class ConsoleService {
   _clearPersistentFiles() {
     if (this.storeFile === ':memory:') return;
     const files = [this.storeFile, `${this.storeFile}-wal`, `${this.storeFile}-shm`];
-    if (this.auditFile) files.push(this.auditFile, this.auditCheckpointFile);
+    if (this.auditFile) files.push(this.auditFile, this.auditCheckpointFile, this.auditTenantCheckpointFile);
     for (const file of files) {
       try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
     }

@@ -8,6 +8,35 @@ const path = require('node:path');
 const { AuditLog } = require('../src/governance.cjs');
 const { ConsoleService } = require('../src/console-service.cjs');
 
+test('审计日志缺失但检查点仍在：报警并隔离检查点；首次启动不报警', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-audit-missing-'));
+  const auditFile = path.join(dir, 'audit.jsonl');
+  const checkpointFile = path.join(dir, 'audit.head');
+  let service = null;
+  let first = null;
+  try {
+    fs.writeFileSync(checkpointFile, JSON.stringify({ count: 2, head: 'deadbeef' }));
+    service = new ConsoleService({ auditFile, auditCheckpointFile: checkpointFile });
+    const state = service.getState();
+    assert.ok(state.audit.restoreError, '日志缺失但检查点存在必须报警');
+    assert.equal(state.audit.verified, false);
+    const isolated = fs.readdirSync(dir).find((f) => f.startsWith('audit.head.corrupt-'));
+    assert.ok(isolated, '旧检查点必须隔离保留');
+
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-audit-first-'));
+    try {
+      first = new ConsoleService({ auditFile: path.join(dir2, 'audit.jsonl') });
+      assert.equal(first.getState().audit.restoreError, null, '首次启动不应报警');
+    } finally {
+      if (first) { first.close(); first = null; }
+      fs.rmSync(dir2, { recursive: true, force: true });
+    }
+  } finally {
+    if (service) { try { service.close(); } catch { /* ignore */ } }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('审计恢复失败：restoreError 保留、原文件移入 .corrupt-*、关闭后仍可取证', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-audit-restore-'));
   const auditFile = path.join(dir, 'audit.jsonl');

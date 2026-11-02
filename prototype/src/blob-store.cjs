@@ -54,7 +54,17 @@ class BlobStore {
     const columns = this.db.prepare('PRAGMA table_info(blobs)').all().map((c) => c.name);
     if (!columns.includes('encrypted')) {
       this.db.exec("ALTER TABLE blobs ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0");
-      this.db.exec("UPDATE blobs SET encrypted = 1 WHERE substr(content, 1, 4) = X'53464531'");
+      // 旧库迁移：sha256 列存的是明文哈希。若内容哈希 == 明文哈希，说明这是
+      // 以 SFE1 开头的普通文件，不能标成密文；只有哈希对不上且带 SFE1 才判密文。
+      const rows = this.db.prepare(
+        "SELECT sha256, content FROM blobs WHERE substr(content, 1, 4) = X'53464531'",
+      ).all();
+      const update = this.db.prepare('UPDATE blobs SET encrypted = ? WHERE sha256 = ?');
+      for (const row of rows) {
+        const contentHash = sha256Hex(Buffer.from(row.content));
+        const isPlain = contentHash === String(row.sha256).toLowerCase();
+        update.run(isPlain ? 0 : 1, row.sha256);
+      }
     }
   }
 

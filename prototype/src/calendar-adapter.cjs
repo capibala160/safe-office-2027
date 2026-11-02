@@ -37,30 +37,41 @@ function validYmd(year, month, day) {
     && probe.getUTCDate() === day;
 }
 
+// 只接受明确支持的格式：YYYY-MM-DD[(T| )HH:mm[:ss][.SSS]][Z|±HH:mm]
+// 其他格式（2027/02/30、2027-2-30 等）一律拒绝，不能交给 new Date 猜。
+const WHEN_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
 function parseWhen(at) {
   if (at instanceof Date) return Number.isNaN(at.getTime()) ? null : new Date(at.getTime());
   const src = String(at === undefined || at === null ? '' : at).trim();
   if (!src) return null;
-  // 先严格校验年月日，避免 new Date 把 2027-02-30 静默滚到 3 月 2 日
-  const parts = src.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ]|$)/);
-  if (parts) {
-    const year = Number(parts[1]);
-    const month = Number(parts[2]);
-    const day = Number(parts[3]);
-    if (!validYmd(year, month, day)) return null;
-    const local = src.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
-    if (local) {
-      const hour = Number(local[4]);
-      const minute = Number(local[5]);
-      const second = local[6] ? Number(local[6]) : 0;
-      if (hour > 23 || minute > 59 || second > 59) return null;
-      const date = new Date(2000, 0, 1, hour, minute, second);
-      date.setFullYear(year, month - 1, day);
-      return date;
+  const m = src.match(WHEN_RE);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (!validYmd(year, month, day)) return null;
+
+  // 带时间
+  if (m[4] !== undefined) {
+    const hour = Number(m[4]);
+    const minute = Number(m[5]);
+    const second = m[6] ? Number(m[6]) : 0;
+    if (hour > 23 || minute > 59 || second > 59) return null;
+    if (m[8]) {
+      // 带时区：格式已严格限定，交给 Date 做时区换算；再确认解析结果存在
+      const zoned = new Date(src);
+      return Number.isNaN(zoned.getTime()) ? null : zoned;
     }
+    const date = new Date(2000, 0, 1, hour, minute, second);
+    date.setFullYear(year, month - 1, day);
+    return date;
   }
-  const date = new Date(src);
-  return Number.isNaN(date.getTime()) ? null : date;
+
+  // 只有日期：按本机时区 00:00
+  const date = new Date(2000, 0, 1, 0, 0, 0);
+  date.setFullYear(year, month - 1, day);
+  return date;
 }
 
 function buildIcs({ title, at, id = '', description = '', now = new Date() } = {}) {
