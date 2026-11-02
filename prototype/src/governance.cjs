@@ -82,7 +82,8 @@ class AuditLog {
     this.entries = [];
     this.prevHash = 'GENESIS';
     this.onAppend = onAppend;
-    this.actor = null; // 当前登录用户；由控制台在命令执行期间设置
+    this.actor = null; // 兼容旧调用；控制台用 actorProvider 读请求级上下文
+    this.actorProvider = null; // 异步上下文（AsyncLocalStorage）优先，避免并发串号
   }
   append(kind, detail) {
     const rec = {
@@ -93,7 +94,8 @@ class AuditLog {
       prevHash: this.prevHash,
     };
     rec.detail = structuredClone(detail);
-    if (this.actor) rec.actor = String(this.actor);
+    const actor = this.actorProvider ? this.actorProvider() : this.actor;
+    if (actor) rec.actor = String(actor);
     rec.hash = crypto.createHash('sha256').update(JSON.stringify(rec)).digest('hex');
     this.prevHash = rec.hash;
     this.entries.push(rec);

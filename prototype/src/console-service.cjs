@@ -8,6 +8,7 @@
 //   边界：业务动作全部模拟；WS63 是虚拟设备；仅本机演示。
 // ============================================================
 const crypto = require('node:crypto');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const fs = require('node:fs');
 const path = require('node:path');
 const { PolicyEngine, AuditLog, RiskMeter, signCheckpoint, verifyCheckpoint } = require('./governance.cjs');
@@ -128,6 +129,7 @@ class ConsoleService {
     blobKey = process.env.SAFE_OFFICE_BLOB_KEY || null,
   } = {}) {
     this.now = now;
+    this._auditActorStorage = new AsyncLocalStorage();
     this.pairingCode = pairingCode ? String(pairingCode) : null;
     this.lastPhoneResult = null;
     // 模型与持久化：默认全内存（测试/演示不变）；给了路径才落盘
@@ -213,6 +215,12 @@ class ConsoleService {
     if (this.bouncePoller) this.bouncePoller.stop();
   }
 
+  // 请求级审计身份：用 AsyncLocalStorage，不能写在共享的 audit.actor 上，
+  // 否则并发请求（如命令执行 + 退信轮询）会互相串号，且结束后残留错误身份。
+  _withAuditActor(actor, fn) {
+    return this._auditActorStorage.run(actor || null, fn);
+  }
+
   async pollBounceNow({ by = null } = {}) {
     if (!this.bouncePoller) {
       throw new ConsoleError(
@@ -221,20 +229,17 @@ class ConsoleService {
         409,
       );
     }
-    const previousActor = this.audit.actor;
-    this.audit.actor = by || null;
-    try {
+    return this._withAuditActor(by, async () => {
       this.audit.append('IMAP 手动轮询', { mailbox: this.bouncePoller.config.mailbox });
       const result = await this.bouncePoller.poll();
       return { ok: true, result, state: this.bouncePoller.state };
-    } finally {
-      this.audit.actor = previousActor || null;
-    }
+    });
   }
 
   _initWorkspace() {
     this.policy = new PolicyEngine();
     this.audit = this._restoreAudit();
+    this.audit.actorProvider = () => this._auditActorStorage.getStore() || null;
     this._loadTenantCheckpoints();
     this.audit.onAppend = (rec) => this._appendAudit(rec);
     // 导入的真实资料并入文档视图（样例文档保持静态）
@@ -897,16 +902,12 @@ class ConsoleService {
         'FORBIDDEN', `角色「${granteeRole}」无权读取${doc.level}级文档，共享不能绕过密级`, 403,
       );
     }
-    const previousActor = this.audit.actor;
-    this.audit.actor = actor || null;
-    try {
+    this._withAuditActor(actor, () => {
       this.documentsStore.share(doc.id, target, actor || '');
       this.audit.append('文档共享', {
         docId: doc.id, owner: doc.owner || '', grantee: target, granteeRole, level: doc.level,
       });
-    } finally {
-      this.audit.actor = previousActor || null;
-    }
+    });
     return {
       document: { id: doc.id, title: doc.title, level: doc.level, owner: doc.owner || '' },
       shares: this.documentsStore.listShares(doc.id),
@@ -923,15 +924,11 @@ class ConsoleService {
     // 撤销后对方已读进知识库的副本一并清除（含由该文档派生的摘要/正式稿），
     // 否则"撤销"只是挡住列表，正文仍能从这里读到。
     const purged = this._purgeKnowledgeFor(doc.id, target);
-    const previousActor = this.audit.actor;
-    this.audit.actor = actor || null;
-    try {
+    this._withAuditActor(actor, () => {
       this.audit.append('取消共享', {
         docId: doc.id, owner: doc.owner || '', grantee: target, purged,
       });
-    } finally {
-      this.audit.actor = previousActor || null;
-    }
+    });
     return {
       document: { id: doc.id, title: doc.title, level: doc.level, owner: doc.owner || '' },
       shares: this.documentsStore.listShares(doc.id),
@@ -1264,9 +1261,7 @@ class ConsoleService {
     const startedAt = this.now();
     const operator = input.operator ? String(input.operator).slice(0, 64) : null;
     const auditStart = this.audit.entries.length;
-    const previousAuditActor = this.audit.actor;
-    this.audit.actor = operator || null;
-    try {
+    return this._withAuditActor(operator, async () => {
     if (operator) this.audit.append('操作者', { operator, runId });
     const { agent, token, deniedTools, deniedDocs } = this._issueAgentAndToken({
       ...options, command: options.command, operator,
@@ -1385,9 +1380,7 @@ class ConsoleService {
     if (this.runs.length > 50) this.runs.pop();
     this._persistConsoleState();
     return { ok: true, ...run };
-    } finally {
-      this.audit.actor = previousAuditActor || null;
-    }
+    });
   }
 
   _freezeDeferred(runId, d, auditStart, attachments = [], operator = null, mailAccount = '') {
@@ -2431,9 +2424,7 @@ class ConsoleService {
       throw new ConsoleError('BAD_REQUEST', '退信报告里没有可识别的收件人状态', 400);
     }
 
-    const previousActor = this.audit.actor;
-    this.audit.actor = by || null;
-    try {
+    return this._withAuditActor(by, () => {
       const results = [];
       for (const report of parsed.reports) {
         const base = {
@@ -2521,9 +2512,7 @@ class ConsoleService {
         ignored: results.filter((r) => r.outcome === 'ignored').length,
       };
       return { ok: true, reportType: parsed.reportType, summary, results };
-    } finally {
-      this.audit.actor = previousActor || null;
-    }
+    });
   }
 
   // ---------- v0.36 MCP 控制台接入 ----------
@@ -2573,17 +2562,13 @@ class ConsoleService {
       throw new ConsoleError('MCP_ERROR', `读取工具列表失败：${err.message}`, 502);
     }
     this.mcpSessions.set(target, { client, token: token || null, at: this.now() });
-    const previousActor = this.audit.actor;
-    this.audit.actor = by || null;
-    try {
+    this._withAuditActor(by, () => {
       this.audit.append('MCP 发现', {
         url: target,
         server: init && init.serverInfo ? init.serverInfo.name : null,
         tools: tools.map((t) => t.name),
       });
-    } finally {
-      this.audit.actor = previousActor || null;
-    }
+    });
     return {
       ok: true,
       url: target,
@@ -2698,9 +2683,7 @@ class ConsoleService {
   // 启动重连：逐个恢复持久化的 MCP 服务；单个失败只记录，不阻塞启动
   async restoreMcpServers() {
     if (!this.mcpConfigFile) return this.mcpRestore;
-    const previousActor = this.audit.actor;
-    this.audit.actor = null;
-    try {
+    return this._withAuditActor(null, async () => {
       this.audit.append('MCP 配置加载', {
         file: this.mcpConfigFile,
         servers: this.mcpConfig.length,
@@ -2720,9 +2703,7 @@ class ConsoleService {
         }
       }
       return this.mcpRestore;
-    } finally {
-      this.audit.actor = previousActor || null;
-    }
+    });
   }
 
   async registerMcp({
@@ -2762,9 +2743,7 @@ class ConsoleService {
       }
     }
 
-    const previousActor = this.audit.actor;
-    this.audit.actor = by || null;
-    try {
+    this._withAuditActor(by, () => {
       this.audit.append('MCP 注册', {
         url: target,
         tools: registered,
@@ -2773,9 +2752,7 @@ class ConsoleService {
         persisted,
         persistError,
       });
-    } finally {
-      this.audit.actor = previousActor || null;
-    }
+    });
     return {
       ok: true, url: target, registered, persisted,
       persistEnabled: !!this.mcpConfigFile, persistError,

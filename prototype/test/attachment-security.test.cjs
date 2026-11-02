@@ -104,6 +104,53 @@ test('旧库迁移：SFE1 明文不被标密文，SFE1 密文仍标 1', () => {
   }
 });
 
+test('旧库迁移失败会回滚，下次启动重新迁移而不是把密文当明文', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-blob-rollback-'));
+  const file = path.join(dir, 'blobs.db');
+  const plain = Buffer.from('SFE1 plain text that must stay readable');
+  const plainHash = sha256Hex(plain);
+  const cipher = Buffer.concat([Buffer.from('SFE1'), crypto.randomBytes(32)]);
+  const cipherPlainHash = sha256Hex(Buffer.from('hidden plaintext'));
+  let store = null;
+  let raw = null;
+  try {
+    const db = new DatabaseSync(file);
+    db.exec(`
+      CREATE TABLE blobs (
+        sha256 TEXT PRIMARY KEY, name TEXT NOT NULL, mime TEXT NOT NULL,
+        size INTEGER NOT NULL, content BLOB NOT NULL, created_at TEXT NOT NULL
+      );
+    `);
+    const insert = db.prepare('INSERT INTO blobs (sha256, name, mime, size, content, created_at) VALUES (?,?,?,?,?,?)');
+    insert.run(plainHash, 'plain.txt', 'text/plain', plain.length, plain, '2026-01-01T00:00:00.000Z');
+    insert.run(cipherPlainHash, 'secret.txt', 'text/plain', 40, cipher, '2026-01-01T00:00:00.000Z');
+    // 让密文行的 UPDATE 失败，模拟迁移中途异常
+    db.exec(`CREATE TRIGGER fail_migrate BEFORE UPDATE ON blobs
+      WHEN NEW.sha256 = '${cipherPlainHash}' BEGIN SELECT RAISE(ABORT, 'migration boom'); END;`);
+    db.close();
+
+    assert.throws(() => new BlobStore(file), /migration boom/);
+
+    raw = new DatabaseSync(file);
+    const cols = raw.prepare('PRAGMA table_info(blobs)').all().map((c) => c.name);
+    assert.ok(!cols.includes('encrypted'), '迁移失败必须回滚补列');
+    raw.exec('DROP TRIGGER fail_migrate');
+    raw.close();
+    raw = null;
+
+    store = new BlobStore(file);
+    const rows = store.db.prepare('SELECT sha256, encrypted FROM blobs').all();
+    const flags = Object.fromEntries(rows.map((r) => [r.sha256, Number(r.encrypted)]));
+    assert.equal(flags[plainHash], 0);
+    assert.equal(flags[cipherPlainHash], 1);
+    assert.equal(store.get(plainHash).content.toString('utf8'), plain.toString('utf8'));
+  } finally {
+    if (raw) { try { raw.close(); } catch { /* ignore */ } }
+    if (store) store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('加密标记：有 key 上传时 encrypted=1，按标记解密而不是靠魔数猜', () => {
   const store = new BlobStore(':memory:', { key: crypto.randomBytes(32) });
   try {

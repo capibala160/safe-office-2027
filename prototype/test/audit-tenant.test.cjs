@@ -53,6 +53,33 @@ test('租户检查点支持前缀：追加新条目不会把旧检查点判成�
   assert.equal(log.verifyTenant('alice', checkpoint), false, '前缀内篡改必须失败');
 });
 
+test('审计身份按请求隔离：并发不串号，结束后不残留', async () => {
+  const service = new ConsoleService({});
+  try {
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const alice = service._withAuditActor('alice', async () => {
+      await delay(20);
+      service.audit.append('Alice事件', { n: 1 });
+    });
+    const auditor = service._withAuditActor('auditor', async () => {
+      await delay(5);
+      service.audit.append('审计员事件', { n: 2 });
+    });
+    await Promise.all([alice, auditor]);
+
+    const a = service.audit.entries.find((e) => e.kind === 'Alice事件');
+    const b = service.audit.entries.find((e) => e.kind === '审计员事件');
+    assert.equal(a.actor, 'alice');
+    assert.equal(b.actor, 'auditor');
+
+    service.audit.append('无身份事件', { n: 3 });
+    const c = service.audit.entries.find((e) => e.kind === '无身份事件');
+    assert.equal(c.actor, undefined, '请求结束后不能残留错误身份');
+  } finally {
+    service.close();
+  }
+});
+
 test('租户接口：没有独立可信检查点不报通过；篡改后全局/租户都失败', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-tenant-audit-'));
   const auditFile = path.join(dir, 'audit.jsonl');
@@ -61,8 +88,7 @@ test('租户接口：没有独立可信检查点不报通过；篡改后全局/�
   try {
     assert.equal(service.getTenantAudit('alice').verified, false, '首次写入前没有可信检查点');
 
-    service.audit.actor = 'alice';
-    service.audit.append('命令执行', { action: 'readDoc' });
+    service._withAuditActor('alice', () => service.audit.append('命令执行', { action: 'readDoc' }));
     const ok = service.getTenantAudit('alice');
     assert.equal(ok.verified, true, '写入后应有可信检查点');
     assert.equal(ok.trusted, true);

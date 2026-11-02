@@ -38,7 +38,8 @@ class BlobStore {
     if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
     this.key = parseKey(key);
     this.db = new DatabaseSync(file);
-    this.db.exec(`
+    try {
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS blobs (
         sha256 TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -53,18 +54,32 @@ class BlobStore {
     // 新上传不再靠魔数判断，避免普通文件以 SFE1 开头被误判为加密。
     const columns = this.db.prepare('PRAGMA table_info(blobs)').all().map((c) => c.name);
     if (!columns.includes('encrypted')) {
-      this.db.exec("ALTER TABLE blobs ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0");
-      // 旧库迁移：sha256 列存的是明文哈希。若内容哈希 == 明文哈希，说明这是
-      // 以 SFE1 开头的普通文件，不能标成密文；只有哈希对不上且带 SFE1 才判密文。
-      const rows = this.db.prepare(
-        "SELECT sha256, content FROM blobs WHERE substr(content, 1, 4) = X'53464531'",
-      ).all();
-      const update = this.db.prepare('UPDATE blobs SET encrypted = ? WHERE sha256 = ?');
-      for (const row of rows) {
-        const contentHash = sha256Hex(Buffer.from(row.content));
-        const isPlain = contentHash === String(row.sha256).toLowerCase();
-        update.run(isPlain ? 0 : 1, row.sha256);
+      // 补列和数据迁移必须同一事务：中途失败要回滚，否则下次启动看到列已存在
+      // 会跳过迁移，把旧密文当明文返回。
+      this.db.exec('BEGIN');
+      try {
+        this.db.exec("ALTER TABLE blobs ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0");
+        // 旧库迁移：sha256 列存的是明文哈希。若内容哈希 == 明文哈希，说明这是
+        // 以 SFE1 开头的普通文件，不能标成密文；只有哈希对不上且带 SFE1 才判密文。
+        const rows = this.db.prepare(
+          "SELECT sha256, content FROM blobs WHERE substr(content, 1, 4) = X'53464531'",
+        ).all();
+        const update = this.db.prepare('UPDATE blobs SET encrypted = ? WHERE sha256 = ?');
+        for (const row of rows) {
+          const contentHash = sha256Hex(Buffer.from(row.content));
+          const isPlain = contentHash === String(row.sha256).toLowerCase();
+          update.run(isPlain ? 0 : 1, row.sha256);
+        }
+        this.db.exec('COMMIT');
+      } catch (err) {
+        try { this.db.exec('ROLLBACK'); } catch { /* ignore */ }
+        throw err;
       }
+    }
+    } catch (err) {
+      // 迁移失败不要让半开连接留在后台；下次启动会从旧结构重试
+      try { this.db.close(); } catch { /* ignore */ }
+      throw err;
     }
   }
 
