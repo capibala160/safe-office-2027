@@ -628,6 +628,28 @@ function createConsoleServer({
           throw new ConsoleError('BAD_GATEWAY', `收件箱读取失败：${err.message}`, 502);
         }
       }
+      if (pathname === '/api/mail/reply-draft' && method === 'POST') {
+        requireRole(req, ROLE_AUDIT, '生成回信草稿');
+        if (!inboxReader) throw new ConsoleError('CONFLICT', 'IMAP 未配置', 409);
+        const body = await readJson(req);
+        const uid = Number(body.uid);
+        if (!Number.isInteger(uid) || uid <= 0) throw new ConsoleError('BAD_REQUEST', 'uid 非法', 400);
+        const inbox = await inboxReader.fetch({ limit: 20 });
+        const item = (inbox.items || []).find((x) => x.uid === uid);
+        if (!item) throw new ConsoleError('NOT_FOUND', '收件箱里没有这封邮件（可能已超出最近 20 封）', 404);
+        const match = String(item.from || '').match(/<([^>]+)>/);
+        const to = match ? match[1] : (String(item.from || '').includes('@') ? String(item.from).trim() : '');
+        return sendJson(res, 200, {
+          ok: true,
+          autoSend: false,
+          note: '只生成回信草稿，不自动发送；发送仍需另行走审批与确认',
+          draft: {
+            to,
+            subject: `Re: ${String(item.subject || '').slice(0, 120)}`,
+            body: `您好，\n\n已收到您的邮件「${String(item.subject || '').slice(0, 120)}」，我们会尽快处理。\n\n——安全智慧办公（演示）`,
+          },
+        });
+      }
       const outboxMatch = pathname.match(/^\/api\/outbox\/([^/]+)\/reconcile$/);
       if (outboxMatch) requireRole(req, ROLE_STAFF, '核对发件');
       if (outboxMatch && method === 'POST') {
@@ -812,6 +834,19 @@ function createConsoleServer({
           kind: query.get('kind') || '',
         }));
       }
+      if (pathname === '/api/audit/rotate' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '轮转审计日志');
+        const body = await readJson(req);
+        return sendJson(res, 200, service.rotateAudit({
+          reason: String(body.reason || 'manual').slice(0, 80),
+          by: req.user ? req.user.username : null,
+        }));
+      }
+      if (pathname === '/api/audit/prune' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '清理旧审计归档');
+        const body = await readJson(req);
+        return sendJson(res, 200, service.pruneAuditArchives({ keep: body.keep }));
+      }
       const tenantAudit = pathname.match(/^\/api\/audit\/tenant\/([^/]+)$/);
       if (tenantAudit && method === 'GET') {
         requireRole(req, ROLE_AUDIT, '读取租户审计链');
@@ -903,6 +938,15 @@ async function startServer({
         documentsStore, blobStore, storeFile, auditFile, mcpConfigFile,
         mailer: mailer || new FakeMailer(),
       });
+    }
+  }
+  // 审计保留策略：配置了 SAFE_OFFICE_AUDIT_RETENTION_DAYS 才在启动时轮转一次
+  if (typeof instance.autoRotateAuditIfDue === 'function') {
+    try {
+      const rotated = instance.autoRotateAuditIfDue();
+      if (rotated.rotated) console.log(`审计轮转：${rotated.reason} → ${rotated.archive.audit}`);
+    } catch (err) {
+      console.warn(`⚠ 审计自动轮转失败：${err.message}`);
     }
   }
   // 附件保留策略：配置了 SAFE_OFFICE_ATTACHMENT_RETENTION_DAYS 才在启动时清理一次

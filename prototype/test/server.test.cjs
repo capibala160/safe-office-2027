@@ -674,6 +674,26 @@ test('两步验证：启用后登录必须带码，/api/me 标记，关闭后恢
   assert.equal(afterDisable.res.status, 200);
 });
 
+test('收件箱回信草稿：只返回草稿，autoSend=false', async (t) => {
+  const inboxReader = {
+    async fetch() {
+      return {
+        configured: true,
+        items: [{ uid: 7, from: 'Alice <alice@example.com>', subject: '周报', preview: 'hi', untrusted: true }],
+        note: '只读',
+      };
+    },
+  };
+  const started = await startServer({ port: 0, inboxReader });
+  t.after(() => started.close());
+  const { res, data } = await post(`${started.url}/api/mail/reply-draft`, { uid: 7 });
+  assert.equal(res.status, 200);
+  assert.equal(data.autoSend, false);
+  assert.equal(data.draft.to, 'alice@example.com');
+  assert.match(data.draft.subject, /^Re: 周报/);
+  assert.match(data.note, /不自动发送/);
+});
+
 test('用户管理：管理员可列出/重置，非管理员 403', async (t) => {
   const mk = (username, role) => {
     const { salt, hash } = hashPassword('password123');

@@ -48,10 +48,17 @@ npm run health                       # 默认 http://127.0.0.1:7812
 node scripts/healthcheck.cjs --url=http://127.0.0.1:7812 --min-free-mb=2048 --json
 ```
 
-可放进 cron（每 10 分钟），失败时退出码非 0：
+失败告警 webhook（钉钉/企业微信/Slack 的机器人地址均可，POST `{text, checks}`）：
+
+```bash
+SAFE_OFFICE_ALERT_WEBHOOK='https://...' npm run health
+# 或 node scripts/healthcheck.cjs --webhook=https://...
+```
+
+可放进 cron（每 10 分钟），失败时退出码非 0 并触发 webhook：
 
 ```cron
-*/10 * * * * cd /path/to/prototype && node scripts/healthcheck.cjs >> out/health.log 2>&1
+*/10 * * * * cd /path/to/prototype && SAFE_OFFICE_ALERT_WEBHOOK='https://...' node scripts/healthcheck.cjs >> out/health.log 2>&1
 ```
 
 ## 附件保留

@@ -504,12 +504,14 @@
   // ---------- 邮件 ----------
   async function mail(root, c) {
     const emails = await API.get('/api/emails');
+    const accounts = (c.store.bootstrap && c.store.bootstrap.mailAccounts) || [];
     root.innerHTML = `${page('邮件', '内网邮件策略自动确认；外发需 WS63 虚拟确认')}
       <section class="card">
         <div class="card-head"><h2>写邮件</h2><span class="sub">MockLLM 计划固定演示收件人</span></div>
         <div class="form-grid">
           <div><label class="label">文档</label><select class="select" id="mail-doc"><option value="M2">周例会纪要（草稿）</option><option value="M1">预算评审会纪要（终稿）</option></select></div>
           <div><label class="label">通道</label><select class="select" id="mail-mode"><option value="external">外发（需 WS63）</option><option value="internal">内网（自动确认）</option></select></div>
+          ${accounts.length ? `<div><label class="label">发件账号</label><select class="select" id="mail-account">${accounts.map((a) => `<option value="${esc(a.name)}" ${a.default ? 'selected' : ''}>${esc(a.name)}${a.default ? '（默认）' : ''}</option>`).join('')}</select></div>` : ''}
           <div class="full"><label class="label">收件人</label><input class="input" id="mail-to" value="partner@partner-example.com" readonly></div>
         </div>
         <div class="btn-row mt12"><button class="btn" id="mail-run">生成并发起</button></div>
@@ -543,8 +545,22 @@
           return;
         }
         box.innerHTML = res.items.length
-          ? `<div class="stack">${res.items.map((it) => `<div class="event"><div><div class="kind">${esc(it.subject)}</div><div class="sub-text">${esc(it.from)} · ${esc(it.date || '')} · ${it.seen ? '已读' : '未读'}</div><div class="sub-text mt8">${esc(it.preview)}</div></div><div class="seq">${esc(it.uid)}</div></div>`).join('')}</div><div class="sub-text mt8">${esc(res.note || '')}</div>`
+          ? `<div class="stack">${res.items.map((it) => `<div class="event"><div><div class="kind">${esc(it.subject)}</div><div class="sub-text">${esc(it.from)} · ${esc(it.date || '')} · ${it.seen ? '已读' : '未读'}</div><div class="sub-text mt8">${esc(it.preview)}</div></div><div class="seq">${esc(it.uid)}<div class="mt8"><button class="btn ghost small" data-reply-uid="${esc(it.uid)}">起草回复</button></div></div></div>`).join('')}</div><div class="sub-text mt8">${esc(res.note || '')}</div>`
           : '<div class="empty">最近没有邮件</div>';
+        box.querySelectorAll('[data-reply-uid]').forEach((replyBtn) => {
+          replyBtn.addEventListener('click', async () => {
+            replyBtn.disabled = true;
+            try {
+              const draft = await API.post('/api/mail/reply-draft', { uid: Number(replyBtn.dataset.replyUid) });
+              const card = document.createElement('div');
+              card.className = 'notice info mt8';
+              card.innerHTML = `<div><strong>回信草稿（未发送）</strong></div><div class="sub-text mt8">收件人：${esc(draft.draft.to || '(未识别)')} · 主题：${esc(draft.draft.subject)}</div><textarea class="textarea mt8" rows="5">${esc(draft.draft.body)}</textarea><div class="sub-text mt8">${esc(draft.note || '')}</div>`;
+              box.appendChild(card);
+            } catch (err) {
+              box.insertAdjacentHTML('beforeend', `<div class="notice block mt8">${esc(c.errorText(err))}</div>`);
+            } finally { replyBtn.disabled = false; }
+          });
+        });
       } catch (err) {
         box.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
       } finally { btn.disabled = false; }
@@ -565,7 +581,11 @@
             command: `把${title}整理一下，发到部门内网邮箱 team@corp.internal`,
             tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: [doc],
           };
-        const run = await c.runCommand({ ...payload, role: c.store.role, nearfieldOnline: c.store.nearfieldOnline });
+        const account = root.querySelector('#mail-account')?.value;
+        const run = await c.runCommand({
+          ...payload, role: c.store.role, nearfieldOnline: c.store.nearfieldOnline,
+          ...(account ? { mailAccount: account } : {}),
+        });
         root.querySelector('#mail-result').innerHTML = renderRun(run);
         bindOpActions(root, c);
         await c.refreshState();
@@ -995,7 +1015,8 @@
             <div class="spread"><span>审计链</span>${badge(gov.audit.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.audit.count)} 条</span></div>
             <div class="spread"><span>事件链（SQLite）</span>${badge(gov.events.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.events.count)} 条</span></div>
             ${(gov.audit.tenants || []).length ? `<div class="sub-text mt8">租户链：${gov.audit.tenants.map((t) => `${esc(t.tenant)} ${esc(t.count)} 条`).join(' · ')}</div>` : ''}
-            <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
+            ${gov.audit.archiveDir ? `<div class="sub-text mt8">归档目录：${esc(gov.audit.archiveDir)}${gov.audit.rotation && gov.audit.rotation.lastAt ? ` · 上次轮转 ${esc(gov.audit.rotation.lastAt)}` : ''} · 保留 ${esc(gov.audit.archiveKeep || 14)} 份</div>` : ''}
+            <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-rotate">轮转审计</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
           </div>
           <div id="gov-tamper-result" class="mt12"></div>
         </section>
@@ -1097,6 +1118,15 @@
         } catch (err) { toast(c.errorText(err), 'error'); }
         finally { btn.disabled = false; }
       });
+    });
+    root.querySelector('#gov-rotate')?.addEventListener('click', async () => {
+      if (!window.confirm('轮转会归档当前审计链并开始新链，继续？')) return;
+      try {
+        const res = await API.post('/api/audit/rotate', { reason: 'manual' });
+        toast(res.rotated ? `已归档到 ${res.archive.audit}` : '审计为空，无需轮转', 'ok');
+        await c.refreshState();
+        c.rerender();
+      } catch (err) { toast(c.errorText(err), 'error'); }
     });
     root.querySelector('#gov-report')?.addEventListener('click', () => {
       window.open('/api/report', '_blank', 'noopener');

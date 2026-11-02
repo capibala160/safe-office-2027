@@ -80,6 +80,19 @@ test('默认发件账号在冻结时固化：换默认配置仍用原账号', as
   assert.equal(verifyOperation(stored).ok, true);
 });
 
+test('bootstrap 暴露发件账号列表（不回传密码）', (t) => {
+  const mailer = {
+    defaultName: 'work',
+    list: () => [{ name: 'work', from: 'work@example.com', host: 'smtp.example.com', default: true }],
+    async send() { return { status: 'sent' }; },
+  };
+  const { service } = setup({ service: { mailer } });
+  t.after(() => service.close());
+  const bootstrap = service.getBootstrap();
+  assert.deepEqual(bootstrap.mailAccounts, [{ name: 'work', from: 'work@example.com', host: 'smtp.example.com', default: true }]);
+  assert.equal('pass' in bootstrap.mailAccounts[0], false);
+});
+
 test('正常内网纪要：冻结 → 策略自动确认 → FakeMailer 发送', async (t) => {
   const { service } = setup();
   t.after(() => service.close());

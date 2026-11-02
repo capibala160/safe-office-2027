@@ -119,6 +119,9 @@ class ConsoleService {
     auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
     auditCheckpointFile = process.env.SAFE_OFFICE_AUDIT_CHECKPOINT || null,
     auditTenantCheckpointFile = process.env.SAFE_OFFICE_AUDIT_TENANT_CHECKPOINT || null,
+    auditArchiveDir = process.env.SAFE_OFFICE_AUDIT_ARCHIVE_DIR || null,
+    auditRetentionDays = Number(process.env.SAFE_OFFICE_AUDIT_RETENTION_DAYS) || 0,
+    auditArchiveKeep = Number(process.env.SAFE_OFFICE_AUDIT_ARCHIVE_KEEP) || 14,
     auditKey = process.env.SAFE_OFFICE_AUDIT_KEY || null,
     documentsStore = null,
     blobStore = null,
@@ -143,6 +146,11 @@ class ConsoleService {
     this.auditCheckpointFile = auditCheckpointFile || (this.auditFile ? `${this.auditFile}.head` : null);
     this.auditTenantCheckpointFile = auditTenantCheckpointFile
       || (this.auditFile ? `${this.auditFile}.tenants` : null);
+    this.auditArchiveDir = auditArchiveDir
+      || (this.auditFile ? path.join(path.dirname(this.auditFile), 'audit-archive') : null);
+    this.auditRetentionDays = Math.max(0, Number(auditRetentionDays) || 0);
+    this.auditArchiveKeep = Math.max(1, Number(auditArchiveKeep) || 14);
+    this.auditRotation = { lastAt: null, lastResult: null };
     this.auditKey = auditKey ? Buffer.from(String(auditKey), /^[0-9a-fA-F]{64}$/.test(String(auditKey)) ? 'hex' : 'base64') : null;
     if (this.auditKey && this.auditKey.length < 16) throw new Error('SAFE_OFFICE_AUDIT_KEY 至少 16 字节');
     this.auditPersist = { enabled: !!this.auditFile, ok: true, error: null };
@@ -561,6 +569,104 @@ class ConsoleService {
     }
   }
 
+  // ---------- 审计归档 / 轮转 / 保留 ----------
+  // 轮转不删除历史：先把当前审计、检查点、租户检查点复制到 audit-archive/，
+  // 再清空活动链并写入一条「审计轮转」记录（记录 previous 检查点 + 归档路径）。
+  rotateAudit({ reason = 'manual', by = null } = {}) {
+    if (!this.auditFile) throw new ConsoleError('CONFLICT', '未启用审计落盘，无法轮转', 409);
+    if (this._auditPersistBlocked) throw new ConsoleError('CONFLICT', '审计已停止落盘，拒绝轮转', 409);
+    if (this.audit.entries.length === 0) {
+      return { ok: true, rotated: false, reason: '审计为空，无需轮转' };
+    }
+    if (!this.audit.verify()) throw new ConsoleError('CONFLICT', '审计链校验失败，拒绝轮转', 409);
+    if (!this.auditArchiveDir) throw new ConsoleError('CONFLICT', '未配置审计归档目录', 409);
+
+    const at = new Date(this.now()).toISOString();
+    const stamp = at.replace(/[:.]/g, '-');
+    const base = `audit-${stamp}.jsonl`;
+    const paths = {
+      audit: path.join(this.auditArchiveDir, base),
+      checkpoint: path.join(this.auditArchiveDir, `${base}.head`),
+      tenant: path.join(this.auditArchiveDir, `${base}.tenants`),
+    };
+    const previous = this.audit.checkpoint();
+    fs.mkdirSync(this.auditArchiveDir, { recursive: true });
+    const copied = [];
+    try {
+      if (fs.existsSync(this.auditFile)) {
+        fs.copyFileSync(this.auditFile, paths.audit);
+        copied.push(paths.audit);
+      }
+      if (this.auditCheckpointFile && fs.existsSync(this.auditCheckpointFile)) {
+        fs.copyFileSync(this.auditCheckpointFile, paths.checkpoint);
+        copied.push(paths.checkpoint);
+      }
+      if (this.auditTenantCheckpointFile && fs.existsSync(this.auditTenantCheckpointFile)) {
+        fs.copyFileSync(this.auditTenantCheckpointFile, paths.tenant);
+        copied.push(paths.tenant);
+      }
+      // 归档副本成功后，才允许清空活动日志
+      fs.writeFileSync(this.auditFile, '', { encoding: 'utf8', mode: 0o600 });
+    } catch (err) {
+      throw new ConsoleError('CONFLICT', `审计归档失败，未轮转：${err.message}`, 409);
+    }
+
+    this.audit.entries = [];
+    this.audit.prevHash = 'GENESIS';
+    this._auditJsonl = true;
+    this._withAuditActor(by, () => {
+      this.audit.append('审计轮转', {
+        reason, previous, archive: paths, at,
+      });
+    });
+    const result = {
+      ok: true, rotated: true, at, reason, archive: paths, copied,
+      previous, newCheckpoint: this.audit.checkpoint(),
+    };
+    this.auditRotation = { lastAt: at, lastResult: result };
+    return result;
+  }
+
+  // 保留策略：只保留最近 N 份归档，整组删除更旧的 .jsonl/.head/.tenants
+  pruneAuditArchives({ keep = this.auditArchiveKeep } = {}) {
+    if (!this.auditArchiveDir || !fs.existsSync(this.auditArchiveDir)) {
+      return { ok: true, deleted: 0, kept: 0 };
+    }
+    const n = Math.max(1, Number(keep) || 1);
+    const bases = fs.readdirSync(this.auditArchiveDir)
+      .filter((f) => /^audit-.*\.jsonl$/.test(f))
+      .sort().reverse();
+    const remove = bases.slice(n);
+    let deleted = 0;
+    for (const base of remove) {
+      for (const file of [base, `${base}.head`, `${base}.tenants`]) {
+        try {
+          if (fs.existsSync(path.join(this.auditArchiveDir, file))) {
+            fs.rmSync(path.join(this.auditArchiveDir, file), { force: true });
+            deleted += 1;
+          }
+        } catch { /* 单个删除失败不影响其它 */ }
+      }
+    }
+    if (deleted > 0) {
+      this._withAuditActor('system', () => {
+        this.audit.append('审计归档清理', { keep: n, removed: remove.length });
+      });
+    }
+    return { ok: true, deleted, kept: bases.length - remove.length, removed: remove };
+  }
+
+  // 启动时按保留天数自动轮转（默认关闭）；轮转后修剪旧归档
+  autoRotateAuditIfDue() {
+    if (!this.auditFile || this.auditRetentionDays <= 0) return { ok: true, rotated: false };
+    if (!fs.existsSync(this.auditFile)) return { ok: true, rotated: false };
+    const ageMs = this.now() - fs.statSync(this.auditFile).mtimeMs;
+    if (ageMs < this.auditRetentionDays * 24 * 60 * 60 * 1000) return { ok: true, rotated: false };
+    const rotated = this.rotateAudit({ reason: `retention-${this.auditRetentionDays}d`, by: 'system' });
+    const pruned = this.pruneAuditArchives();
+    return { ...rotated, pruned };
+  }
+
   // 模型信息要如实反映实际用的实现，不能对真实模型还标"MockLLM（演示）"
   _modelInfo() {
     const llm = this.planner && this.planner.llm;
@@ -656,6 +762,10 @@ class ConsoleService {
         quarantine: this._auditQuarantine,
         persistBlocked: this._auditPersistBlocked,
         checkpointFile: this.auditCheckpointFile || null,
+        archiveDir: this.auditArchiveDir,
+        rotation: this.auditRotation,
+        retentionDays: this.auditRetentionDays,
+        archiveKeep: this.auditArchiveKeep,
         checkpoint: this.audit.checkpoint(),
         recent: recentAudit.map((e) => ({
           seq: e.seq, kind: e.kind, ts: e.ts, detail: e.detail, actor: e.actor || null,
@@ -686,6 +796,7 @@ class ConsoleService {
   getBootstrap({ actor = null, role = null } = {}) {
     return {
       state: this.getState({ actor, role }),
+      mailAccounts: typeof this.mailer.list === 'function' ? this.mailer.list() : [],
       roles: Object.entries(ROLE_DEFS).map(([name, def]) => ({ name, ...def })),
       tools: this.toolRegistry.publicList(),
       roleTools: Object.fromEntries(
@@ -2194,6 +2305,10 @@ class ConsoleService {
         restoreError: this._auditRestoreError || null,
         quarantine: this._auditQuarantine,
         persistBlocked: this._auditPersistBlocked,
+        archiveDir: this.auditArchiveDir,
+        rotation: this.auditRotation,
+        retentionDays: this.auditRetentionDays,
+        archiveKeep: this.auditArchiveKeep,
         entries: canSeeAll ? this.audit.entries.slice(-100) : [],
         tenants: canSeeAll ? this._tenantAuditSummaries() : [],
       },

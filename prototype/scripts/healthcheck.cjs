@@ -12,6 +12,7 @@ async function main() {
   const url = String(arg('url', process.env.SAFE_OFFICE_HEALTH_URL || 'http://127.0.0.1:7812')).replace(/\/+$/, '');
   const minFreeMb = Number(arg('min-free-mb', process.env.SAFE_OFFICE_MIN_FREE_MB || 1024));
   const timeoutMs = Number(arg('timeout', 5000));
+  const webhook = String(arg('webhook', process.env.SAFE_OFFICE_ALERT_WEBHOOK || '')).trim();
   const asJson = process.argv.includes('--json');
 
   const checks = [];
@@ -41,6 +42,20 @@ async function main() {
   }
 
   const ok = checks.every((c) => c.ok);
+  if (!ok && webhook) {
+    try {
+      const failed = checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`).join('；');
+      const res = await fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: `安全智慧办公健康检查失败：${failed}`, checks }),
+        signal: AbortSignal.timeout(5000),
+      });
+      console.error(`告警 webhook：HTTP ${res.status}`);
+    } catch (err) {
+      console.error(`告警 webhook 失败：${err.message}`);
+    }
+  }
   if (asJson) {
     console.log(JSON.stringify({ ok, url, health, freeMb, checks }, null, 2));
   } else {
