@@ -42,6 +42,21 @@ function sanitizeInput(text) {
 }
 
 // ---------- 闸2 · 权限令牌（任务级最小权限） ----------
+// 个人邮箱域名（2026-11-02 V-A2 策略决策）：
+// 工作文档外发只允许组织/合作方域名；即使任务令牌白名单包含，也一律拒绝。
+// 子域按后缀匹配（如 vip.163.com 命中 163.com），避免只拦裸域。
+const PERSONAL_EMAIL_DOMAINS = [
+  '163.com', '126.com', 'yeah.net', '188.com', 'qq.com', 'foxmail.com',
+  'sina.com', 'sina.cn', 'sohu.com', '139.com', '189.cn', '21cn.com', 'aliyun.com',
+  'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com',
+  'yahoo.com', 'ymail.com', 'icloud.com', 'me.com', 'proton.me', 'protonmail.com',
+];
+
+function isPersonalEmailDomain(domain) {
+  const d = String(domain || '').toLowerCase();
+  return PERSONAL_EMAIL_DOMAINS.some((x) => d === x || d.endsWith(`.${x}`));
+}
+
 class CapabilityToken {
   constructor({ tools = [], documentIds = [], allowedExternalDomains = [], allowedInternalDomains = ['corp.internal'], maxCalls = Infinity, issuedFor = '', ttlMs = 0, issuedAt = Date.now(), agentId = '', role = '' } = {}) {
     this.documentIds = [...documentIds];
@@ -67,6 +82,12 @@ function checkToolCall(token, tool, args = {}, { now = Date.now() } = {}) {
   }
   if (!token.tools.includes(tool)) {
     return { allow: false, reason: `工具「${tool}」不在本任务授权清单内` };
+  }
+  if (tool === 'sendExternalEmail') {
+    const domain = String(args.to || '').split('@')[1] || '';
+    if (isPersonalEmailDomain(domain)) {
+      return { allow: false, reason: `个人邮箱域名「${domain}」禁止外发（工作文档只允许组织/合作方域名）` };
+    }
   }
   if (tool === 'sendExternalEmail' || tool === 'sendInternalEmail') {
     const domain = String(args.to || '').split('@')[1] || '';
@@ -196,6 +217,7 @@ function checkAgentOutput(text, { level = '内部', confidentialDocs = [], exter
 module.exports = {
   sanitizeInput, INJECTION_PATTERNS,
   CapabilityToken, checkToolCall, checkTokenActive,
+  PERSONAL_EMAIL_DOMAINS, isPersonalEmailDomain,
   redact, checkDataBoundary, OUTBOUND_ACTIONS,
   HIGH_RISK_ACTIONS, requestHumanConfirm,
   checkAgentOutput, UNCOMPLIANT_OUTPUT_PATTERNS,

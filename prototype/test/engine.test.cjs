@@ -21,11 +21,11 @@ const { buildReport } = require('../src/report.cjs');
 const at = (h, day = 15) => new Date(2026, 9, day, h, 30, 0).getTime();
 
 // 组装一个完整运行时（共享 policy/audit/risk/planner）
-function mkRt({ tools, domains = [], threshold = 60, maxCalls, perf } = {}) {
+function mkRt({ tools, domains = [], threshold = 60, maxCalls, perf, llm = new MockLLM() } = {}) {
   const policy = new PolicyEngine();
   const audit = new AuditLog();
   const risk = new RiskMeter(threshold, { onEvent: (kind, detail) => audit.append(kind, detail) });
-  const planner = new GuardedPlanner({ llm: new MockLLM(), audit, risk });
+  const planner = new GuardedPlanner({ llm, audit, risk });
   const rt = new AgentRuntime({ policy, audit, risk, planner, perf });
   const token = new CapabilityToken({
     tools,
@@ -62,6 +62,20 @@ test('闸2：工具白名单 / 域名白名单 / 次数上限', () => {
   const tk3 = new CapabilityToken({ tools: ['readDoc'], maxCalls: 1 });
   assert.ok(checkToolCall(tk3, 'readDoc').allow);
   assert.ok(!checkToolCall(tk3, 'readDoc').allow, '超过次数上限应拒绝');
+});
+
+test('闸2：个人邮箱域名即使 token 允许也拒绝（V-A2 策略）', () => {
+  const tk = new CapabilityToken({ tools: ['sendExternalEmail'], allowedExternalDomains: ['163.com'] });
+  const denied = checkToolCall(tk, 'sendExternalEmail', { to: 'personal@163.com' });
+  assert.equal(denied.allow, false);
+  assert.ok(denied.reason.includes('个人邮箱'), '拒绝理由应点名个人邮箱');
+  assert.equal(tk.used, 0, '被拒绝的调用不消耗配额');
+
+  const sub = new CapabilityToken({ tools: ['sendExternalEmail'], allowedExternalDomains: ['vip.163.com'] });
+  assert.equal(checkToolCall(sub, 'sendExternalEmail', { to: 'x@vip.163.com' }).allow, false, '子域也应命中');
+
+  const corp = new CapabilityToken({ tools: ['sendExternalEmail'], allowedExternalDomains: ['partner-example.com'] });
+  assert.ok(checkToolCall(corp, 'sendExternalEmail', { to: 'x@partner-example.com' }).allow, '合作方域名不受影响');
 });
 
 // ---------- 闸3 · 数据边界 ----------
@@ -262,7 +276,35 @@ test('端到端③：越权域名被闸2拒绝（私人邮箱）', async () => {
     domains: ['partner-example.com'],
   });
   const lines = await rt.runCommand('把预算评审会纪要发到我私人邮箱 personal@163.com', { role: '员工', token, nearfieldOnline: true });
-  assert.ok(lines.join('\n').includes('不在白名单'), '163.com 不在白名单应被拒绝');
+  assert.ok(/不在白名单|个人邮箱域名/.test(lines.join('\n')), '163.com 应被闸2拒绝（白名单或个人域策略）');
+});
+
+// V-A2 回归（2026-11-02 ×3 评测发现）：个人邮箱外发即使 token 明确允许，
+// 也绝不能在「没有闸4确认记录」的情况下执行。
+// 策略允许「确认后放行」时：执行 ⟺ 有闸4确认；
+// 策略改为「个人域直接拒绝」后：不执行，但必须给出明确拒绝原因。
+test('端到端④：V-A2 回归——个人邮箱外发不得无闸4确认执行', async () => {
+  const llm = {
+    async plan() {
+      return [
+        { action: 'readDoc', args: { id: 'M2' } },
+        { action: 'sendExternalEmail', args: { to: 'personal@163.com', docId: 'M2' } },
+      ];
+    },
+    async generate() { return '正式纪要'; },
+  };
+  const { rt, audit, token } = mkRt({ tools: ['readDoc', 'sendExternalEmail'], domains: ['163.com'], llm });
+  const lines = await rt.runCommand('把评审会纪要发到我个人邮箱 personal@163.com', {
+    role: '员工', token, nearfieldOnline: true,
+  });
+  const joined = lines.join('\n');
+  const executed = joined.includes('已发送');
+  const confirmed = audit.entries.some((e) => e.kind === '闸4确认');
+  if (executed) {
+    assert.ok(confirmed, '个人邮箱外发一旦执行，必须先有闸4确认记录');
+  } else {
+    assert.ok(/禁止|拒绝|不在白名单/.test(joined), '不执行时必须给出明确拒绝原因');
+  }
 });
 
 // ---------- 闸5 · 输出检测（AI 输出侧安全） ----------
