@@ -212,22 +212,61 @@ class OperationStore {
       .all().map((row) => this._rowToOperation(row));
   }
 
-  setOperationState(operationId, next, { confirmationId = null, deviceId = null, result = null } = {}) {
+  _operationStateInTx(operationId, next, { confirmationId = null, deviceId = null, result = null } = {}) {
+    const current = this.getOperation(operationId);
+    if (!current) throw new Error(`操作不存在：${operationId}`);
+    if (!TRANSITIONS[current.state] || !TRANSITIONS[current.state].has(next)) {
+      throw new RangeError(`非法操作状态迁移：${current.state} → ${next}`);
+    }
+    this.db.prepare(`
+      UPDATE operations
+         SET state = ?, confirmation_id = COALESCE(?, confirmation_id),
+             device_id = COALESCE(?, device_id), result = COALESCE(?, result),
+             updated_at = ?
+       WHERE operation_id = ?
+    `).run(next, confirmationId, deviceId, result === null ? null : JSON.stringify(result), this.now(), operationId);
+    this.appendEvent('操作状态', { operationId, from: current.state, to: next }, { operationId });
+    return this.getOperation(operationId);
+  }
+
+  setOperationState(operationId, next, options = {}) {
+    return this._transaction(() => this._operationStateInTx(operationId, next, options));
+  }
+
+  // 确认 + 入队必须同一事务：入队失败时不能留下 confirmed 但无 outbox 的卡死操作
+  confirmAndEnqueue(operationId, { confirmationId = null, deviceId = null } = {}) {
     return this._transaction(() => {
-      const current = this.getOperation(operationId);
-      if (!current) throw new Error(`操作不存在：${operationId}`);
-      if (!TRANSITIONS[current.state] || !TRANSITIONS[current.state].has(next)) {
-        throw new RangeError(`非法操作状态迁移：${current.state} → ${next}`);
-      }
-      this.db.prepare(`
-        UPDATE operations
-           SET state = ?, confirmation_id = COALESCE(?, confirmation_id),
-               device_id = COALESCE(?, device_id), result = COALESCE(?, result),
-               updated_at = ?
-         WHERE operation_id = ?
-      `).run(next, confirmationId, deviceId, result === null ? null : JSON.stringify(result), this.now(), operationId);
-      this.appendEvent('操作状态', { operationId, from: current.state, to: next }, { operationId });
-      return this.getOperation(operationId);
+      const confirmed = this._operationStateInTx(operationId, 'confirmed', { confirmationId, deviceId });
+      const outbox = this._enqueueOutboxInTx(confirmed);
+      return { operation: confirmed, outbox };
+    });
+  }
+
+  // 发送开始 / 发送完成 / 发送失败：outbox 与操作状态同一事务
+  beginSend(outboxId, operationId) {
+    return this._transaction(() => {
+      const outbox = this._outboxStateInTx(outboxId, 'sending', { incrementAttempts: true });
+      const operation = this._operationStateInTx(operationId, 'executing');
+      return { outbox, operation };
+    });
+  }
+
+  completeSend(outboxId, operationId, { messageId = null } = {}) {
+    return this._transaction(() => {
+      const outbox = this._outboxStateInTx(outboxId, 'sent', { messageId });
+      const operation = this._operationStateInTx(operationId, 'executed', { result: { messageId } });
+      return { outbox, operation };
+    });
+  }
+
+  failSend(outboxId, operationId, { state, error = null, kind = null } = {}) {
+    return this._transaction(() => {
+      const outbox = this._outboxStateInTx(outboxId, state, { error });
+      // unknown 时操作保持 executing，等待人工核对；failed 才同步落 failed
+      const operation = state === 'failed'
+        ? this._operationStateInTx(operationId, 'failed', { result: { error, kind } })
+        : this.getOperation(operationId);
+      return { outbox, operation };
     });
   }
 
@@ -329,24 +368,26 @@ class OperationStore {
     };
   }
 
-  enqueueOutbox(operation) {
+  _enqueueOutboxInTx(operation) {
     if (!operation || operation.state !== 'confirmed') {
       throw new Error('只有 confirmed 状态的操作才能入队发送');
     }
-    return this._transaction(() => {
-      this.db.prepare(`
-        INSERT OR IGNORE INTO outbox (
-          outbox_id, operation_id, idempotency_key, state, message_id,
-          attempts, last_error, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-      `).run(
-        crypto.randomUUID(), operation.operationId, operation.operationHash,
-        'pending', null, 0, null, this.now(), this.now(),
-      );
-      const row = this.db.prepare('SELECT * FROM outbox WHERE idempotency_key = ?').get(operation.operationHash);
-      this.appendEvent('发送入队', { operationId: operation.operationId, outboxId: row.outbox_id }, { operationId: operation.operationId });
-      return this._rowToOutbox(row);
-    });
+    this.db.prepare(`
+      INSERT OR IGNORE INTO outbox (
+        outbox_id, operation_id, idempotency_key, state, message_id,
+        attempts, last_error, created_at, updated_at
+      ) VALUES (?,?,?,?,?,?,?,?,?)
+    `).run(
+      crypto.randomUUID(), operation.operationId, operation.operationHash,
+      'pending', null, 0, null, this.now(), this.now(),
+    );
+    const row = this.db.prepare('SELECT * FROM outbox WHERE idempotency_key = ?').get(operation.operationHash);
+    this.appendEvent('发送入队', { operationId: operation.operationId, outboxId: row.outbox_id }, { operationId: operation.operationId });
+    return this._rowToOutbox(row);
+  }
+
+  enqueueOutbox(operation) {
+    return this._transaction(() => this._enqueueOutboxInTx(operation));
   }
 
   getOutbox(outboxId) {
@@ -378,24 +419,26 @@ class OperationStore {
     return this.db.prepare('SELECT * FROM outbox ORDER BY created_at ASC').all().map((r) => this._rowToOutbox(r));
   }
 
-  setOutboxState(outboxId, next, { messageId = null, error = null, incrementAttempts = false } = {}) {
-    return this._transaction(() => {
-      const current = this.getOutbox(outboxId);
-      if (!current) throw new Error(`发件记录不存在：${outboxId}`);
-      if (!OUTBOX_TRANSITIONS[current.state] || !OUTBOX_TRANSITIONS[current.state].has(next)) {
-        throw new RangeError(`非法发送状态迁移：${current.state} → ${next}`);
-      }
-      this.db.prepare(`
-        UPDATE outbox
-           SET state = ?, message_id = COALESCE(?, message_id),
-               last_error = ?, attempts = attempts + ?, updated_at = ?
-         WHERE outbox_id = ?
-      `).run(next, messageId, error, incrementAttempts ? 1 : 0, this.now(), outboxId);
-      this.appendEvent('发送状态', {
-        outboxId, operationId: current.operationId, from: current.state, to: next, messageId, error,
-      }, { operationId: current.operationId });
-      return this.getOutbox(outboxId);
-    });
+  _outboxStateInTx(outboxId, next, { messageId = null, error = null, incrementAttempts = false } = {}) {
+    const current = this.getOutbox(outboxId);
+    if (!current) throw new Error(`发件记录不存在：${outboxId}`);
+    if (!OUTBOX_TRANSITIONS[current.state] || !OUTBOX_TRANSITIONS[current.state].has(next)) {
+      throw new RangeError(`非法发送状态迁移：${current.state} → ${next}`);
+    }
+    this.db.prepare(`
+      UPDATE outbox
+         SET state = ?, message_id = COALESCE(?, message_id),
+             last_error = ?, attempts = attempts + ?, updated_at = ?
+       WHERE outbox_id = ?
+    `).run(next, messageId, error, incrementAttempts ? 1 : 0, this.now(), outboxId);
+    this.appendEvent('发送状态', {
+      outboxId, operationId: current.operationId, from: current.state, to: next, messageId, error,
+    }, { operationId: current.operationId });
+    return this.getOutbox(outboxId);
+  }
+
+  setOutboxState(outboxId, next, options = {}) {
+    return this._transaction(() => this._outboxStateInTx(outboxId, next, options));
   }
 
   // ---------- events（本地哈希链） ----------

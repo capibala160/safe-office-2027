@@ -38,8 +38,10 @@ class FulfillmentService {
     if (typeof confirmedHash !== 'string' || confirmedHash.toLowerCase() !== operation.operationHash.toLowerCase()) {
       throw new Error('确认哈希与冻结记录不一致，拒绝确认');
     }
-    const confirmed = this.store.setOperationState(operationId, 'confirmed', { confirmationId, deviceId });
-    const outbox = this.store.enqueueOutbox(confirmed);
+    // 确认状态 + 发送入队同一事务：入队失败时操作仍保持 frozen，可安全重试
+    const { operation: confirmed, outbox } = this.store.confirmAndEnqueue(operationId, {
+      confirmationId, deviceId,
+    });
     return { operation: confirmed, outbox };
   }
 
@@ -73,23 +75,19 @@ class FulfillmentService {
       return { state: 'failed', error: check.reason };
     }
 
-    this.store.setOutboxState(row.outboxId, 'sending', { incrementAttempts: true });
-    this.store.setOperationState(operation.operationId, 'executing');
+    // 发送开始：outbox=sending + 操作=executing 同一事务
+    this.store.beginSend(row.outboxId, operation.operationId);
+
+    let result;
     try {
-      const result = await this.mailer.send({ operation, idempotencyKey: row.idempotencyKey });
-      this.store.setOutboxState(row.outboxId, 'sent', { messageId: result.messageId || null });
-      this.store.setOperationState(operation.operationId, 'executed', {
-        result: { messageId: result.messageId || null },
-      });
-      return { state: 'sent', messageId: result.messageId || null };
+      result = await this.mailer.send({ operation, idempotencyKey: row.idempotencyKey });
     } catch (err) {
       const kind = err instanceof MailerError ? err.kind : 'unknown';
       const state = kind === 'rejected' ? 'failed' : 'unknown';
-      this.store.setOutboxState(row.outboxId, state, { error: err.message });
-      if (state === 'failed') {
-        this.store.setOperationState(operation.operationId, 'failed', {
-          result: { error: err.message, kind },
-        });
+      try {
+        this.store.failSend(row.outboxId, operation.operationId, { state, error: err.message, kind });
+      } catch (dbErr) {
+        throw new Error(`发送失败且状态落库失败：${dbErr.message}（原发送错误：${err.message}）`);
       }
       // unknown：操作保持 executing，等待人工核对，绝不自动重试
       return {
@@ -97,6 +95,22 @@ class FulfillmentService {
         error: err.message,
         note: state === 'unknown' ? '结果待核实，禁止自动重试' : '明确失败；如需重试请新建操作记录',
       };
+    }
+
+    // 邮件已发出：outbox=sent + 操作=executed 必须同一事务。
+    // 这里若失败是数据库异常，不能按“发送异常”处理（避免 sent→unknown 非法迁移）。
+    try {
+      this.store.completeSend(row.outboxId, operation.operationId, {
+        messageId: result.messageId || null,
+      });
+      return { state: 'sent', messageId: result.messageId || null };
+    } catch (dbErr) {
+      try {
+        this.store.setOutboxState(row.outboxId, 'unknown', {
+          error: `邮件已发送，但状态落库失败：${dbErr.message}`,
+        });
+      } catch { /* 落 unknown 也失败：保持 sending，重启 recoverInFlight 会转 unknown */ }
+      throw new Error(`邮件已发送，但状态落库失败：${dbErr.message}`);
     }
   }
 

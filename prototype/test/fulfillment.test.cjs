@@ -81,6 +81,43 @@ test('SQLite：发件账号随冻结记录落库并可读回', () => {
   assert.equal(verifyOperation(saved).ok, true);
 });
 
+test('确认事务：入队失败时操作保持 frozen，可安全重试', () => {
+  const { store, service } = newService(new FakeMailer());
+  const operation = service.prepare(makeInput());
+  store.db.exec("CREATE TRIGGER fail_enqueue BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'outbox boom'); END;");
+  assert.throws(() => service.confirm(operation.operationId, {
+    confirmedHash: operation.operationHash,
+  }), /outbox boom/);
+  assert.equal(store.getOperation(operation.operationId).state, 'frozen', '入队失败必须回滚确认状态');
+  assert.equal(store.getOutboxByOperation(operation.operationId), null);
+
+  store.db.exec('DROP TRIGGER fail_enqueue');
+  const confirmed = service.confirm(operation.operationId, {
+    confirmedHash: operation.operationHash,
+  });
+  assert.equal(confirmed.operation.state, 'confirmed');
+  assert.ok(confirmed.outbox);
+});
+
+test('发送完成事务：落库失败不产生 outbox=sent 但操作仍 executing 的不一致', async () => {
+  const { store, service } = newService(new FakeMailer());
+  const { outbox, operation } = confirm(service);
+  // 让「操作 → executed」失败，验证 outbox=sent 也会被同一事务回滚
+  store.db.exec("CREATE TRIGGER fail_exec BEFORE UPDATE ON operations WHEN NEW.state = 'executed' BEGIN SELECT RAISE(ABORT, 'exec boom'); END;");
+  await assert.rejects(() => service.send(outbox.outboxId), /邮件已发送，但状态落库失败/);
+
+  const afterBox = store.getOutbox(outbox.outboxId);
+  const afterOp = store.getOperation(operation.operationId);
+  assert.notEqual(afterBox.state, 'sent', 'outbox 不能单方面落 sent');
+  assert.equal(afterBox.state, 'unknown', '已发送但落库失败 → 待核实');
+  assert.equal(afterOp.state, 'executing', '操作保持 executing，等待人工核对');
+
+  store.db.exec('DROP TRIGGER fail_exec');
+  const reconciled = service.reconcile(outbox.outboxId, { state: 'sent', messageId: 'msg-1' });
+  assert.equal(reconciled.state, 'sent');
+  assert.equal(store.getOperation(operation.operationId).state, 'executed');
+});
+
 test('SQLite：冻结记录不可覆盖，事件链可校验', () => {
   const store = new OperationStore(':memory:');
   const op = sealOperation(makeInput());
