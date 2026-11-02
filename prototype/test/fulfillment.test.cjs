@@ -64,6 +64,23 @@ test('操作记录：冻结/校验/篡改/状态迁移', () => {
   assert.throws(() => transition(confirmed, 'frozen'), /非法状态迁移/);
 });
 
+test('冻结：发件账号进入操作哈希，篡改账号导致校验失败', () => {
+  const base = sealOperation(makeInput());
+  const withAccount = sealOperation(makeInput({ mailAccount: 'work' }));
+  assert.notEqual(base.operationHash, withAccount.operationHash, '账号不同哈希应不同');
+  assert.equal(verifyOperation(withAccount).ok, true);
+  assert.equal(verifyOperation({ ...withAccount, mailAccount: 'backup' }).ok, false, '改账号必须断链');
+  assert.equal(verifyOperation(base).ok, true, '空账号保持旧哈希兼容');
+});
+
+test('SQLite：发件账号随冻结记录落库并可读回', () => {
+  const store = new OperationStore(':memory:');
+  const op = sealOperation(makeInput({ mailAccount: 'work' }));
+  const saved = store.insertOperation(op);
+  assert.equal(saved.mailAccount, 'work');
+  assert.equal(verifyOperation(saved).ok, true);
+});
+
 test('SQLite：冻结记录不可覆盖，事件链可校验', () => {
   const store = new OperationStore(':memory:');
   const op = sealOperation(makeInput());

@@ -1,0 +1,19 @@
+services:
+  console:
+    build: .
+    ports:
+      # 只绑回环：由宿主机 nginx/Caddy 反向代理并终止 TLS。
+      # 不要把 7812 直接映射到公网。
+      - "127.0.0.1:7812:7812"
+    environment:
+      SAFE_OFFICE_HOST: 0.0.0.0
+      # 部署模式必须登录：没有 users.json 时容器会拒绝启动，而不是匿名放行
+      SAFE_OFFICE_AUTH: required
+      # 仅在前面有可信反向代理时开启；否则容器来源会被 LAN 限制拒绝
+      SAFE_OFFICE_TRUST_PROXY: "1"
+    env_file:
+      - path: ./prototype/config.env
+        required: false
+    volumes:
+      - ./prototype/data:/app/data
+    restart: unless-stopped

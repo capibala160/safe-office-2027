@@ -63,6 +63,19 @@ test('时间缺失/非法 → 明确抛错', () => {
   assert.throws(() => buildIcs({ title: 'x', at: 'not-a-date' }), /无法解析/);
 });
 
+test('日期严格校验：不存在的日期不能被静默滚到另一天', () => {
+  for (const at of [
+    '2027-02-30 10:00',
+    '2027-04-31 10:00',
+    '2027-13-01 10:00',
+    '2027-02-30T10:00:00+08:00',
+  ]) {
+    assert.equal(parseWhen(at), null, `${at} 应判非法`);
+    assert.throws(() => buildIcs({ title: 'x', at }), /无法解析或日期不存在/, at);
+  }
+  assert.ok(parseWhen('2028-02-29 10:00'), '闰年 2 月 29 日合法');
+});
+
 test('控制台：配置 calendarDir 后预约会议真写 .ics 并留审计', async (t) => {
   const dir = tmpDir(t);
   const service = new ConsoleService({ calendarDir: dir, now: () => Date.now() });

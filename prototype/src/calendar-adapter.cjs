@@ -27,17 +27,45 @@ function toIcsUtc(date) {
     + `T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`;
 }
 
+function validYmd(year, month, day) {
+  if (![year, month, day].every((n) => Number.isInteger(n))) return false;
+  if (month < 1 || month > 12 || day < 1) return false;
+  const probe = new Date(Date.UTC(2000, 0, 1));
+  probe.setUTCFullYear(year, month - 1, day);
+  return probe.getUTCFullYear() === year
+    && probe.getUTCMonth() === month - 1
+    && probe.getUTCDate() === day;
+}
+
 function parseWhen(at) {
-  if (at instanceof Date) return new Date(at.getTime());
+  if (at instanceof Date) return Number.isNaN(at.getTime()) ? null : new Date(at.getTime());
   const src = String(at === undefined || at === null ? '' : at).trim();
   if (!src) return null;
+  // 先严格校验年月日，避免 new Date 把 2027-02-30 静默滚到 3 月 2 日
+  const parts = src.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ]|$)/);
+  if (parts) {
+    const year = Number(parts[1]);
+    const month = Number(parts[2]);
+    const day = Number(parts[3]);
+    if (!validYmd(year, month, day)) return null;
+    const local = src.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (local) {
+      const hour = Number(local[4]);
+      const minute = Number(local[5]);
+      const second = local[6] ? Number(local[6]) : 0;
+      if (hour > 23 || minute > 59 || second > 59) return null;
+      const date = new Date(2000, 0, 1, hour, minute, second);
+      date.setFullYear(year, month - 1, day);
+      return date;
+    }
+  }
   const date = new Date(src);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function buildIcs({ title, at, id = '', description = '', now = new Date() } = {}) {
   const start = parseWhen(at);
-  if (!start) throw new Error(`会议时间无法解析：${String(at || '(空)')}`);
+  if (!start) throw new Error(`会议时间无法解析或日期不存在：${String(at || '(空)')}`);
   const end = new Date(start.getTime() + DEFAULT_DURATION_MS);
   const uid = `${id || crypto.randomUUID()}@safe-office.local`;
   return [

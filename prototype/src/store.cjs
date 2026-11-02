@@ -51,6 +51,7 @@ class OperationStore {
         tool TEXT NOT NULL,
         recipient TEXT NOT NULL,
         subject TEXT NOT NULL DEFAULT '',
+        mail_account TEXT NOT NULL DEFAULT '',
         body TEXT NOT NULL,
         body_hash TEXT NOT NULL,
         attachments TEXT NOT NULL DEFAULT '[]',
@@ -116,6 +117,10 @@ class OperationStore {
     if (!columns.includes('created_by')) {
       this.db.exec("ALTER TABLE operations ADD COLUMN created_by TEXT NOT NULL DEFAULT ''");
     }
+    // v0.43：多发送账号绑进操作记录（旧库补列）
+    if (!columns.includes('mail_account')) {
+      this.db.exec("ALTER TABLE operations ADD COLUMN mail_account TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   _transaction(fn) {
@@ -144,14 +149,14 @@ class OperationStore {
     return this._transaction(() => {
       this.db.prepare(`
         INSERT INTO operations (
-          operation_id, task_id, action, protocol_action, tool, recipient, subject,
+          operation_id, task_id, action, protocol_action, tool, recipient, subject, mail_account,
           body, body_hash, attachments, source_doc_ids, level, created_at, expires_at,
           model_id, plan_hash, created_by, operation_hash, state, confirmation_id, device_id,
           updated_at, result
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         operation.operationId, operation.taskId, operation.action, operation.protocolAction,
-        operation.tool, operation.recipient, operation.subject, operation.body,
+        operation.tool, operation.recipient, operation.subject, operation.mailAccount || '', operation.body,
         operation.bodyHash, JSON.stringify(operation.attachments),
         JSON.stringify(operation.sourceDocIds), operation.level, operation.createdAt,
         operation.expiresAt, operation.modelId, operation.planHash, operation.createdBy || '',
@@ -177,6 +182,7 @@ class OperationStore {
       tool: row.tool,
       recipient: row.recipient,
       subject: row.subject,
+      mailAccount: row.mail_account || '',
       body: row.body,
       bodyHash: row.body_hash,
       attachments: parseJson(row.attachments, []),

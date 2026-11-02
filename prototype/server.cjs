@@ -14,7 +14,8 @@ const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
 const { BlobStore, parseKey } = require('./src/blob-store.cjs');
 const { FakeMailer } = require('./src/mailer.cjs');
-const { createSmtpMailerFromEnv } = require('./src/smtp-mailer.cjs');
+const { createMailerPoolFromEnv } = require('./src/mail-accounts.cjs');
+const { createInboxReaderFromEnv } = require('./src/imap-inbox.cjs');
 const { scanAttachment, findClamav } = require('./src/file-scan.cjs');
 const { AuthService, createAuthFromFile } = require('./src/auth.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
@@ -23,6 +24,7 @@ const SFC1 = require('./public/sfc1-browser.js');
 
 // 手机确认端从局域网接入时，只开放这些路径；其余一律 403，避免把整个控制台暴露给会场 Wi-Fi
 const LOOPBACK_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const { isFetchBadPort } = require('./src/net-ports.cjs');
 const PHONE_ALLOWLIST = new Set([
   '/confirm.html', '/confirm.js', '/confirm.css', '/sfc1-browser.js',
   '/api/phone/pair', '/api/phone/state', '/api/phone/decision', '/api/health',
@@ -232,6 +234,7 @@ function createConsoleServer({
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
   auth = null,
   allowVirtualConfirm = true,
+  inboxReader = null,
 } = {}) {
   const AUTH_PUBLIC = new Set([
     '/login.html', '/login.css', '/login.js', '/api/login', '/api/logout', '/api/me', '/api/health',
@@ -244,7 +247,7 @@ function createConsoleServer({
   const twoFactorAttempts = new Map();
   const mapAuthError = (err) => {
     if (err.code === 'USER_NOT_FOUND') return new ConsoleError('NOT_FOUND', err.message, 404);
-    if (err.code === 'TOTP_ENABLED' || err.code === 'TOTP_SETUP_REQUIRED') {
+    if (err.code === 'TOTP_ENABLED' || err.code === 'TOTP_SETUP_REQUIRED' || err.code === 'LAST_ADMIN') {
       return new ConsoleError('CONFLICT', err.message, 409);
     }
     if (err.code === 'INVALID_TOTP') return new ConsoleError('INVALID_TOTP', err.message, 401);
@@ -376,8 +379,11 @@ function createConsoleServer({
       throw err;
     }
 
-    // 局域网来源只允许确认端相关路径
-    if (!isLoopbackReq(req) && !PHONE_ALLOWLIST.has(pathname)) {
+    // 局域网来源只允许确认端相关路径。
+    // 反向代理/容器场景可显式 SAFE_OFFICE_TRUST_PROXY=1——仅在前面确有可信代理时开启，
+    // 且不要把控制台端口直接暴露到公网。
+    const trustProxy = /^(1|true|yes|on)$/i.test(String(process.env.SAFE_OFFICE_TRUST_PROXY || ''));
+    if (!isLoopbackReq(req) && !trustProxy && !PHONE_ALLOWLIST.has(pathname)) {
       return sendJson(res, 403, {
         ok: false, error: { code: 'LAN_FORBIDDEN', message: '局域网只开放确认端页面与接口' },
       });
@@ -446,10 +452,41 @@ function createConsoleServer({
         }
         return sendJson(res, 200, { ok: true });
       }
+      const userToggle = pathname.match(/^\/api\/users\/([^/]+)\/(disable|enable)$/);
+      if (userToggle) requireRole(req, ROLE_ADMIN, '禁用/启用用户');
+      if (userToggle && method === 'POST') {
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+        const username = decodeURIComponent(userToggle[1]);
+        if (username === req.user.username) {
+          throw new ConsoleError('SELF_OPERATION', '不能禁用/启用自己', 400);
+        }
+        try {
+          const out = auth.setDisabled(username, userToggle[2] === 'disable');
+          return sendJson(res, 200, { ok: true, ...out });
+        } catch (err) {
+          throw mapAuthError(err);
+        }
+      }
+      const userDelete = pathname.match(/^\/api\/users\/([^/]+)$/);
+      if (userDelete) requireRole(req, ROLE_ADMIN, '删除用户');
+      if (userDelete && method === 'DELETE') {
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+        const username = decodeURIComponent(userDelete[1]);
+        if (username === req.user.username) {
+          throw new ConsoleError('SELF_OPERATION', '不能删除自己', 400);
+        }
+        try {
+          const out = auth.deleteUser(username);
+          return sendJson(res, 200, { ok: true, ...out });
+        } catch (err) {
+          throw mapAuthError(err);
+        }
+      }
       if (pathname === '/api/health' && method === 'GET') {
+        const health = service.health();
         return sendJson(res, 200, {
-          ok: true, service: 'safe-office-console', version: VERSION,
-          uptimeSec: service.getState().uptimeSec,
+          ok: true, service: 'safe-office-console', version: health.version || VERSION,
+          startedAt: health.startedAt, uptimeSec: health.uptimeSec,
         });
       }
       if (pathname === '/api/bootstrap' && method === 'GET') {
@@ -578,6 +615,18 @@ function createConsoleServer({
       if (pathname === '/api/emails' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取邮件列表');
         return sendJson(res, 200, { ok: true, ...service.listEmails(userContext(req)) });
+      }
+      if (pathname === '/api/mail/inbox' && method === 'GET') {
+        requireRole(req, ROLE_AUDIT, '读取收件箱');
+        if (!inboxReader) {
+          return sendJson(res, 200, { ok: true, configured: false, error: 'IMAP 未配置' });
+        }
+        try {
+          const result = await inboxReader.fetch({ limit: Number(query.get('limit')) || 10 });
+          return sendJson(res, 200, { ok: true, ...result });
+        } catch (err) {
+          throw new ConsoleError('BAD_GATEWAY', `收件箱读取失败：${err.message}`, 502);
+        }
       }
       const outboxMatch = pathname.match(/^\/api\/outbox\/([^/]+)\/reconcile$/);
       if (outboxMatch) requireRole(req, ROLE_STAFF, '核对发件');
@@ -763,6 +812,11 @@ function createConsoleServer({
           kind: query.get('kind') || '',
         }));
       }
+      const tenantAudit = pathname.match(/^\/api\/audit\/tenant\/([^/]+)$/);
+      if (tenantAudit && method === 'GET') {
+        requireRole(req, ROLE_AUDIT, '读取租户审计链');
+        return sendJson(res, 200, service.getTenantAudit(decodeURIComponent(tenantAudit[1]), userContext(req)));
+      }
       if (pathname === '/api/report' && method === 'GET') {
         requireRole(req, ROLE_AUDIT, '导出治理报告');
         return sendHtml(res, 200, service.getReport());
@@ -775,6 +829,12 @@ function createConsoleServer({
       if (pathname === '/api/reset' && method === 'POST') {
         requireRole(req, ROLE_ADMIN, '重置工作区');
         return sendJson(res, 200, { ok: true, state: service.reset() });
+      }
+      if (pathname === '/api/attachments/prune' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '清理过期附件');
+        const body = await readJson(req);
+        const days = Number(body.days || process.env.SAFE_OFFICE_ATTACHMENT_RETENTION_DAYS || 0);
+        return sendJson(res, 200, service.pruneAttachments({ days }));
       }
       if (pathname.startsWith('/api/')) {
         return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: `未知接口：${pathname}` } });
@@ -816,6 +876,7 @@ async function startServer({
   mailer = null,
   auth = null,
   allowVirtualConfirm = true,
+  inboxReader = null,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -844,33 +905,51 @@ async function startServer({
       });
     }
   }
+  // 附件保留策略：配置了 SAFE_OFFICE_ATTACHMENT_RETENTION_DAYS 才在启动时清理一次
+  const retentionDays = Number(process.env.SAFE_OFFICE_ATTACHMENT_RETENTION_DAYS || 0);
+  if (retentionDays > 0 && typeof instance.pruneAttachments === 'function') {
+    try {
+      const pruned = instance.pruneAttachments({ days: retentionDays });
+      if (pruned.deleted > 0) console.log(`附件保留：清理 ${pruned.deleted} 个过期内容（保留被引用 ${pruned.keptReferenced} 个）`);
+    } catch (err) {
+      console.warn(`⚠ 附件保留清理失败：${err.message}`);
+    }
+  }
   // 启动重连持久化的 MCP 服务；单个失败只记录，不阻塞启动
   if (instance.mcpRestorePromise) {
     try { await instance.mcpRestorePromise; } catch { /* 恢复失败不阻塞 */ }
   }
   if (instance.startBouncePolling) instance.startBouncePolling();
-  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm });
+  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm, inboxReader });
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, host, () => {
-      const address = server.address();
-      const actualPort = typeof address === 'object' && address ? address.port : port;
-      resolve({
-        server,
-        service: instance,
-        url: `http://${host}:${actualPort}`,
-        phoneUrls: pairingCode ? lanUrls(actualPort) : [],
-        pairingCode: instance.pairingCode || null,
-        close: () => new Promise((done) => {
-          server.close(() => {
-            instance.close();
-            try { if (documentsStore) documentsStore.close(); } catch { /* ignore */ }
-            try { if (blobStore) blobStore.close(); } catch { /* ignore */ }
-            done();
-          });
-        }),
+    const listen = () => {
+      server.once('error', reject);
+      server.listen(port, host, () => {
+        const address = server.address();
+        const actualPort = typeof address === 'object' && address ? address.port : port;
+        // 临时端口恰好落在 fetch 禁用列表：关掉重试，避免测试偶发 bad port
+        if (port === 0 && isFetchBadPort(actualPort)) {
+          server.close(() => listen());
+          return;
+        }
+        resolve({
+          server,
+          service: instance,
+          url: `http://${host}:${actualPort}`,
+          phoneUrls: pairingCode ? lanUrls(actualPort) : [],
+          pairingCode: instance.pairingCode || null,
+          close: () => new Promise((done) => {
+            server.close(() => {
+              instance.close();
+              try { if (documentsStore) documentsStore.close(); } catch { /* ignore */ }
+              try { if (blobStore) blobStore.close(); } catch { /* ignore */ }
+              done();
+            });
+          }),
+        });
       });
-    });
+    };
+    listen();
   });
 }
 
@@ -878,7 +957,9 @@ if (require.main === module) {
   // 先读 config.env（KEY=VALUE）；命令行/系统环境变量优先，配置文件不覆盖
   const configInfo = loadConfigFile(path.join(__dirname, 'config.env'));
   const argv = process.argv.slice(2);
-  const lan = argv.includes('--lan');
+  const hostOverride = String(process.env.SAFE_OFFICE_HOST || '');
+  const lan = argv.includes('--lan') ||
+    (hostOverride !== '' && !['127.0.0.1', 'localhost', '::1'].includes(hostOverride));
   const codeArg = argv.find((arg) => arg.startsWith('--code='));
   const pairingCode = codeArg
     ? codeArg.slice('--code='.length)
@@ -910,9 +991,15 @@ if (require.main === module) {
   }
   let smtpMailer = null;
   try {
-    smtpMailer = createSmtpMailerFromEnv();
+    smtpMailer = createMailerPoolFromEnv();
   } catch (err) {
     console.warn(`⚠ SMTP 配置不完整：${err.message}；本次使用模拟发送`);
+  }
+  let inboxReader = null;
+  try {
+    inboxReader = createInboxReaderFromEnv();
+  } catch (err) {
+    console.warn(`⚠ IMAP 收件箱配置不完整：${err.message}；收件箱同步不可用`);
   }
   // 启用真实动作（SMTP / 真实打印机）时默认关闭虚拟设备批准入口
   const allowVirtualConfirm = String(process.env.SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM || '').toLowerCase() === '1'
@@ -938,7 +1025,7 @@ if (require.main === module) {
     || path.join(__dirname, 'data', 'mcp-servers.json');
   startServer({
     port: Number(process.env.PORT) || 7812,
-    host: lan ? '0.0.0.0' : '127.0.0.1',
+    host: hostOverride || (lan ? '0.0.0.0' : '127.0.0.1'),
     allowLan: lan,
     pairingCode,
     documentsStore,
@@ -949,6 +1036,7 @@ if (require.main === module) {
     mailer: smtpMailer || new FakeMailer(),
     auth,
     allowVirtualConfirm,
+    inboxReader,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     console.log(`  ${url}`);

@@ -40,7 +40,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.42.0';
+const VERSION = '0.43.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -117,6 +117,7 @@ class ConsoleService {
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
     auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
     auditCheckpointFile = process.env.SAFE_OFFICE_AUDIT_CHECKPOINT || null,
+    auditTenantCheckpointFile = process.env.SAFE_OFFICE_AUDIT_TENANT_CHECKPOINT || null,
     auditKey = process.env.SAFE_OFFICE_AUDIT_KEY || null,
     documentsStore = null,
     blobStore = null,
@@ -138,9 +139,14 @@ class ConsoleService {
     this.storeFile = storeFile || ':memory:';
     this.auditFile = auditFile || null;
     this.auditCheckpointFile = auditCheckpointFile || (this.auditFile ? `${this.auditFile}.head` : null);
+    this.auditTenantCheckpointFile = auditTenantCheckpointFile
+      || (this.auditFile ? `${this.auditFile}.tenants` : null);
     this.auditKey = auditKey ? Buffer.from(String(auditKey), /^[0-9a-fA-F]{64}$/.test(String(auditKey)) ? 'hex' : 'base64') : null;
     if (this.auditKey && this.auditKey.length < 16) throw new Error('SAFE_OFFICE_AUDIT_KEY 至少 16 字节');
     this.auditPersist = { enabled: !!this.auditFile, ok: true, error: null };
+    this._auditPersistBlocked = false;   // 恢复失败且原文件无法隔离时，禁止覆盖原日志
+    this._auditQuarantine = null;
+    this.auditRestore = null;
     this.generation = 0;          // 工作区版本：reset 时自增，用于丢弃在途旧结果
     this.recoveredInFlight = 0;
     this._auditRestoreError = null;
@@ -229,6 +235,7 @@ class ConsoleService {
   _initWorkspace() {
     this.policy = new PolicyEngine();
     this.audit = this._restoreAudit();
+    this._loadTenantCheckpoints();
     this.audit.onAppend = (rec) => this._appendAudit(rec);
     // 导入的真实资料并入文档视图（样例文档保持静态）
     if (this.documentsStore) {
@@ -237,9 +244,13 @@ class ConsoleService {
       })));
     }
     if (this._auditRestoreError) {
+      // 保留错误状态，页面/治理报告要能看到；原文件已在 _restoreAudit 中隔离
       const error = this._auditRestoreError;
-      this._auditRestoreError = null;
-      this.audit.append('审计恢复失败', { error, note: '旧链不可信，从新链重新记录' });
+      this.audit.append('审计恢复失败', {
+        error,
+        note: '旧链不可信；原日志已隔离，新链从空开始',
+        quarantine: this._auditQuarantine,
+      });
     }
     this.risk = new RiskMeter(this.riskThreshold, {
       onEvent: (kind, detail) => this.audit.append(kind, detail),
@@ -383,6 +394,34 @@ class ConsoleService {
 
   // ---------- 审计落盘 ----------
   // 审计链 + 独立检查点是两份文件：同一磁盘上不抵抗篡改，只保证"整链替换会被发现"。
+  // 恢复失败：先把原审计/检查点复制到 .corrupt-<时间>，保留取证材料；
+  // 复制失败则停止落盘，绝不在无法隔离时覆盖原文件。
+  _quarantineAudit(reason) {
+    const at = new Date(this.now()).toISOString();
+    const stamp = at.replace(/[:.]/g, '-');
+    const files = [this.auditFile, this.auditCheckpointFile, this.auditTenantCheckpointFile].filter(Boolean);
+    const isolated = [];
+    const errors = [];
+    for (const file of files) {
+      if (!fs.existsSync(file)) continue;
+      const dest = `${file}.corrupt-${stamp}`;
+      try {
+        // 移走而不是复制：原路径留给新链，原文件原样保留在 .corrupt-* 供取证
+        fs.renameSync(file, dest);
+        isolated.push({ from: file, to: dest });
+      } catch (err) {
+        errors.push({ file, error: err && err.message ? err.message : String(err) });
+      }
+    }
+    this._auditQuarantine = { reason, at, isolated, errors };
+    this.auditRestore = { error: reason, at, quarantine: this._auditQuarantine };
+    if (errors.length > 0) {
+      this._auditPersistBlocked = true;
+      this.auditPersist.ok = false;
+      this.auditPersist.error = '审计恢复失败且原文件无法隔离，已停止落盘';
+    }
+  }
+
   _restoreAudit() {
     this._auditJsonl = true;
     if (!this.auditFile) return new AuditLog();
@@ -390,6 +429,7 @@ class ConsoleService {
     if (!fs.existsSync(this.auditCheckpointFile)) {
       // 有链无检查点 = 检查点被删；不能拿链自带的 head 自证
       this._auditRestoreError = '检查点文件缺失';
+      this._quarantineAudit(this._auditRestoreError);
       return new AuditLog();
     }
     try {
@@ -401,13 +441,69 @@ class ConsoleService {
     } catch (err) {
       this._auditJsonl = true;
       this._auditRestoreError = err && err.message ? err.message : String(err);
+      this._quarantineAudit(this._auditRestoreError);
       return new AuditLog();
     }
   }
 
+  // ---------- 租户检查点（独立保存，拒绝拿当前内容自证） ----------
+  _loadTenantCheckpoints() {
+    this._trustedTenantCheckpoints = new Map();
+    this._tenantCheckpointError = null;
+    if (!this.auditTenantCheckpointFile) return;
+    if (!fs.existsSync(this.auditTenantCheckpointFile)) {
+      this._tenantCheckpointError = '租户检查点文件缺失';
+      return;
+    }
+    try {
+      const data = JSON.parse(fs.readFileSync(this.auditTenantCheckpointFile, 'utf8'));
+      const map = data && data.checkpoints && typeof data.checkpoints === 'object' ? data.checkpoints : {};
+      for (const [tenant, cp] of Object.entries(map)) {
+        if (this.auditKey && !verifyCheckpoint(cp, this.auditKey)) {
+          throw new Error(`租户「${tenant}」检查点签名无效`);
+        }
+        this._trustedTenantCheckpoints.set(tenant, cp);
+      }
+    } catch (err) {
+      this._tenantCheckpointError = err && err.message ? err.message : String(err);
+      this._trustedTenantCheckpoints.clear();
+    }
+  }
+
+  _writeTenantCheckpoints() {
+    if (!this.auditTenantCheckpointFile) return;
+    try {
+      const checkpoints = {};
+      for (const t of this.audit.tenantCheckpoints()) {
+        checkpoints[t.tenant] = signCheckpoint({ count: t.count, head: t.head }, this.auditKey);
+      }
+      fs.mkdirSync(path.dirname(this.auditTenantCheckpointFile), { recursive: true });
+      const tmp = `${this.auditTenantCheckpointFile}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ checkpoints }, null, 2), { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(tmp, this.auditTenantCheckpointFile);
+      this._trustedTenantCheckpoints = new Map(Object.entries(checkpoints));
+      this._tenantCheckpointError = null;
+    } catch (err) {
+      this._tenantCheckpointError = err && err.message ? err.message : String(err);
+    }
+  }
+
+  _tenantAuditSummaries() {
+    const globalOk = this.audit.verify();
+    return this.audit.tenantCheckpoints().map((t) => {
+      const trusted = this._trustedTenantCheckpoints.get(t.tenant) || null;
+      return {
+        ...t,
+        trusted: !!trusted,
+        checkpointCount: trusted ? trusted.count : 0,
+        verified: globalOk && this.audit.verifyTenant(t.tenant, trusted),
+      };
+    });
+  }
+
   // 每条审计只追加一行 + 重写小检查点（O(1)）；旧整体 JSON 在第一次写时迁移
   _appendAudit(rec) {
-    if (!this.auditFile) return;
+    if (!this.auditFile || this._auditPersistBlocked) return;
     try {
       fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
       fs.mkdirSync(path.dirname(this.auditCheckpointFile), { recursive: true });
@@ -419,6 +515,7 @@ class ConsoleService {
       }
       const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
       fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
+      this._writeTenantCheckpoints();
       this.auditPersist.ok = true;
       this.auditPersist.error = null;
     } catch (err) {
@@ -430,7 +527,7 @@ class ConsoleService {
 
   // 全量快照：仅迁移/关闭/reset 等少数场景使用
   _saveAudit() {
-    if (!this.auditFile) return;
+    if (!this.auditFile || this._auditPersistBlocked) return;
     try {
       if (!this.audit.verify()) return;
       fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
@@ -439,6 +536,7 @@ class ConsoleService {
       this._auditJsonl = true;
       const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
       fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
+      this._writeTenantCheckpoints();
       this.auditPersist.ok = true;
       this.auditPersist.error = null;
     } catch (err) {
@@ -500,6 +598,15 @@ class ConsoleService {
   }
 
   // ---------- 只读快照 ----------
+  // 轻量存活探针：不统计操作/文档/审计，避免数据增长后健康检查越来越慢。
+  health() {
+    return {
+      version: VERSION,
+      startedAt: this._iso(this.startedAt),
+      uptimeSec: Math.max(0, Math.floor((this.now() - this.startedAt) / 1000)),
+    };
+  }
+
   getState({ actor = null, role = null } = {}) {
     const allOperations = this.store.listOperations();
     const operations = allOperations.filter((o) => this._operationVisible(o, actor, role));
@@ -527,10 +634,12 @@ class ConsoleService {
         runs: runs.length,
       },
       audit: {
-        verified: this.audit.verify(),
+        verified: this.audit.verify() && !this._auditRestoreError,
         persisted: this.auditPersist.ok,
         persistError: this.auditPersist.error,
         restoreError: this._auditRestoreError || null,
+        quarantine: this._auditQuarantine,
+        persistBlocked: this._auditPersistBlocked,
         checkpointFile: this.auditCheckpointFile || null,
         checkpoint: this.audit.checkpoint(),
         recent: recentAudit.map((e) => ({
@@ -1007,6 +1116,14 @@ class ConsoleService {
     if (tools !== null && tools.length === 0) {
       throw new ConsoleError('BAD_REQUEST', '未勾选任何工具：空选择等于不授权，不是全部授权');
     }
+    const mailAccount = input.mailAccount ? String(input.mailAccount).trim().slice(0, 64) : '';
+    if (mailAccount && !/^[A-Za-z0-9._-]{1,64}$/.test(mailAccount)) {
+      throw new ConsoleError('BAD_REQUEST', 'mailAccount 只能包含字母/数字/._-');
+    }
+    if (mailAccount && typeof this.mailer.list === 'function'
+        && !this.mailer.list().some((a) => a.name === mailAccount)) {
+      throw new ConsoleError('BAD_REQUEST', `未知发件账号：${mailAccount}`);
+    }
     return {
       command,
       role,
@@ -1014,6 +1131,7 @@ class ConsoleService {
       documentIds,
       domains: uniqueStrings(input.domains),
       maxCalls,
+      mailAccount,
       modelLocation,
       commandLevel: input.commandLevel || '内部',
       nearfieldOnline: !!input.nearfieldOnline,
@@ -1179,7 +1297,7 @@ class ConsoleService {
 
     const operations = [];
     for (const descriptor of deferred) {
-      const operation = this._freezeDeferred(runId, descriptor, auditStart, options.attachments, operator);
+      const operation = this._freezeDeferred(runId, descriptor, auditStart, options.attachments, operator, options.mailAccount);
       const autoMode = this._autoDecision(descriptor.action, operation);
       if (autoMode) {
         try {
@@ -1262,7 +1380,7 @@ class ConsoleService {
     }
   }
 
-  _freezeDeferred(runId, d, auditStart, attachments = [], operator = null) {
+  _freezeDeferred(runId, d, auditStart, attachments = [], operator = null, mailAccount = '') {
     const action = d.action;
     const protocolAction = this.toolRegistry.protocolAction(action);
     if (!protocolAction) {
@@ -1290,6 +1408,16 @@ class ConsoleService {
       : (d.docId ? [d.docId] : []);
     // 只有邮件动作才把附件落库；非邮件动作一个字节都不存（避免静默丢弃 + 孤儿）
     const storedAttachments = isEmail ? this._storeAttachments(attachments) : [];
+    // 默认账号必须在冻结时解析成具体账号：否则发送时才读当前默认值，
+    // 同一冻结记录换配置会换账号发信，且哈希无法发现。
+    let resolvedAccount = mailAccount || '';
+    if (!resolvedAccount && this.mailer) {
+      if (typeof this.mailer.list === 'function') {
+        const def = this.mailer.list().find((a) => a && a.default);
+        if (def) resolvedAccount = def.name;
+      }
+      if (!resolvedAccount && this.mailer.defaultName) resolvedAccount = String(this.mailer.defaultName);
+    }
     let operation;
     try {
       operation = this.fulfillment.prepare({
@@ -1299,6 +1427,7 @@ class ConsoleService {
         tool: action,
         recipient: recipient || '（未指定）',
         subject: subject.slice(0, 160),
+        mailAccount: resolvedAccount,
         body: body || `（${action}）`,
         attachments: storedAttachments.map((a) => ({ name: a.name, sha256: a.sha256, size: a.size })),
         sourceDocIds,
@@ -1454,6 +1583,7 @@ class ConsoleService {
       tool: current.tool,
       recipient: current.recipient,
       subject: current.subject,
+      mailAccount: current.mailAccount,
       body: text,
       attachments: current.attachments,
       sourceDocIds: current.sourceDocIds,
@@ -1558,6 +1688,7 @@ class ConsoleService {
       tool: operation.tool,
       recipient: operation.recipient,
       subject: operation.subject,
+      mailAccount: operation.mailAccount || '',
       level: operation.level,
       sourceDocIds: operation.sourceDocIds,
       attachments: operation.attachments,
@@ -2055,9 +2186,13 @@ class ConsoleService {
         reviews: canSeeAll ? this.risk.reviews.slice(-10) : [],
       },
       audit: {
-        count: this.audit.entries.length, verified: this.audit.verify(),
+        count: this.audit.entries.length, verified: this.audit.verify() && !this._auditRestoreError,
         checkpoint: this.audit.checkpoint(),
+        restoreError: this._auditRestoreError || null,
+        quarantine: this._auditQuarantine,
+        persistBlocked: this._auditPersistBlocked,
         entries: canSeeAll ? this.audit.entries.slice(-100) : [],
+        tenants: canSeeAll ? this._tenantAuditSummaries() : [],
       },
       events: {
         count: this.store.listEvents().length, verified: this.store.verifyEvents(),
@@ -2066,6 +2201,7 @@ class ConsoleService {
       },
       policy: this._policyMatrix(),
       tools: this.toolRegistry.publicList(),
+      mailAccounts: typeof this.mailer.list === 'function' ? this.mailer.list() : [],
       mcpServers: this.mcpConfig.map(({ token, ...rest }) => rest),   // 永不回传 token
       mcpRestore: this.mcpRestore,
       mcpConfigError: this.mcpConfigError,
@@ -2102,14 +2238,77 @@ class ConsoleService {
       ok: true,
       items,
       nextCursor: items.length ? items[items.length - 1].seq : cursor,
-      verified: this.audit.verify(),
+      verified: this.audit.verify() && !this._auditRestoreError,
+      restoreError: this._auditRestoreError || null,
+    };
+  }
+
+  // 附件保留策略：删除早于 days 天、且没有任何操作记录引用的附件内容。
+  // 被历史操作引用的附件默认保留（否则回滚/复核会丢证据）；返回候选/删除/保留计数。
+  pruneAttachments({ days = 0, now = Date.now() } = {}) {
+    const n = Number(days);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new ConsoleError('BAD_REQUEST', 'days 必须是正数（0 表示不清理）');
+    }
+    if (!this.blobStore || typeof this.blobStore.listOlderThan !== 'function') {
+      throw new ConsoleError('CONFLICT', '附件库未启用', 409);
+    }
+    const cutoff = new Date(now - n * 24 * 60 * 60 * 1000).toISOString();
+    const referenced = new Set();
+    for (const op of this.store.listOperations()) {
+      for (const a of op.attachments || []) if (a && a.sha256) referenced.add(String(a.sha256));
+    }
+    const candidates = this.blobStore.listOlderThan(cutoff);
+    let deleted = 0;
+    let keptReferenced = 0;
+    for (const b of candidates) {
+      if (referenced.has(String(b.sha256))) { keptReferenced += 1; continue; }
+      if (this.blobStore.delete(b.sha256)) deleted += 1;
+    }
+    this.audit.append('附件保留清理', {
+      days: n, cutoff, candidates: candidates.length, deleted, keptReferenced,
+    });
+    return { ok: true, days: n, cutoff, candidates: candidates.length, deleted, keptReferenced };
+  }
+
+  // 租户分链：管理员/审计员可读任意租户；普通用户只能读自己的。
+  getTenantAudit(tenant, { actor = null, role = null } = {}) {
+    const canSeeAll = !actor || ['管理员', '审计员'].includes(role);
+    if (!canSeeAll && actor !== tenant) {
+      throw new ConsoleError('FORBIDDEN', '只能读取自己的租户审计链', 403);
+    }
+    const chain = this.audit.tenantChain(tenant);
+    const globalVerified = this.audit.verify();
+    const trusted = this._trustedTenantCheckpoints.get(tenant) || null;
+    const trustedVerified = !!trusted && this.audit.verifyTenant(tenant, trusted);
+    const verified = globalVerified && trustedVerified;
+    let reason = 'ok';
+    if (!globalVerified) reason = '全局审计链校验失败';
+    else if (!trusted) reason = this._tenantCheckpointError || '缺少可信租户检查点';
+    else if (!trustedVerified) reason = '租户链与可信检查点不一致';
+    return {
+      ok: true,
+      tenant,
+      count: chain.checkpoint.count,
+      head: chain.checkpoint.head,
+      verified,
+      trusted: !!trusted,
+      checkpointCount: trusted ? trusted.count : 0,
+      globalVerified,
+      reason,
+      entries: chain.entries.slice(-100),
     };
   }
 
   verifyAudit() {
     return {
       ok: true,
-      audit: { count: this.audit.entries.length, verified: this.audit.verify(), checkpoint: this.audit.checkpoint() },
+      audit: {
+        count: this.audit.entries.length,
+        verified: this.audit.verify() && !this._auditRestoreError,
+        restoreError: this._auditRestoreError || null,
+        checkpoint: this.audit.checkpoint(),
+      },
       events: { count: this.store.listEvents().length, verified: this.store.verifyEvents(), checkpoint: this.store.eventCheckpoint() },
     };
   }

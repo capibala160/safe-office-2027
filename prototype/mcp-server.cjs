@@ -9,6 +9,7 @@
 // ============================================================
 const http = require('node:http');
 const crypto = require('node:crypto');
+const { isFetchBadPort } = require('./src/net-ports.cjs');
 
 const TOOLS = [
   {
@@ -94,17 +95,25 @@ function startMcpServer({ port = 0, host = '127.0.0.1', token = process.env.SAFE
     });
   });
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, host, () => {
-      const address = server.address();
-      const actual = typeof address === 'object' && address ? address.port : port;
-      resolve({
-        server,
-        port: actual,
-        url: `http://${host}:${actual}/mcp`,
-        close: () => new Promise((done) => server.close(done)),
+    const listen = () => {
+      server.once('error', reject);
+      server.listen(port, host, () => {
+        const address = server.address();
+        const actual = typeof address === 'object' && address ? address.port : port;
+        // 临时端口落在 fetch 禁用列表：关掉重试，避免测试偶发 bad port
+        if (port === 0 && isFetchBadPort(actual)) {
+          server.close(() => listen());
+          return;
+        }
+        resolve({
+          server,
+          port: actual,
+          url: `http://${host}:${actual}/mcp`,
+          close: () => new Promise((done) => server.close(done)),
+        });
       });
-    });
+    };
+    listen();
   });
 }
 

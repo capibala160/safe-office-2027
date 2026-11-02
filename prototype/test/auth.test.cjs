@@ -205,3 +205,62 @@ test('会话续期：短 TTL 下重启后不丢会话', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('账号删除/禁用：写盘失败时内存不变，重启不会复活', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-persist-fail-'));
+  const adminPw = hashPassword('adminpass123');
+  const alicePw = hashPassword('password123');
+  try {
+    // 把 users 文件指向一个目录：saveUsers 写盘必然失败
+    const auth = new AuthService({
+      users: [
+        { username: 'admin', role: '管理员', ...adminPw },
+        { username: 'alice', role: '员工', ...alicePw },
+      ],
+      file: dir,
+    });
+    assert.throws(() => auth.deleteUser('alice'));
+    assert.ok(auth.listUsers().some((u) => u.username === 'alice'), '删除失败时内存必须保留');
+    assert.ok(auth.login('alice', 'password123'), '删除失败后仍能登录');
+
+    assert.throws(() => auth.setDisabled('alice', true));
+    assert.equal(auth.listUsers().find((u) => u.username === 'alice').disabled, false, '禁用失败时内存必须保留');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('账号禁用/删除：登录拒绝、会话失效、最后一个管理员保护', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-disable-'));
+  const file = path.join(dir, 'users.json');
+  const adminPw = hashPassword('adminpass123');
+  const alicePw = hashPassword('password123');
+  try {
+    saveUsers(file, [
+      { username: 'admin', role: '管理员', ...adminPw },
+      { username: 'alice', role: '员工', ...alicePw },
+    ]);
+    const auth = createAuthFromFile(file);
+    const session = auth.login('alice', 'password123');
+    assert.ok(session);
+
+    assert.deepEqual(auth.setDisabled('alice', true), { username: 'alice', disabled: true });
+    assert.equal(auth.login('alice', 'password123'), null, '禁用后不能登录');
+    assert.equal(auth.verify(session.token), null, '禁用后旧会话失效');
+    assert.equal(auth.listUsers().find((u) => u.username === 'alice').disabled, true);
+
+    auth.setDisabled('alice', false);
+    assert.ok(auth.login('alice', 'password123'), '启用后可以登录');
+
+    assert.throws(() => auth.setDisabled('admin', true), /最后一个可用管理员/);
+    assert.throws(() => auth.deleteUser('admin'), /最后一个可用管理员/);
+    assert.throws(() => auth.deleteUser('nobody'), /用户不存在/);
+
+    auth.deleteUser('alice');
+    assert.equal(auth.login('alice', 'password123'), null);
+    assert.equal(auth.listUsers().some((u) => u.username === 'alice'), false);
+    assert.equal(loadUsers(file).length, 1, '删除要落盘');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

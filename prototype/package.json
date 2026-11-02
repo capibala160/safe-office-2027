@@ -1,6 +1,6 @@
 {
   "name": "safe-office-prototype",
-  "version": "0.42.0",
+  "version": "0.43.0",
   "private": true,
   "description": "安全智慧办公 · Agent 安全运行机制核心原型 + 办公套件控制台（平台无关；上板时平移 ArkTS）",
   "scripts": {
@@ -10,7 +10,11 @@
     "demo": "node demo.cjs",
     "demo:nearfield": "node demo-nearfield.cjs",
     "test": "node --test",
-    "ci": "node --test && node --test e2e/ui.e2e.cjs",
+    "lint": "node scripts/lint.cjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "typecheck:strict": "tsc -p tsconfig.strict.json",
+    "health": "node scripts/healthcheck.cjs",
+    "ci": "npm run lint && npm run typecheck && npm run typecheck:strict && node --test && node --test e2e/ui.e2e.cjs",
     "eval": "node eval/run.cjs",
     "eval:ablate": "node eval/run.cjs --ablate=all",
     "import": "node import-doc.cjs",
@@ -21,6 +25,8 @@
     "nodemailer": "^6.10.1"
   },
   "devDependencies": {
-    "playwright": "^1.64.1"
+    "@types/node": "^24.19.2",
+    "playwright": "^1.64.1",
+    "typescript": "^5.9.3"
   }
 }

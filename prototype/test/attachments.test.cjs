@@ -144,3 +144,26 @@ test('入参：附件数量与文件名/编码校验', async (t) => {
     /contentBase64 非法/,
   );
 });
+
+test('保留策略：删除过期且未被引用的附件，保留被操作引用的旧附件', async (t) => {
+  const { service, blobStore } = setup(t);
+  const old = '2020-01-01T00:00:00.000Z';
+  const referenced = 'REFERENCED-OLD-CONTENT';
+  const orphan = 'ORPHAN-OLD-CONTENT';
+  const fresh = 'FRESH-CONTENT';
+  blobStore.put(Buffer.from(referenced), { name: 'referenced.pdf', now: () => old });
+  blobStore.put(Buffer.from(orphan), { name: 'orphan.pdf', now: () => old });
+  blobStore.put(Buffer.from(fresh), { name: 'fresh.pdf', now: () => new Date().toISOString() });
+
+  await freezeExternal(service, [{
+    filename: 'referenced.pdf', mime: 'application/pdf', contentBase64: b64(referenced),
+  }]);
+  const result = service.pruneAttachments({ days: 30 });
+  assert.equal(result.candidates, 2);
+  assert.equal(result.deleted, 1, '只删未被引用的孤儿');
+  assert.equal(result.keptReferenced, 1, '被冻结操作引用的旧附件必须保留');
+
+  const remain = blobStore.db.prepare('SELECT name FROM blobs ORDER BY name').all().map((r) => r.name);
+  assert.deepEqual(remain, ['fresh.pdf', 'referenced.pdf']);
+  assert.ok(service.audit.entries.some((e) => e.kind === '附件保留清理'));
+});

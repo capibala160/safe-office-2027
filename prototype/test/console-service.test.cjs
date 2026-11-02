@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.42.0');
+  assert.equal(bootstrap.state.version, '0.43.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -46,6 +46,38 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const contacts = service.listContacts();
   assert.ok(contacts.length >= 2);
   assert.ok(contacts.every((c) => c.phone === '[手机号已脱敏]' && c.email === '[邮箱已脱敏]'));
+});
+
+test('发件账号贯通：命令 → 冻结 → SQLite → 哈希校验', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm', { mailAccount: 'work' });
+  const op = run.operations.find((o) => o.action === 'sendExternalEmail');
+  assert.ok(op);
+  assert.equal(op.mailAccount, 'work');
+  const stored = service.store.getOperation(op.operationId);
+  assert.equal(stored.mailAccount, 'work');
+  const { verifyOperation } = require('../src/operation.cjs');
+  assert.equal(verifyOperation(stored).ok, true);
+  assert.equal(verifyOperation({ ...stored, mailAccount: 'backup' }).ok, false, '改账号必须断链');
+});
+
+test('默认发件账号在冻结时固化：换默认配置仍用原账号', async (t) => {
+  const mailer = {
+    defaultName: 'work',
+    list: () => [{ name: 'work', default: true }, { name: 'backup', default: false }],
+    async send() { return { status: 'sent' }; },
+  };
+  const { service } = setup({ service: { mailer } });
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations.find((o) => o.action === 'sendExternalEmail');
+  assert.equal(op.mailAccount, 'work', '缺省账号应解析成具体账号');
+  const stored = service.store.getOperation(op.operationId);
+  service.mailer.defaultName = 'backup';
+  assert.equal(service.store.getOperation(op.operationId).mailAccount, 'work', '冻结后换默认值不能改账号');
+  const { verifyOperation } = require('../src/operation.cjs');
+  assert.equal(verifyOperation(stored).ok, true);
 });
 
 test('正常内网纪要：冻结 → 策略自动确认 → FakeMailer 发送', async (t) => {

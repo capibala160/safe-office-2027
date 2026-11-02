@@ -118,7 +118,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.42.0');
+  assert.equal(data.version, '0.43.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -709,6 +709,25 @@ test('用户管理：管理员可列出/重置，非管理员 403', async (t) =>
     body: JSON.stringify({ newPassword: 'whatever123' }),
   });
   assert.equal(forbidden.status, 403);
+
+  const adminCookie = cookie('admin');
+  const disable = await fetch(`${started.url}/api/users/alice/disable`, { method: 'POST', headers: { Cookie: adminCookie } });
+  assert.equal(disable.status, 200);
+  assert.equal((await post(`${started.url}/api/login`, { username: 'alice', password: 'resetpass123' })).res.status, 401, '禁用后不能登录');
+  const afterDisable = await (await fetch(`${started.url}/api/users`, { headers: { Cookie: adminCookie } })).json();
+  assert.equal(afterDisable.items.find((u) => u.username === 'alice').disabled, true);
+
+  assert.equal((await fetch(`${started.url}/api/users/alice/enable`, { method: 'POST', headers: { Cookie: adminCookie } })).status, 200);
+  const reLogin = await post(`${started.url}/api/login`, { username: 'alice', password: 'resetpass123' });
+  assert.equal(reLogin.res.status, 200, '启用后可登录');
+  const aliceCookie2 = String(reLogin.res.headers.get('set-cookie')).split(';')[0];
+
+  assert.equal((await fetch(`${started.url}/api/users/admin/disable`, { method: 'POST', headers: { Cookie: adminCookie } })).status, 400, '不能禁用自己');
+  assert.equal((await fetch(`${started.url}/api/users/alice`, { method: 'DELETE', headers: { Cookie: aliceCookie2 } })).status, 403, '非管理员不能删除');
+  assert.equal((await fetch(`${started.url}/api/users/alice`, { method: 'DELETE', headers: { Cookie: adminCookie } })).status, 200);
+  assert.equal((await post(`${started.url}/api/login`, { username: 'alice', password: 'resetpass123' })).res.status, 401, '删除后不能登录');
+  const finalList = await (await fetch(`${started.url}/api/users`, { headers: { Cookie: adminCookie } })).json();
+  assert.deepEqual(finalList.items.map((u) => u.username), ['admin']);
 });
 
 test('租户隔离：文档/操作/运行历史互不可见，管理员与审批角色可见', async (t) => {

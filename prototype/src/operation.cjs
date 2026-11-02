@@ -87,6 +87,8 @@ function canonicalRecord(record) {
   };
   // v0.31 起把发起人绑进哈希；空值不写入，保证升级前冻结的旧记录仍能通过校验。
   if (record.createdBy) canonical.createdBy = record.createdBy;
+  // v0.43：发件账号也绑进哈希；空值不写入，兼容旧记录。
+  if (record.mailAccount) canonical.mailAccount = record.mailAccount;
   return JSON.stringify(canonical);
 }
 
@@ -118,6 +120,7 @@ function sealOperation(input = {}) {
     tool: input.tool || input.action,
     recipient: requiredString(input.recipient, 'recipient'),
     subject: input.subject || '',
+    mailAccount: input.mailAccount ? String(input.mailAccount).slice(0, 64) : '',
     body,
     bodyHash: sha256Hex(Buffer.from(body, 'utf8')),
     attachments,

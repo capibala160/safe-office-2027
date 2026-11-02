@@ -56,6 +56,34 @@ test('加密：附件落盘为 AES-256-GCM，明文不出现；错误密钥解�
   }
 });
 
+test('加密标记：未开启加密时，SFE1 开头的普通文件不能被误判为密文', () => {
+  const store = new BlobStore(':memory:');
+  try {
+    const plain = Buffer.from('SFE1 this is just plain text, not encrypted');
+    const meta = store.put(plain, { name: 'notes.txt', mime: 'text/plain' });
+    const row = store.db.prepare('SELECT encrypted FROM blobs WHERE sha256 = ?').get(meta.sha256);
+    assert.equal(Number(row.encrypted), 0);
+    const got = store.get(meta.sha256);
+    assert.equal(got.content.toString('utf8'), plain.toString('utf8'), '应按明文原样返回');
+  } finally {
+    store.close();
+  }
+});
+
+test('加密标记：有 key 上传时 encrypted=1，按标记解密而不是靠魔数猜', () => {
+  const store = new BlobStore(':memory:', { key: crypto.randomBytes(32) });
+  try {
+    const plain = Buffer.from('SFE1-looking plaintext');
+    const meta = store.put(plain, { name: 'a.txt', mime: 'text/plain' });
+    const row = store.db.prepare('SELECT encrypted, content FROM blobs WHERE sha256 = ?').get(meta.sha256);
+    assert.equal(Number(row.encrypted), 1);
+    assert.ok(Buffer.from(row.content).subarray(0, 4).equals(Buffer.from('SFE1')));
+    assert.equal(store.get(meta.sha256).content.toString('utf8'), plain.toString('utf8'));
+  } finally {
+    store.close();
+  }
+});
+
 // 真实 ClamAV：只有本机显式配置了 SAFE_OFFICE_CLAMAV_CMD / _DB 才跑；CI/无扫描器自动跳过
 const CLAMAV_CMD = process.env.SAFE_OFFICE_CLAMAV_CMD || '';
 const CLAMAV_DB = process.env.SAFE_OFFICE_CLAMAV_DB || '';

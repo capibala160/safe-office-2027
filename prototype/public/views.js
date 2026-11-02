@@ -87,7 +87,7 @@
   function operationCard(op) {
     return `<article class="op-card" data-op-card="${esc(op.operationId)}">
       <div class="op-head"><span class="tag">${esc(op.protocolLabel)}</span><strong>${esc(op.subject)}</strong>${badge(op.state)}${op.expired ? '<span class="badge block">已过期</span>' : ''}</div>
-      <div class="op-meta">目标：${esc(op.recipient)} · 密级：${esc(op.level)} · ${confirmationLabel(op)}${op.createdBy ? ` · 发起人：${esc(op.createdBy)}` : ''}</div>
+      <div class="op-meta">目标：${esc(op.recipient)} · 密级：${esc(op.level)} · ${confirmationLabel(op)}${op.mailAccount ? ` · 发件账号：${esc(op.mailAccount)}` : ''}${op.createdBy ? ` · 发起人：${esc(op.createdBy)}` : ''}</div>
       <div class="op-hash">operationHash ${esc(short(op.operationHash, 28))} · ${op.outbox ? `outbox ${esc(statusText[op.outbox.state] || op.outbox.state)}` : '暂无 outbox'}</div>
       ${op.attachments && op.attachments.length ? `<div class="op-meta">附件（${op.attachments.length}）：${op.attachments.map((a) => (EXPORTABLE.has(op.state)
         ? `<a href="/api/operations/${encodeURIComponent(op.operationId)}/attachments/${esc(a.sha256)}" download="${esc(a.name)}">${esc(a.name)}</a>`
@@ -516,6 +516,10 @@
         <div class="sub-text mt8" id="mail-hint">外发：partner@partner-example.com；内网：team@corp.internal。正文由 Agent 读取文档生成。</div>
       </section>
       <section class="card"><div class="card-head"><h2>邮件记录</h2><span class="sub">${emails.items.length} 条${emails.counts && emails.counts.bounced ? ` · 退信 ${emails.counts.bounced}` : ''}</span></div><div class="stack">${emails.items.length ? emails.items.map(operationCard).join('') : '<div class="empty">还没有邮件记录</div>'}</div></section>
+      <section class="card"><div class="card-head"><h2>收件箱（只读）</h2><span class="sub">不标已读 / 不执行邮件内容</span></div>
+        <div class="btn-row"><button class="btn ghost small" id="inbox-load">读取最近 10 封</button></div>
+        <div id="inbox-result" class="mt12"></div>
+      </section>
       <div id="mail-result"></div>`;
 
     const mode = root.querySelector('#mail-mode');
@@ -528,6 +532,23 @@
         : '外发：partner@partner-example.com；冻结后需 WS63 确认。';
     });
     bindOpActions(root, c);
+    root.querySelector('#inbox-load')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const box = root.querySelector('#inbox-result');
+      btn.disabled = true;
+      try {
+        const res = await API.get('/api/mail/inbox?limit=10');
+        if (!res.configured) {
+          box.innerHTML = `<div class="notice block">IMAP 未配置${res.error ? `：${esc(res.error)}` : ''}</div>`;
+          return;
+        }
+        box.innerHTML = res.items.length
+          ? `<div class="stack">${res.items.map((it) => `<div class="event"><div><div class="kind">${esc(it.subject)}</div><div class="sub-text">${esc(it.from)} · ${esc(it.date || '')} · ${it.seen ? '已读' : '未读'}</div><div class="sub-text mt8">${esc(it.preview)}</div></div><div class="seq">${esc(it.uid)}</div></div>`).join('')}</div><div class="sub-text mt8">${esc(res.note || '')}</div>`
+          : '<div class="empty">最近没有邮件</div>';
+      } catch (err) {
+        box.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
+      } finally { btn.disabled = false; }
+    });
     root.querySelector('#mail-run').addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       btn.disabled = true;
@@ -969,17 +990,19 @@
         </section>
         <section class="card">
           <div class="card-head"><h2>双链校验</h2></div>
+          ${gov.audit.restoreError ? `<div class="notice block">审计恢复失败：${esc(gov.audit.restoreError)}${gov.audit.quarantine && gov.audit.quarantine.isolated && gov.audit.quarantine.isolated.length ? `；原文件已隔离到 ${esc(gov.audit.quarantine.isolated.map((c) => c.to).join('、'))}` : ''}${gov.audit.persistBlocked ? '；已停止落盘以保护原文件' : ''}</div>` : ''}
           <div class="stack">
             <div class="spread"><span>审计链</span>${badge(gov.audit.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.audit.count)} 条</span></div>
             <div class="spread"><span>事件链（SQLite）</span>${badge(gov.events.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.events.count)} 条</span></div>
+            ${(gov.audit.tenants || []).length ? `<div class="sub-text mt8">租户链：${gov.audit.tenants.map((t) => `${esc(t.tenant)} ${esc(t.count)} 条`).join(' · ')}</div>` : ''}
             <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
           </div>
           <div id="gov-tamper-result" class="mt12"></div>
         </section>
       </div>
       ${users ? `<section class="card"><div class="card-head"><h2>用户管理</h2><span class="sub">${users.items.length} 个</span></div>
-        <div class="table-wrap"><table class="table"><thead><tr><th>用户</th><th>角色</th><th>两步验证</th><th>操作</th></tr></thead><tbody>
-          ${users.items.map((u) => `<tr><td class="mono">${esc(u.username)}</td><td>${esc(u.role)}</td><td>${u.totpEnabled ? '已启用' : '未启用'}</td><td><button class="btn ghost small" data-reset-user="${esc(u.username)}">重置密码</button></td></tr>`).join('')}
+        <div class="table-wrap"><table class="table"><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>两步验证</th><th>操作</th></tr></thead><tbody>
+          ${users.items.map((u) => `<tr><td class="mono">${esc(u.username)}</td><td>${esc(u.role)}</td><td>${u.disabled ? '已禁用' : '正常'}</td><td>${u.totpEnabled ? '已启用' : '未启用'}</td><td class="row-actions"><button class="btn ghost small" data-reset-user="${esc(u.username)}">重置密码</button><button class="btn ghost small" data-toggle-user="${esc(u.username)}" data-disabled="${u.disabled ? 'true' : 'false'}">${u.disabled ? '启用' : '禁用'}</button><button class="btn danger small" data-delete-user="${esc(u.username)}">删除</button></td></tr>`).join('')}
         </tbody></table></div>
       </section>` : ''}
       ${canReview ? `<section class="card"><div class="card-head"><h2>退信处理</h2><span class="sub">粘贴 .eml 原文，按 Message-ID 回填；不自动重发</span></div>
@@ -990,6 +1013,7 @@
     : `IMAP 未配置${gov.bouncePoll && gov.bouncePoll.error ? `（${esc(gov.bouncePoll.error)}）` : ''}——只能手动导入 .eml`}</div>
         <div id="bounce-result" class="mt12"></div>
       </section>` : ''}
+      ${(gov.mailAccounts || []).length ? `<section class="card"><div class="card-head"><h2>发件账号</h2><span class="sub">${gov.mailAccounts.length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>账号</th><th>发件人</th><th>服务器</th><th>默认</th></tr></thead><tbody>${gov.mailAccounts.map((a) => `<tr><td class="mono">${esc(a.name)}</td><td>${esc(a.from)}</td><td class="mono">${esc(a.host)}</td><td>${a.default ? '是' : ''}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
       <section class="card"><div class="card-head"><h2>策略矩阵</h2><span class="sub">未声明 = 拒绝（fail-closed）</span></div><div class="table-wrap"><table class="table"><thead><tr><th>角色</th>${actions.map((a) => `<th>${esc(a)}</th>`).join('')}</tr></thead><tbody>${roles.map((r) => `<tr><td><strong>${esc(r)}</strong></td>${actions.map((a) => `<td>${badge((policy[r] && policy[r][a]) || 'deny')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>办公能力分级</h2><span class="sub">${gov.capabilities.length} 类</span></div><div class="table-wrap"><table class="table"><thead><tr><th>能力</th><th>级别</th><th>工具</th><th>约束</th></tr></thead><tbody>${gov.capabilities.map((cap) => `<tr><td>${esc(cap.name)}</td><td>${badge(cap.level)}</td><td class="mono">${esc(cap.tools.join(', '))}</td><td>${esc(cap.constraints)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>工具注册表</h2><span class="sub">${(gov.tools || []).length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>工具</th><th>能力</th><th>级别</th><th>高危</th><th>转交</th><th>来源</th></tr></thead><tbody>${(gov.tools || []).map((tool) => `<tr><td class="mono">${esc(tool.name)}</td><td>${esc(tool.capability)}</td><td>${badge(tool.level)}</td><td>${tool.highRisk ? '是' : '否'}</td><td>${tool.deferred ? '是' : '否'}</td><td>${esc(tool.source)}</td></tr>`).join('')}</tbody></table></div></section>
@@ -1043,6 +1067,35 @@
         } finally {
           btn.disabled = false;
         }
+      });
+    });
+    root.querySelectorAll('[data-toggle-user]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const username = btn.dataset.toggleUser;
+        const disabling = btn.dataset.disabled !== 'true';
+        if (disabling && !window.confirm(`禁用「${username}」？其现有会话会立即失效。`)) return;
+        btn.disabled = true;
+        try {
+          await API.post(`/api/users/${encodeURIComponent(username)}/${disabling ? 'disable' : 'enable'}`, {});
+          toast(disabling ? `已禁用「${username}」` : `已启用「${username}」`, 'ok');
+          await c.refreshState();
+          c.rerender();
+        } catch (err) { toast(c.errorText(err), 'error'); }
+        finally { btn.disabled = false; }
+      });
+    });
+    root.querySelectorAll('[data-delete-user]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const username = btn.dataset.deleteUser;
+        if (!window.confirm(`删除「${username}」？该账号将无法登录，不可恢复。`)) return;
+        btn.disabled = true;
+        try {
+          await API.del(`/api/users/${encodeURIComponent(username)}`);
+          toast(`已删除「${username}」`, 'ok');
+          await c.refreshState();
+          c.rerender();
+        } catch (err) { toast(c.errorText(err), 'error'); }
+        finally { btn.disabled = false; }
       });
     });
     root.querySelector('#gov-report')?.addEventListener('click', () => {

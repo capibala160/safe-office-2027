@@ -51,7 +51,7 @@ function normalizeUser(raw) {
   if (totpSecret) {
     try { base32Decode(totpSecret); } catch { throw new Error(`用户「${username}」两步验证密钥非法`); }
   }
-  return { username, role: raw.role, salt: raw.salt, hash: raw.hash, totpSecret, totpEnabled };
+  return { username, role: raw.role, salt: raw.salt, hash: raw.hash, totpSecret, totpEnabled, disabled: raw.disabled === true };
 }
 
 function loadUsers(file) {
@@ -142,7 +142,7 @@ class AuthService {
   // ---------- 登录 / 会话 ----------
   login(username, password, code = '') {
     const user = this.users.get(String(username || '').trim());
-    if (!user || !verifyPassword(password, user)) return null;
+    if (!user || user.disabled || !verifyPassword(password, user)) return null;
     if (user.totpEnabled && !verifyTotp(user.totpSecret, code, { now: this.now() })) return null;
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAt = this.now() + this.ttlMs;
@@ -156,6 +156,12 @@ class AuthService {
     const key = hashToken(token);
     const session = this.sessions.get(key);
     if (!session) return null;
+    const user = this.users.get(session.username);
+    if (!user || user.disabled) {
+      this.sessions.delete(key);
+      this._saveSessions();
+      return null;
+    }
     const now = this.now();
     if (session.expiresAt <= now) {
       this.sessions.delete(key);
@@ -181,13 +187,16 @@ class AuthService {
     if (!user) return null;
     return {
       username: user.username, role: user.role,
-      totpEnabled: !!user.totpEnabled,
+      totpEnabled: !!user.totpEnabled, disabled: !!user.disabled,
     };
   }
 
   listUsers() {
     return [...this.users.values()]
-      .map((user) => ({ username: user.username, role: user.role, totpEnabled: !!user.totpEnabled }))
+      .map((user) => ({
+        username: user.username, role: user.role,
+        totpEnabled: !!user.totpEnabled, disabled: !!user.disabled,
+      }))
       .sort((a, b) => a.username.localeCompare(b.username));
   }
 
@@ -197,6 +206,10 @@ class AuthService {
       saveUsers(this.file, list);
     }
     this.users.set(updated.username, updated);
+  }
+
+  _persistAll() {
+    if (this.file) saveUsers(this.file, [...this.users.values()]);
   }
 
   _dropSessions(username, { keepToken = null } = {}) {
@@ -255,6 +268,55 @@ class AuthService {
     this.pendingTotp.delete(user.username);
     this._dropSessions(user.username);
     return { username: user.username };
+  }
+
+  // 管理员禁用/启用：禁用立即注销该用户全部会话；最后一个可用管理员不能被禁用。
+  setDisabled(username, disabled) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) {
+      const err = new Error('用户不存在');
+      err.code = 'USER_NOT_FOUND';
+      throw err;
+    }
+    const next = disabled === true;
+    if (next && user.role === '管理员') {
+      const others = [...this.users.values()].filter((u) => u.username !== user.username && u.role === '管理员' && !u.disabled);
+      if (others.length === 0) {
+        const err = new Error('不能禁用最后一个可用管理员');
+        err.code = 'LAST_ADMIN';
+        throw err;
+      }
+    }
+    this._persistUser({ ...user, disabled: next });
+    if (next) this._dropSessions(user.username);
+    return { username: user.username, disabled: next };
+  }
+
+  // 管理员删除账号：删除后不可登录、会话立即失效；最后一个可用管理员不能被删除。
+  deleteUser(username) {
+    const user = this.users.get(String(username || '').trim());
+    if (!user) {
+      const err = new Error('用户不存在');
+      err.code = 'USER_NOT_FOUND';
+      throw err;
+    }
+    if (user.role === '管理员') {
+      const others = [...this.users.values()].filter((u) => u.username !== user.username && u.role === '管理员' && !u.disabled);
+      if (others.length === 0) {
+        const err = new Error('不能删除最后一个可用管理员');
+        err.code = 'LAST_ADMIN';
+        throw err;
+      }
+    }
+    // 先成功写盘，再改内存/注销会话：写盘失败时不能出现「内存已删、磁盘还在」，
+    // 否则重启后账号会复活。
+    if (this.file) {
+      saveUsers(this.file, [...this.users.values()].filter((u) => u.username !== user.username));
+    }
+    this._dropSessions(user.username);
+    this.pendingTotp.delete(user.username);
+    this.users.delete(user.username);
+    return { username: user.username, deleted: true };
   }
 
   // ---------- TOTP ----------

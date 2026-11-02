@@ -105,6 +105,48 @@ class AuditLog {
   // 全链校验：任何一条被改动 / 顺序被换 → false
   checkpoint() { return { count: this.entries.length, head: this.prevHash }; }
 
+  // ---------- 租户分链（v0.33 租户 = 登录用户名） ----------
+  // 从全局链派生：只取该 actor 的条目，独立重算哈希，配合独立签名检查点。
+  // 派生链不替代全局链；全局链仍然覆盖所有条目。
+  tenantEntries(tenant) {
+    const t = String(tenant || '');
+    return this.entries.filter((e) => String(e.actor || '') === t);
+  }
+
+  tenantChain(tenant) {
+    const t = String(tenant || '');
+    const src = this.tenantEntries(t);
+    let prev = 'GENESIS';
+    const chain = [];
+    for (const e of src) {
+      const payload = {
+        tenant: t, seq: chain.length + 1, sourceSeq: e.seq,
+        kind: e.kind, detail: e.detail, ts: e.ts, prevHash: prev,
+      };
+      const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+      chain.push({ seq: chain.length + 1, sourceSeq: e.seq, kind: e.kind, ts: e.ts, prevHash: prev, hash });
+      prev = hash;
+    }
+    return { tenant: t, entries: chain, checkpoint: { count: chain.length, head: prev } };
+  }
+
+  tenantCheckpoint(tenant) { return this.tenantChain(tenant).checkpoint; }
+
+  // 校验前缀：可信检查点可以落后于当前链（之后又追加了新条目），
+  // 但必须能对上当时保存的 count/head；这样追加不会把旧检查点判成篡改。
+  verifyTenant(tenant, checkpoint) {
+    if (!checkpoint || !Number.isInteger(checkpoint.count) || checkpoint.count < 0) return false;
+    const chain = this.tenantChain(tenant).entries;
+    if (checkpoint.count > chain.length) return false;
+    const head = checkpoint.count === 0 ? 'GENESIS' : chain[checkpoint.count - 1].hash;
+    return checkpoint.head === head;
+  }
+
+  tenantCheckpoints() {
+    const tenants = [...new Set(this.entries.map((e) => e.actor).filter(Boolean).map(String))].sort();
+    return tenants.map((tenant) => ({ tenant, ...this.tenantCheckpoint(tenant) }));
+  }
+
   // 检查点签名：key 配置后，改 count/head 但没有 key 就无法伪造
   static signCheckpoint(checkpoint, key) {
     if (!key) return checkpoint;

@@ -1,0 +1,32 @@
+# 安全智慧办公控制台 · HTTPS 反向代理示例
+# 前提：控制台只监听 127.0.0.1:7812（默认），或用 docker-compose 映射到 127.0.0.1:7812。
+# 证书可用 certbot 申请：certbot --nginx -d office.example.com
+
+server {
+    listen 80;
+    server_name office.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name office.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/office.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/office.example.com/privkey.pem;
+
+    # 附件上传：单文件 5MB × 5 + 表单开销
+    client_max_body_size 30m;
+
+    location / {
+        proxy_pass http://127.0.0.1:7812;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+    }
+}

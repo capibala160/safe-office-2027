@@ -1,0 +1,9 @@
+.git
+.gitignore
+prototype/node_modules
+prototype/data
+prototype/out
+prototype/config.env
+prototype/*.log
+prototype/out/**
+**/*.tmp

@@ -45,9 +45,17 @@ class BlobStore {
         mime TEXT NOT NULL,
         size INTEGER NOT NULL,
         content BLOB NOT NULL,
+        encrypted INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
     `);
+    // 旧库补列：已有密文按 SFE1 魔数回填 encrypted=1（一次性迁移）。
+    // 新上传不再靠魔数判断，避免普通文件以 SFE1 开头被误判为加密。
+    const columns = this.db.prepare('PRAGMA table_info(blobs)').all().map((c) => c.name);
+    if (!columns.includes('encrypted')) {
+      this.db.exec("ALTER TABLE blobs ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0");
+      this.db.exec("UPDATE blobs SET encrypted = 1 WHERE substr(content, 1, 4) = X'53464531'");
+    }
   }
 
   put(buffer, { name, mime = 'application/octet-stream', now = () => new Date().toISOString() } = {}) {
@@ -65,21 +73,22 @@ class BlobStore {
       stored = Buffer.concat([ENC_MAGIC, nonce, cipher.getAuthTag(), ciphertext]);
     }
     this.db.prepare(`
-      INSERT INTO blobs (sha256, name, mime, size, content, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO blobs (sha256, name, mime, size, content, encrypted, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(sha256) DO UPDATE SET name = excluded.name, mime = excluded.mime
-    `).run(sha256, safeName, safeMime, buffer.length, stored, now());
+    `).run(sha256, safeName, safeMime, buffer.length, stored, this.key ? 1 : 0, now());
     return { name: safeName, sha256, size: buffer.length, mime: safeMime };
   }
 
   get(sha256) {
     const key = String(sha256 || '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(key)) return null;
-    const row = this.db.prepare('SELECT name, mime, size, content FROM blobs WHERE sha256 = ?').get(key);
+    const row = this.db.prepare('SELECT name, mime, size, content, encrypted FROM blobs WHERE sha256 = ?').get(key);
     if (!row) return null;
     let content = Buffer.from(row.content);
-    if (content.subarray(0, 4).equals(ENC_MAGIC)) {
+    if (Number(row.encrypted) === 1) {
       if (!this.key) throw new Error('附件已加密，但未提供 SAFE_OFFICE_BLOB_KEY');
+      if (!content.subarray(0, 4).equals(ENC_MAGIC)) throw new Error('附件加密格式损坏（缺少 SFE1 头）');
       const nonce = content.subarray(4, 4 + NONCE_LEN);
       const tag = content.subarray(4 + NONCE_LEN, 4 + NONCE_LEN + TAG_LEN);
       const ciphertext = content.subarray(4 + NONCE_LEN + TAG_LEN);
@@ -92,6 +101,15 @@ class BlobStore {
 
   has(sha256) {
     return this.get(sha256) !== null;
+  }
+
+  // 保留策略：列出早于 cutoff（ISO 时间）的附件元数据；调用方决定是否被引用
+  listOlderThan(cutoffIso) {
+    const cutoff = String(cutoffIso || '');
+    return this.db.prepare(`
+      SELECT sha256, name, size, created_at FROM blobs
+      WHERE created_at < ? ORDER BY created_at ASC
+    `).all(cutoff);
   }
 
   // 只删指定内容（按内容寻址）。调用方必须自己确认没有操作还引用它。
