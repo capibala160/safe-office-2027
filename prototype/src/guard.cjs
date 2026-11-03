@@ -28,6 +28,7 @@ const INJECTION_PATTERNS = [
 
 // 把外部内容按"句子"过筛：命中可疑模式的句子 → 隔离，不再当指令看待
 // 一句话可同时命中多个模式——收集全部命中（检测理由要写全，别只报第一条）
+/** @param {string} text @returns {{safe:boolean, reasons:string[], cleaned:string}} */
 function sanitizeInput(text) {
   const sentences = String(text).split(/(?<=[。！？\n])/);
   const reasons = new Set();
@@ -55,12 +56,26 @@ const PERSONAL_EMAIL_DOMAINS = [
   'yahoo.com', 'ymail.com', 'icloud.com', 'me.com', 'proton.me', 'protonmail.com',
 ];
 
+/** @param {string} domain @returns {boolean} */
 function isPersonalEmailDomain(domain) {
   const d = String(domain || '').toLowerCase();
   return PERSONAL_EMAIL_DOMAINS.some((x) => d === x || d.endsWith(`.${x}`));
 }
 
 class CapabilityToken {
+  /**
+   * @param {Object} [options]
+   * @param {string[]} [options.tools]
+   * @param {string[]} [options.documentIds]
+   * @param {string[]} [options.allowedExternalDomains]
+   * @param {string[]} [options.allowedInternalDomains]
+   * @param {number} [options.maxCalls]
+   * @param {string} [options.issuedFor]
+   * @param {number} [options.ttlMs]
+   * @param {number} [options.issuedAt]
+   * @param {string} [options.agentId]
+   * @param {string} [options.role]
+   */
   constructor({ tools = [], documentIds = [], allowedExternalDomains = [], allowedInternalDomains = ['corp.internal'], maxCalls = Infinity, issuedFor = '', ttlMs = 0, issuedAt = Date.now(), agentId = '', role = '' } = {}) {
     this.documentIds = [...documentIds];
     this.tools = tools;                          // 本任务允许调用的工具白名单
@@ -78,8 +93,14 @@ class CapabilityToken {
 
 // 注意：配额只计「放行的调用」——被拒绝的调用不消耗授权次数，
 // 否则攻击者可用垃圾调用耗干令牌，让正常步骤全部饿死。
+/**
+ * @param {CapabilityToken} token
+ * @param {string} tool
+ * @param {Record<string, any>} [args]
+ * @param {{now?: number}} [options]
+ */
 function checkToolCall(token, tool, args = {}, { now = Date.now() } = {}) {
-  if (!token || token.revoked) return { allow: false, reason: '令牌缺失或已撤销' };
+  if (!token || /** @type {{revoked?: boolean}} */ (token).revoked) return { allow: false, reason: '令牌缺失或已撤销' };
   if (token.expiresAt && now > token.expiresAt) {
       return { allow: false, reason: `令牌已过期（签发于 ${new Date(token.issuedAt).toISOString()}）` };
   }
@@ -106,8 +127,9 @@ function checkToolCall(token, tool, args = {}, { now = Date.now() } = {}) {
   return { allow: true, reason: 'ok' };
 }
 
+/** @param {CapabilityToken} token @param {{now?: number}} [options] */
 function checkTokenActive(token, { now = Date.now() } = {}) {
-  if (!token || token.revoked) return { allow: false, reason: '令牌缺失或已撤销' };
+  if (!token || /** @type {{revoked?: boolean}} */ (token).revoked) return { allow: false, reason: '令牌缺失或已撤销' };
   if (token.expiresAt && now > token.expiresAt) {
     return { allow: false, reason: `令牌已过期（签发于 ${new Date(token.issuedAt).toISOString()}）` };
   }
@@ -120,6 +142,7 @@ const REDACT_RULES = [
   { re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, to: '[邮箱已脱敏]' },
 ];
 
+/** @param {string} text @returns {string} */
 function redact(text) {
   let out = String(text);
   for (const r of REDACT_RULES) out = out.replace(r.re, r.to);
@@ -130,6 +153,12 @@ const OUTBOUND_ACTIONS = new Set(['sendInternalEmail', 'sendExternalEmail', 'upl
 
 // 出站数据检查：机密级一律禁止外发；外发自动脱敏；上传外部只允许公开级
 // v0.13：可选 outbound/outboundArg 供工具注册表的自定义出站工具复用同一规则
+/**
+ * @param {{title:string, body:string, level:string}} doc
+ * @param {string} action
+ * @param {{outbound?:boolean, outboundArg?:string|null}} [options]
+ * @returns {{allow:boolean, reason:string, content?:string}}
+ */
 function checkDataBoundary(doc, action, { outbound = OUTBOUND_ACTIONS.has(action), outboundArg = null } = {}) {
   if (!outbound) {
     return { allow: true, reason: '非出站动作', content: doc.body };
@@ -162,6 +191,7 @@ const HIGH_RISK_ACTIONS = new Set([
 
 // 演示版：nearfieldOnline 模拟"手机/工牌是否在星闪近场"
 // 上板后替换为真实 SLE 握手（WS63）
+/** @param {any} step @param {{nearfieldOnline?: boolean}} [options] */
 async function requestHumanConfirm(step, { nearfieldOnline } = {}) {
   if (nearfieldOnline) {
     return { approved: true, method: '模拟确认（非真实 SLE 凭据，不证明本人或距离）' };
@@ -180,7 +210,12 @@ const UNCOMPLIANT_OUTPUT_PATTERNS = [
   { re: /(不要|无需|不必).{0,6}(外传|公开|上报|留痕)/, label: '诱导隐瞒' },
 ];
 
+/**
+ * @param {string} text
+ * @param {{level?:string, confidentialDocs?:{title:string, body:string}[], external?:boolean}} [options]
+ */
 function checkAgentOutput(text, { level: _level = '内部', confidentialDocs = [], external = false } = {}) {
+  /** @type {{allowed:boolean, action:string, reasons:string[], content:string}} */
   const out = { allowed: true, action: 'allow', reasons: [], content: String(text) };
 
   // ① 机密碎片比对（整句长度 ≥10 才算"原文片段"，避免误伤短词）

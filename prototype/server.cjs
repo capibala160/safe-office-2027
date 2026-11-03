@@ -17,6 +17,7 @@ const { FakeMailer } = require('./src/mailer.cjs');
 const { createMailerPoolFromEnv } = require('./src/mail-accounts.cjs');
 const { createInboxReaderFromEnv } = require('./src/imap-inbox.cjs');
 const { scanAttachment, findClamav } = require('./src/file-scan.cjs');
+const { runPreflight } = require('./src/preflight.cjs');
 const { createAuthFromFile } = require('./src/auth.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
@@ -487,6 +488,13 @@ function createConsoleServer({
         return sendJson(res, 200, {
           ok: true, service: 'safe-office-console', version: health.version || VERSION,
           startedAt: health.startedAt, uptimeSec: health.uptimeSec,
+        });
+      }
+      if (pathname === '/api/preflight' && method === 'GET') {
+        requireRole(req, ROLE_ADMIN, '演示前自检');
+        return sendJson(res, 200, {
+          ok: true,
+          preflight: await runPreflight({ service, auth, checkPort: false }),
         });
       }
       if (pathname === '/api/bootstrap' && method === 'GET') {
@@ -993,6 +1001,9 @@ async function startServer({
   }
   if (instance.startBouncePolling) instance.startBouncePolling();
   if (instance.startAutoReplyPolling) instance.startAutoReplyPolling();
+  if (instance.startAuditExportTimer && instance.startAuditExportTimer()) {
+    console.log(`审计外部快照：每 ${Math.round(instance.auditExportIntervalMs / 60000)} 分钟导出，保留 ${instance.auditExportKeep} 份`);
+  }
   const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm, inboxReader });
   return new Promise((resolve, reject) => {
     const listen = () => {
@@ -1018,6 +1029,9 @@ async function startServer({
               try { if (blobStore) blobStore.close(); } catch { /* ignore */ }
               done();
             });
+            // 浏览器轮询会保持 keep-alive 连接；shutdown 时主动断开，避免 close 长时间不回调
+            if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+            else if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
           }),
         });
       });

@@ -10,6 +10,7 @@ const { DatabaseSync } = require('node:sqlite');
 const crypto = require('node:crypto');
 const { verifyOperation, TRANSITIONS } = require('./operation.cjs');
 
+/** @type {Record<string, Set<string>>} */
 const OUTBOX_TRANSITIONS = {
   pending: new Set(['sending', 'failed']),
   sending: new Set(['sent', 'failed', 'unknown']),
@@ -22,10 +23,12 @@ const OUTBOX_TRANSITIONS = {
   bounced: new Set(),
 };
 
+/** @param {string} text @returns {string} */
 function sha256Hex(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
 }
 
+/** @param {any} text @param {any} fallback @returns {any} */
 function parseJson(text, fallback) {
   try { return JSON.parse(text); } catch { return fallback; }
 }
@@ -137,6 +140,7 @@ class OperationStore {
     }
   }
 
+  /** @param {() => any} fn @returns {any} */
   _transaction(fn) {
     this.db.exec('BEGIN');
     try {
@@ -154,6 +158,7 @@ class OperationStore {
   }
 
   // ---------- operations ----------
+  /** @param {any} operation @returns {any} */
   insertOperation(operation) {
     if (!operation || operation.state !== 'frozen') {
       throw new Error('新操作记录必须是 frozen 状态');
@@ -187,6 +192,7 @@ class OperationStore {
     });
   }
 
+  /** @param {any} row @returns {any} */
   _rowToOperation(row) {
     if (!row) return null;
     return {
@@ -219,6 +225,7 @@ class OperationStore {
     };
   }
 
+  /** @param {string} operationId @returns {any} */
   getOperation(operationId) {
     return this._rowToOperation(this.db.prepare('SELECT * FROM operations WHERE operation_id = ?').get(operationId));
   }
@@ -228,6 +235,7 @@ class OperationStore {
       .all().map((row) => this._rowToOperation(row));
   }
 
+  /** @param {string} operationId @param {string} next @param {{confirmationId?: string|null, deviceId?: string|null, result?: any}} [options] */
   _operationStateInTx(operationId, next, { confirmationId = null, deviceId = null, result = null } = {}) {
     const current = this.getOperation(operationId);
     if (!current) throw new Error(`操作不存在：${operationId}`);
@@ -245,11 +253,13 @@ class OperationStore {
     return this.getOperation(operationId);
   }
 
+  /** @param {string} operationId @param {string} next @param {any} [options] */
   setOperationState(operationId, next, options = {}) {
     return this._transaction(() => this._operationStateInTx(operationId, next, options));
   }
 
   // 确认 + 入队必须同一事务：入队失败时不能留下 confirmed 但无 outbox 的卡死操作
+  /** @param {string} operationId @param {{confirmationId?: string|null, deviceId?: string|null}} [options] */
   confirmAndEnqueue(operationId, { confirmationId = null, deviceId = null } = {}) {
     return this._transaction(() => {
       const confirmed = this._operationStateInTx(operationId, 'confirmed', { confirmationId, deviceId });
@@ -259,6 +269,7 @@ class OperationStore {
   }
 
   // 发送开始 / 发送完成 / 发送失败：outbox 与操作状态同一事务
+  /** @param {string} outboxId @param {string} operationId */
   beginSend(outboxId, operationId) {
     return this._transaction(() => {
       const outbox = this._outboxStateInTx(outboxId, 'sending', { incrementAttempts: true });
@@ -267,6 +278,7 @@ class OperationStore {
     });
   }
 
+  /** @param {string} outboxId @param {string} operationId @param {{messageId?: string|null}} [options] */
   completeSend(outboxId, operationId, { messageId = null } = {}) {
     return this._transaction(() => {
       const outbox = this._outboxStateInTx(outboxId, 'sent', { messageId });
@@ -275,7 +287,9 @@ class OperationStore {
     });
   }
 
+  /** @param {string} outboxId @param {string} operationId @param {{state?: string, error?: string|null, kind?: string|null}} [options] */
   failSend(outboxId, operationId, { state, error = null, kind = null } = {}) {
+    if (!state) throw new TypeError('failSend 需要目标状态');
     return this._transaction(() => {
       const outbox = this._outboxStateInTx(outboxId, state, { error });
       // unknown 时操作保持 executing，等待人工核对；failed 才同步落 failed
@@ -287,6 +301,7 @@ class OperationStore {
   }
 
   // 草稿编辑：只有 frozen（尚未确认）的记录可以改；改完必须重新过校验并重新确认
+  /** @param {any} operation @returns {any} */
   updateFrozenOperation(operation) {
     if (!operation || operation.state !== 'frozen') {
       throw new Error('只有 frozen 状态的操作记录可以编辑');
@@ -312,6 +327,7 @@ class OperationStore {
     });
   }
 
+  /** @param {any} revision @returns {any} */
   insertRevision(revision) {
     return this._transaction(() => {
       this.db.prepare(`
@@ -326,6 +342,7 @@ class OperationStore {
     });
   }
 
+  /** @param {string} operationId @returns {any[]} */
   listRevisions(operationId) {
     return this.db.prepare('SELECT * FROM operation_revisions WHERE operation_id = ? ORDER BY revision ASC')
       .all(operationId)
@@ -342,6 +359,7 @@ class OperationStore {
   }
 
   // ---------- 控制台元数据（重启恢复用） ----------
+  /** @param {string} operationId @param {any} data */
   saveOperationMeta(operationId, data) {
     this.db.prepare(`
       INSERT INTO operation_meta (operation_id, data, updated_at) VALUES (?,?,?)
@@ -356,6 +374,7 @@ class OperationStore {
     }));
   }
 
+  /** @param {string} key @param {any} value */
   saveState(key, value) {
     this.db.prepare(`
       INSERT INTO console_state (key, data, updated_at) VALUES (?,?,?)
@@ -363,12 +382,14 @@ class OperationStore {
     `).run(String(key), JSON.stringify(value === undefined ? null : value), this.now());
   }
 
+  /** @param {string} key @returns {any} */
   loadState(key) {
     const row = this.db.prepare('SELECT data FROM console_state WHERE key = ?').get(String(key));
     return row ? parseJson(row.data, null) : null;
   }
 
   // ---------- outbox ----------
+  /** @param {any} row @returns {any} */
   _rowToOutbox(row) {
     if (!row) return null;
     return {
@@ -384,6 +405,7 @@ class OperationStore {
     };
   }
 
+  /** @param {any} operation @returns {any} */
   _enqueueOutboxInTx(operation) {
     if (!operation || operation.state !== 'confirmed') {
       throw new Error('只有 confirmed 状态的操作才能入队发送');
@@ -398,23 +420,28 @@ class OperationStore {
       'pending', null, 0, null, this.now(), this.now(),
     );
     const row = this.db.prepare('SELECT * FROM outbox WHERE idempotency_key = ?').get(operation.operationHash);
+    if (!row) throw new Error('发送入队失败：outbox 记录不存在');
     this.appendEvent('发送入队', { operationId: operation.operationId, outboxId: row.outbox_id }, { operationId: operation.operationId });
     return this._rowToOutbox(row);
   }
 
+  /** @param {any} operation @returns {any} */
   enqueueOutbox(operation) {
     return this._transaction(() => this._enqueueOutboxInTx(operation));
   }
 
+  /** @param {string} outboxId @returns {any} */
   getOutbox(outboxId) {
     return this._rowToOutbox(this.db.prepare('SELECT * FROM outbox WHERE outbox_id = ?').get(outboxId));
   }
 
+  /** @param {string} operationId @returns {any} */
   getOutboxByOperation(operationId) {
     return this._rowToOutbox(this.db.prepare('SELECT * FROM outbox WHERE operation_id = ?').get(operationId));
   }
 
   // v0.40.2 退信回退匹配：部分 MTA 改写 Message-ID，但保留 X-Idempotency-Key（= operationHash）
+  /** @param {string} idempotencyKey @returns {any[]} */
   listOutboxByIdempotencyKey(idempotencyKey) {
     const target = String(idempotencyKey || '').trim().toLowerCase();
     if (!target) return [];
@@ -422,6 +449,7 @@ class OperationStore {
   }
 
   // v0.35 退信匹配：Message-ID 大小写与尖括号不敏感；同 ID 多条时返回全部交由上层判断
+  /** @param {string} messageId @returns {any[]} */
   listOutboxByMessageId(messageId) {
     const target = String(messageId || '').trim().replace(/^<|>$/g, '').toLowerCase();
     if (!target) return [];
@@ -435,6 +463,7 @@ class OperationStore {
     return this.db.prepare('SELECT * FROM outbox ORDER BY created_at ASC').all().map((r) => this._rowToOutbox(r));
   }
 
+  /** @param {string} outboxId @param {string} next @param {{messageId?: string|null, error?: string|null, incrementAttempts?: boolean}} [options] */
   _outboxStateInTx(outboxId, next, { messageId = null, error = null, incrementAttempts = false } = {}) {
     const current = this.getOutbox(outboxId);
     if (!current) throw new Error(`发件记录不存在：${outboxId}`);
@@ -453,12 +482,14 @@ class OperationStore {
     return this.getOutbox(outboxId);
   }
 
+  /** @param {string} outboxId @param {string} next @param {any} [options] */
   setOutboxState(outboxId, next, options = {}) {
     return this._transaction(() => this._outboxStateInTx(outboxId, next, options));
   }
 
   // ---------- 自动回信去重 / 限速（v0.46） ----------
   // 先占位再发送：同一 Message-ID 的并发扫描只会有一个成功。
+  /** @param {string} messageKey @param {{recipient?: string, operationId?: string, state?: string, reason?: string}} [options] @returns {boolean} */
   claimAutoReply(messageKey, { recipient, operationId = '', state = 'claimed', reason = '' } = {}) {
     const key = String(messageKey || '').trim();
     if (!key) throw new TypeError('messageKey 不能为空');
@@ -469,6 +500,7 @@ class OperationStore {
     return Number(result.changes) > 0;
   }
 
+  /** @param {string} messageKey @param {string} state @param {{operationId?: string, reason?: string}} [options] @returns {any} */
   setAutoReplyState(messageKey, state, { operationId = '', reason = '' } = {}) {
     this.db.prepare(`
       UPDATE auto_replies SET state = ?, operation_id = COALESCE(NULLIF(?, ''), operation_id), reason = ?
@@ -477,6 +509,7 @@ class OperationStore {
     return this.getAutoReply(messageKey);
   }
 
+  /** @param {any} row @returns {any} */
   _rowToAutoReply(row) {
     if (!row) return null;
     return {
@@ -489,6 +522,7 @@ class OperationStore {
     };
   }
 
+  /** @param {string} messageKey @returns {any} */
   getAutoReply(messageKey) {
     return this._rowToAutoReply(
       this.db.prepare('SELECT * FROM auto_replies WHERE message_key = ?').get(String(messageKey)),
@@ -501,6 +535,7 @@ class OperationStore {
   }
 
   // 限速只统计真正尝试过的记录；内部错误（error）不占配额，避免配置错误后永久静默
+  /** @param {string} iso @returns {number} */
   countAutoRepliesSince(iso) {
     const row = this.db.prepare(
       "SELECT COUNT(*) AS n FROM auto_replies WHERE created_at >= ? AND state <> 'error'",
@@ -508,15 +543,17 @@ class OperationStore {
     return Number(row && row.n) || 0;
   }
 
+  /** @param {string} recipient @returns {string|null} */
   lastAutoReplyTo(recipient) {
     const row = this.db.prepare(`
       SELECT MAX(created_at) AS at FROM auto_replies
        WHERE recipient = ? AND state <> 'error'
     `).get(String(recipient || ''));
-    return row ? row.at : null;
+    return row && row.at != null ? String(row.at) : null;
   }
 
   // ---------- events（本地哈希链） ----------
+  /** @param {string} kind @param {any} detail @param {{operationId?: string|null}} [options] */
   appendEvent(kind, detail, { operationId = null } = {}) {
     const last = this.db.prepare('SELECT hash FROM events ORDER BY seq DESC LIMIT 1').get();
     const prevHash = last ? last.hash : 'GENESIS';
@@ -556,7 +593,11 @@ class OperationStore {
 
   eventCheckpoint() {
     const row = this.db.prepare('SELECT seq, hash FROM events ORDER BY seq DESC LIMIT 1').get();
-    return { count: this.db.prepare('SELECT COUNT(*) AS n FROM events').get().n, head: row ? row.hash : 'GENESIS' };
+    const countRow = this.db.prepare('SELECT COUNT(*) AS n FROM events').get();
+    return {
+      count: countRow ? Number(countRow.n) || 0 : 0,
+      head: row && row.hash != null ? String(row.hash) : 'GENESIS',
+    };
   }
 }
 

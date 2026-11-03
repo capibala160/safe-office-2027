@@ -16,6 +16,8 @@
     "src/faults.cjs",
     "src/operation.cjs",
     "src/audit-sign.cjs",
-    "src/ws63-protocol.cjs"
+    "src/ws63-protocol.cjs",
+    "src/guard.cjs",
+    "src/store.cjs"
   ]
 }

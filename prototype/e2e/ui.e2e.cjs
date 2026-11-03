@@ -507,3 +507,136 @@ test('UI 文档共享：alice 导入并共享给 bob → bob 看到共享给我 
 
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });
+
+// ---------- v0.47 新增：审计快照 / 账号禁用 / 自动回信 ----------
+function e2eUser(username, role) {
+  const { salt, hash } = hashPassword('password123');
+  return { username, role, salt, hash };
+}
+
+async function e2eLogin(page, base, name, password = 'password123') {
+  await page.goto(base, { waitUntil: 'domcontentloaded' });
+  await page.waitForURL(/\/login\.html/);
+  await page.fill('#username', name);
+  await page.fill('#password', password);
+  await page.click('#submit');
+  await page.waitForURL((url) => !url.pathname.endsWith('/login.html'));
+  await page.waitForSelector('#current-user:not([hidden])');
+}
+
+test('UI：审计外部快照导出与校验', { timeout: 90000 }, async (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { ConsoleService } = require('../src/console-service.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-e2e-export-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const auth = new AuthService({ users: [e2eUser('admin', '管理员')] });
+  const service = new ConsoleService({
+    storeFile: ':memory:',
+    auditFile: path.join(dir, 'audit.jsonl'),
+    auditCheckpointFile: path.join(dir, 'audit.jsonl.head'),
+    auditTenantCheckpointFile: path.join(dir, 'audit.tenants.json'),
+    auditArchiveDir: path.join(dir, 'audit-archive'),
+    auditExternalDir: path.join(dir, 'external'),
+  });
+  service.audit.append('E2E 预置', { ok: true });
+  const started = await startServer({ port: 0, service, auth });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+
+  await e2eLogin(page, started.url, 'admin');
+  await page.goto(`${started.url}/#/governance`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#gov-export');
+  await page.click('#gov-export');
+  await page.waitForFunction(() => {
+    const box = document.getElementById('gov-export-result');
+    return box && box.textContent.includes('已导出');
+  }, null, { timeout: 15000 });
+
+  await page.click('#gov-verify-export');
+  await page.waitForFunction(() => {
+    const box = document.getElementById('gov-export-result');
+    return box && box.textContent.includes('校验：通过');
+  }, null, { timeout: 15000 });
+  assert.match(await page.textContent('#gov-export-result'), /检查 \d+\/\d+ 个文件/);
+});
+
+test('UI：管理员禁用账号后该账号无法登录', { timeout: 90000 }, async (t) => {
+  const auth = new AuthService({ users: [e2eUser('admin', '管理员'), e2eUser('alice', '员工')] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  page.on('dialog', (dialog) => dialog.accept());
+
+  await e2eLogin(page, started.url, 'admin');
+  await page.goto(`${started.url}/#/governance`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-toggle-user="alice"]');
+  await page.click('[data-toggle-user="alice"]');
+  await page.waitForFunction(() => {
+    const toast = document.getElementById('toast');
+    return toast && toast.textContent.includes('已禁用「alice」');
+  }, null, { timeout: 15000 });
+
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await page.fill('#username', 'alice');
+  await page.fill('#password', 'password123');
+  await page.click('#submit');
+  await page.waitForFunction(() => {
+    const err = document.getElementById('err');
+    return err && err.textContent.trim().length > 0;
+  }, null, { timeout: 15000 });
+  assert.match(await page.url(), /\/login\.html/);
+  assert.match(await page.textContent('#err'), /不正確|不正确|禁用|INVALID|用户名/);
+});
+
+test('UI：审计员按策略自动回信（固定模板，不读来信正文）', { timeout: 90000 }, async (t) => {
+  const { ConsoleService } = require('../src/console-service.cjs');
+  const auth = new AuthService({ users: [e2eUser('auditor', '审计员')] });
+  let seq = 0;
+  const inboxReader = {
+    async fetch() {
+      seq += 1;
+      const sender = `inbox${seq}@partner-example.com`;
+      return {
+        items: [{
+          uid: seq,
+          from: sender,
+          date: new Date().toISOString(),
+          messageId: `<e2e-${seq}@partner-example.com>`,
+          headers: { 'message-id': `<e2e-${seq}@partner-example.com>`, from: sender },
+        }],
+      };
+    },
+  };
+  const autoReplyPolicy = {
+    enabled: true,
+    allow: [{ domain: 'partner-example.com' }],
+    subject: '自动回复：已收到您的来信',
+    template: '您好，已收到您的来信。',
+    account: '',
+    maxPerHour: 5,
+    perSenderHours: 24,
+    maxAgeHours: 24,
+    maxPerScan: 10,
+    pollMs: 600000,
+  };
+  const service = new ConsoleService({ storeFile: ':memory:', inboxReader, autoReplyPolicy });
+  const started = await startServer({ port: 0, service, auth });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+
+  await e2eLogin(page, started.url, 'auditor');
+  await page.goto(`${started.url}/#/mail`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#auto-reply-scan');
+  await page.click('#auto-reply-scan');
+  await page.waitForFunction(() => {
+    const box = document.getElementById('auto-reply-result');
+    return box && box.textContent.includes('已回 1 封');
+  }, null, { timeout: 20000 });
+  assert.match(await page.textContent('#auto-reply-result'), /扫描 \d+ 封/);
+});

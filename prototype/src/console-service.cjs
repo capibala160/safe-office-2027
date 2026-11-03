@@ -43,7 +43,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.46.4';
+const VERSION = '0.47.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -129,6 +129,8 @@ class ConsoleService {
     auditExternalDir = process.env.SAFE_OFFICE_AUDIT_EXTERNAL_DIR || null,
     auditRetentionDays = Number(process.env.SAFE_OFFICE_AUDIT_RETENTION_DAYS) || 0,
     auditArchiveKeep = Number(process.env.SAFE_OFFICE_AUDIT_ARCHIVE_KEEP) || 14,
+    auditExportIntervalMs = (Number(process.env.SAFE_OFFICE_AUDIT_EXPORT_INTERVAL_MIN) || 0) * 60 * 1000,
+    auditExportKeep = Number(process.env.SAFE_OFFICE_AUDIT_EXPORT_KEEP) || 7,
     auditKey = process.env.SAFE_OFFICE_AUDIT_KEY || null,
     auditPrivateKeyPem = process.env.SAFE_OFFICE_AUDIT_ED25519_PRIVATE_KEY || null,
     auditPublicKeyPem = process.env.SAFE_OFFICE_AUDIT_ED25519_PUBLIC_KEY || null,
@@ -164,6 +166,10 @@ class ConsoleService {
     this.auditExternalState = { lastVerify: null, lastError: null };
     this.auditRetentionDays = Math.max(0, Number(auditRetentionDays) || 0);
     this.auditArchiveKeep = Math.max(1, Number(auditArchiveKeep) || 14);
+    // v0.47：定时把审计快照导出到外部目录，并按份数保留
+    this.auditExportIntervalMs = Math.max(0, Number(auditExportIntervalMs) || 0);
+    this.auditExportKeep = Math.max(1, Number(auditExportKeep) || 7);
+    this.auditExportState = { lastAt: null, lastResult: null, lastError: null, timer: null };
     this.auditRotation = { lastAt: null, lastResult: null };
     this.auditKey = auditKey ? Buffer.from(String(auditKey), /^[0-9a-fA-F]{64}$/.test(String(auditKey)) ? 'hex' : 'base64') : null;
     if (this.auditKey && this.auditKey.length < 16) throw new Error('SAFE_OFFICE_AUDIT_KEY 至少 16 字节');
@@ -1149,7 +1155,13 @@ class ConsoleService {
   }
 
   getAuditExternalStatus() {
-    if (!this.auditExternalDir) return { configured: false, lastVerify: this.auditExternalState.lastVerify };
+    if (!this.auditExternalDir) {
+      return {
+        configured: false,
+        lastVerify: this.auditExternalState.lastVerify,
+        schedule: this._auditExportScheduleStatus(),
+      };
+    }
     let ext;
     try { ext = this._auditExternalPath(); } catch (err) {
       return { configured: true, error: err.message, lastVerify: this.auditExternalState.lastVerify };
@@ -1170,7 +1182,85 @@ class ConsoleService {
     return {
       configured: true, dir: ext, snapshots: snapshots.length, latest,
       lastVerify: this.auditExternalState.lastVerify,
+      schedule: this._auditExportScheduleStatus(),
     };
+  }
+
+  _auditExportScheduleStatus() {
+    return {
+      intervalMs: this.auditExportIntervalMs,
+      keep: this.auditExportKeep,
+      active: !!this.auditExportState.timer,
+      lastAt: this.auditExportState.lastAt,
+      lastResult: this.auditExportState.lastResult,
+      lastError: this.auditExportState.lastError,
+    };
+  }
+
+  // 删除超出保留份数的旧快照；只处理 snapshot-* 目录，且必须在外部目录内
+  pruneAuditSnapshots({ keep = this.auditExportKeep } = {}) {
+    const ext = this._auditExternalPath();
+    const n = Math.max(1, Number(keep) || 1);
+    const snapshots = this._listAuditSnapshots(ext); // 新 → 旧
+    const remove = snapshots.slice(n);
+    const removed = [];
+    for (const name of remove) {
+      if (!/^snapshot-[A-Za-z0-9._-]+$/.test(name)) continue;
+      const dir = path.resolve(ext, name);
+      if (dir !== ext && !dir.startsWith(`${ext}${path.sep}`)) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+      removed.push(name);
+    }
+    if (removed.length > 0) {
+      this.audit.append('审计外部快照清理', { keep: n, removed });
+    }
+    return { ok: true, deleted: removed.length, kept: Math.min(snapshots.length, n), removed };
+  }
+
+  // 定时任务只做一次导出 + 修剪；失败写入状态，不抛出打断进程
+  runAuditExportTick({ by = 'system' } = {}) {
+    if (!this.auditExternalDir) {
+      return { ok: false, skipped: 'not-configured', error: '未配置外部存储目录' };
+    }
+    try {
+      const exported = this.exportAuditSnapshot({ by });
+      const pruned = this.pruneAuditSnapshots();
+      this.auditExportState = {
+        ...this.auditExportState,
+        lastAt: this._iso(),
+        lastResult: { name: exported.name, files: exported.files.length, pruned: pruned.removed },
+        lastError: null,
+      };
+      return { ok: true, ...exported, pruned };
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      this.auditExportState = { ...this.auditExportState, lastAt: this._iso(), lastError: message };
+      return { ok: false, error: message };
+    }
+  }
+
+  startAuditExportTimer() {
+    if (!this.auditExternalDir || this.auditExportIntervalMs <= 0) return false;
+    if (this.auditExportState.timer) return true;
+    const tick = () => {
+      try { this.runAuditExportTick(); } catch (err) {
+        this.auditExportState = {
+          ...this.auditExportState,
+          lastAt: this._iso(),
+          lastError: err && err.message ? err.message : String(err),
+        };
+      }
+    };
+    this.auditExportState.timer = setInterval(tick, this.auditExportIntervalMs);
+    if (typeof this.auditExportState.timer.unref === 'function') this.auditExportState.timer.unref();
+    return true;
+  }
+
+  stopAuditExportTimer() {
+    if (this.auditExportState.timer) {
+      clearInterval(this.auditExportState.timer);
+      this.auditExportState.timer = null;
+    }
   }
 
   // 模型信息要如实反映实际用的实现，不能对真实模型还标"MockLLM（演示）"
@@ -3572,6 +3662,7 @@ class ConsoleService {
     this.closed = true;
     this.stopBouncePolling();
     this.stopAutoReplyPolling();
+    this.stopAuditExportTimer();
     this._saveAudit();
     try { this.store.close(); } catch { /* ignore */ }
     if (this._ownsBlobStore) {

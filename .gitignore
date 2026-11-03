@@ -6,6 +6,8 @@ Thumbs.db
 prototype/out/
 # 导入的真实资料（本地库，绝不入库）
 prototype/data/
+# 本地备份（含审计/用户库，绝不入库）
+prototype/backups/
 # 本地模型/邮箱配置（含密钥，绝不入库）
 prototype/config.env
 

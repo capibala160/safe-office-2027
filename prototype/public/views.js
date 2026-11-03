@@ -294,6 +294,11 @@
           <div class="sub-text mt8">攻击样例可能触发风险冻结；可在治理页复核 clear。</div>
         </section>
       </div>
+      ${(c.store.bootstrap.authUser && c.store.bootstrap.authUser.role === '管理员') ? `<section class="card">
+        <div class="card-head"><h2>演示前自检</h2><span class="sub">只读检查 · 管理员可见</span></div>
+        <div id="preflight-box" class="sub-text">检查中…</div>
+        <div class="btn-row mt12"><button class="btn ghost small" id="preflight-run">重新检查</button></div>
+      </section>` : ''}
       <section class="card">
         <div class="card-head"><h2>最近安全事件</h2><span class="sub">${events.length} 条</span></div>
         <div class="event-list">${events.slice().reverse().map(eventItem).join('') || '<div class="empty">还没有事件，先跑一条命令</div>'}</div>
@@ -324,6 +329,28 @@
         finally { btn.disabled = false; }
       });
     });
+    const pfBox = root.querySelector('#preflight-box');
+    if (pfBox) {
+      const renderPreflight = (pf) => {
+        if (!pf) return;
+        const rows = pf.checks.map((x) => {
+          const mark = x.status === 'ok' ? '✓' : (x.status === 'warn' ? '!' : '✗');
+          return `<div class="spread"><span>${mark} ${esc(x.label)}</span><span class="sub-text">${esc(x.detail)}</span></div>`;
+        }).join('');
+        pfBox.innerHTML = `<div class="notice ${pf.ok ? 'info' : 'block'}">${pf.ok ? '通过' : '有阻塞项'}：${esc(pf.counts.ok)} 通过 / ${esc(pf.counts.warn)} 提醒 / ${esc(pf.counts.fail)} 失败</div><div class="stack mt8">${rows}</div>`;
+      };
+      const runPreflight = async () => {
+        pfBox.textContent = '检查中…';
+        try {
+          const res = await API.get('/api/preflight');
+          renderPreflight(res.preflight);
+        } catch (err) {
+          pfBox.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
+        }
+      };
+      root.querySelector('#preflight-run')?.addEventListener('click', runPreflight);
+      runPreflight();
+    }
   }
 
   // ---------- 命令台 ----------
@@ -1057,7 +1084,7 @@
             <div class="spread"><span>事件链（SQLite）</span>${badge(gov.events.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.events.count)} 条</span></div>
             ${(gov.audit.tenants || []).length ? `<div class="sub-text mt8">租户链：${gov.audit.tenants.map((t) => `${esc(t.tenant)} ${esc(t.count)} 条`).join(' · ')}</div>` : ''}
             ${gov.audit.archiveDir ? `<div class="sub-text mt8">归档目录：${esc(gov.audit.archiveDir)}${gov.audit.rotation && gov.audit.rotation.lastAt ? ` · 上次轮转 ${esc(gov.audit.rotation.lastAt)}` : ''} · 保留 ${esc(gov.audit.archiveKeep || 14)} 份</div>` : ''}
-            ${gov.audit.external && gov.audit.external.configured ? `<div class="sub-text mt8">外部存储：${esc(gov.audit.external.dir)} · ${esc(gov.audit.external.snapshots || 0)} 个快照${gov.audit.external.latest ? ` · 最新 ${esc(gov.audit.external.latest.name)}（${esc(gov.audit.external.latest.files)} 个文件）` : ''}${gov.audit.external.lastVerify ? ` · 上次校验 ${gov.audit.external.lastVerify.ok ? '通过' : '失败'}` : ''}<br>清单只证明副本与导出时一致，不抵抗同时改写文件与清单的人；防篡改以本地独立检查点为准。</div>` : ''}
+            ${gov.audit.external && gov.audit.external.configured ? `<div class="sub-text mt8">外部存储：${esc(gov.audit.external.dir)} · ${esc(gov.audit.external.snapshots || 0)} 个快照${gov.audit.external.latest ? ` · 最新 ${esc(gov.audit.external.latest.name)}（${esc(gov.audit.external.latest.files)} 个文件）` : ''}${gov.audit.external.lastVerify ? ` · 上次校验 ${gov.audit.external.lastVerify.ok ? '通过' : '失败'}` : ''}${gov.audit.external.schedule && gov.audit.external.schedule.intervalMs ? ` · 定时每 ${Math.round(gov.audit.external.schedule.intervalMs / 60000)} 分钟导出，保留 ${esc(gov.audit.external.schedule.keep)} 份` : ' · 未启用定时导出'}<br>清单只证明副本与导出时一致，不抵抗同时改写文件与清单的人；防篡改以本地独立检查点为准。</div>` : ''}
             <div class="sub-text mt8">检查点签名：${gov.audit.signing && gov.audit.signing.alg ? `${esc(gov.audit.signing.alg)}（keyId ${esc(gov.audit.signing.keyId || '-')}）· 公钥可交第三方用 \`npm run verify:audit\` 复核` : '未配置（可设 SAFE_OFFICE_AUDIT_ED25519_PRIVATE_KEY_FILE）'}</div>
             <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-rotate">轮转审计</button>' : ''}${canAdmin && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-export">导出外部快照</button>' : ''}${canReport && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-verify-export">校验外部快照</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
           </div>

@@ -1,6 +1,6 @@
 {
   "name": "safe-office-prototype",
-  "version": "0.46.4",
+  "version": "0.47.0",
   "private": true,
   "description": "安全智慧办公 · Agent 安全运行机制核心原型 + 办公套件控制台（平台无关；上板时平移 ArkTS）",
   "scripts": {
@@ -12,6 +12,9 @@
     "demo:start": "node scripts/demo-start.cjs",
     "demo:reset": "node scripts/demo-start.cjs --reset",
     "demo:check": "node scripts/demo-start.cjs --check",
+    "demo:preflight": "node scripts/demo-preflight.cjs",
+    "backup": "node scripts/backup.cjs",
+    "restore": "node scripts/restore-backup.cjs",
     "test": "node --test",
     "lint": "eslint . && node scripts/lint.cjs",
     "typecheck": "tsc -p tsconfig.json",
