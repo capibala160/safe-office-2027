@@ -87,6 +87,39 @@ test('verifyAuditFiles：链 + 前缀检查点 + 签名三者都过才算通过'
   assert.equal(noKey.ok, false);
 });
 
+test('租户链缓存：增量更新与全量派生结果一致（多租户/多条目）', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-tenant-cache-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const pair = generateAuditKeyPair();
+  const service = new ConsoleService({
+    auditFile: path.join(dir, 'audit.jsonl'),
+    auditPrivateKeyPem: pair.privateKeyPem,
+  });
+  t.after(() => service.close());
+
+  const actors = ['alice', 'bob', 'carol'];
+  for (let i = 0; i < 60; i += 1) {
+    service._withAuditActor(actors[i % actors.length], () => {
+      service.audit.append('测试事件', { i });
+    });
+  }
+
+  const derived = service.audit.tenantCheckpoints();
+  assert.equal(service._tenantChainState.size, derived.length);
+  for (const item of derived) {
+    assert.deepEqual(
+      service._tenantChainState.get(item.tenant),
+      { count: item.count, head: item.head },
+      `租户 ${item.tenant} 的增量链头必须与全量派生一致`,
+    );
+  }
+  // 可信检查点也必须覆盖所有租户且签名可验
+  assert.equal(service._trustedTenantCheckpoints.size, derived.length);
+  for (const cp of service._trustedTenantCheckpoints.values()) {
+    assert.equal(service.auditSigner.verify(cp), true);
+  }
+});
+
 test('ConsoleService：Ed25519 检查点落盘、重启可验、篡改被隔离', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-sign-svc-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

@@ -18,6 +18,24 @@ test('压测：读请求统计 p50/p95/p99、RPS、RSS', async () => {
   assert.ok(Number.isFinite(result.rssMb.delta));
 });
 
+test('压测：超时会主动取消并拒绝，不会留下工作循环', async () => {
+  const started = Date.now();
+  await assert.rejects(
+    () => runBench({ concurrency: 10, requests: 1000000, scenario: 'read', timeoutMs: 50 }),
+    /压测超时/,
+  );
+  assert.ok(Date.now() - started < 10000, '超时后应快速退出，而不是继续跑完请求');
+});
+
+test('压测：长跑使用有界蓄水池，标记近似值', async () => {
+  const result = await runBench({
+    concurrency: 5, requests: 300, scenario: 'read', maxSamples: 100,
+  });
+  assert.equal(result.latencySeen, 300);
+  assert.equal(result.latencySamples, 100);
+  assert.equal(result.approximate, true);
+});
+
 test('压测：混合场景真的执行命令（生成操作记录）', async () => {
   const result = await runBench({ concurrency: 1, requests: 4, scenario: 'command' });
   assert.equal(result.ok, 4);

@@ -13,7 +13,7 @@
 npm start            # 办公套件控制台 → http://127.0.0.1:7812（v0.12）
 node demo.cjs        # 攻防演示（答辩预演脚本：正常流 / 能力分级 / 沙箱双锁 / 图片通道 / 注入 / 端云边界 / 越权 / 冻结闭环 / 近场 / 回滚 / 回溯 / 风险行为因子 / 点名 5+1 类攻击速览 / Agent 角色分级 / 委托令牌 / 时延开销）
 npm run demo:nearfield  # WS63 确认适配器演示（6 幕：正常/取消/超时/重放/篡改/错设备，无硬件）
-npm test             # 自动化测试（446 项：444 通过 + 2 跳过；另有 npm run e2e 8 项）
+npm test             # 自动化测试（451 项：449 通过 + 2 跳过；另有 npm run e2e 8 项）
 npm run bench        # HTTP 压测：p50/p95/p99 / RPS / RSS（docs/53）
 npm run audit:keygen -- --out=data/keys   # 生成 Ed25519 审计密钥（docs/54）
 npm run verify:audit -- --audit=data/audit.jsonl --checkpoint=data/audit.jsonl.head --public-key=data/keys/audit-ed25519-public.pem

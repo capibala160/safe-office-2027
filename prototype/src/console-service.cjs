@@ -43,7 +43,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.46.1';
+const VERSION = '0.46.2';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -109,6 +109,8 @@ class ConsoleService {
     operationTtlMs = 5 * 60 * 1000,
     riskThreshold = 60,
     autoSafeQuota = 3,
+    maxQueuedCommands = 20,
+    maxLiveRuns = 100,
     autoSafeDomains = ['partner-example.com'],
     toolRegistry = null,
     toolExecutors = null,
@@ -216,6 +218,8 @@ class ConsoleService {
     this.agentSeq = 0;
     this.runs = [];
     this.liveRuns = new Map();
+    this.maxQueuedCommands = Math.max(1, Number(maxQueuedCommands) || 20);
+    this.maxLiveRuns = Math.max(this.maxQueuedCommands + 1, Number(maxLiveRuns) || 100);
     this._runChain = Promise.resolve();
     this._initWorkspace();
     // 配置在 workspace 之后加载：重连要往注册表/审计里写
@@ -509,6 +513,8 @@ class ConsoleService {
     this.audit = this._restoreAudit();
     this.audit.actorProvider = () => this._auditActorStorage.getStore() || null;
     this._loadTenantCheckpoints();
+    // v0.46.2：租户派生链头缓存（增量更新，避免每条审计重算所有租户）
+    this._rebuildTenantChainState();
     this.audit.onAppend = (rec) => this._appendAudit(rec);
     // 导入的真实资料并入文档视图（样例文档保持静态）
     if (this.documentsStore) {
@@ -755,18 +761,55 @@ class ConsoleService {
     }
   }
 
-  _writeTenantCheckpoints() {
+  // 启动/重置后按当前审计条目重建一次；之后每条审计只更新涉及的那个租户
+  _rebuildTenantChainState() {
+    this._tenantChainState = new Map();
+    for (const t of this.audit.tenantCheckpoints()) {
+      this._tenantChainState.set(String(t.tenant), { count: t.count, head: t.head });
+    }
+  }
+
+  // 与 AuditLog.tenantChain() 的派生公式保持一致，只算新追加的一条
+  _updateTenantChain(rec) {
+    const tenant = rec && rec.actor ? String(rec.actor) : '';
+    if (!tenant) return null;
+    const prev = this._tenantChainState.get(tenant) || { count: 0, head: 'GENESIS' };
+    const payload = {
+      tenant,
+      seq: prev.count + 1,
+      sourceSeq: rec.seq,
+      kind: rec.kind,
+      detail: rec.detail,
+      ts: rec.ts,
+      prevHash: prev.head,
+    };
+    const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    const next = { count: prev.count + 1, head: hash };
+    this._tenantChainState.set(tenant, next);
+    return { tenant, ...next };
+  }
+
+  // change 为空 = 全量重写（启动/关闭/迁移）；否则只给本次租户签名
+  _writeTenantCheckpoints(change = null) {
     if (!this.auditTenantCheckpointFile) return;
     try {
-      const checkpoints = {};
-      for (const t of this.audit.tenantCheckpoints()) {
-        checkpoints[t.tenant] = this.auditSigner.sign({ count: t.count, head: t.head });
+      if (change) {
+        this._trustedTenantCheckpoints.set(
+          change.tenant,
+          this.auditSigner.sign({ count: change.count, head: change.head }),
+        );
+      } else {
+        const checkpoints = {};
+        for (const [tenant, cp] of this._tenantChainState) {
+          checkpoints[tenant] = this.auditSigner.sign({ count: cp.count, head: cp.head });
+        }
+        this._trustedTenantCheckpoints = new Map(Object.entries(checkpoints));
       }
+      const checkpoints = Object.fromEntries(this._trustedTenantCheckpoints);
       fs.mkdirSync(path.dirname(this.auditTenantCheckpointFile), { recursive: true });
       const tmp = `${this.auditTenantCheckpointFile}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify({ checkpoints }, null, 2), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmp, this.auditTenantCheckpointFile);
-      this._trustedTenantCheckpoints = new Map(Object.entries(checkpoints));
       this._tenantCheckpointError = null;
     } catch (err) {
       this._tenantCheckpointError = err && err.message ? err.message : String(err);
@@ -788,6 +831,8 @@ class ConsoleService {
 
   // 每条审计只追加一行 + 重写小检查点（O(1)）；旧整体 JSON 在第一次写时迁移
   _appendAudit(rec) {
+    // 先更新内存里的租户链头：即使未落盘，缓存也要与全局链一致
+    const tenantChange = this._updateTenantChain(rec);
     if (!this.auditFile || this._auditPersistBlocked) return;
     try {
       fs.mkdirSync(path.dirname(this.auditFile), { recursive: true });
@@ -800,7 +845,7 @@ class ConsoleService {
       }
       const checkpoint = this.auditSigner.sign(this.audit.checkpoint());
       fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
-      this._writeTenantCheckpoints();
+      this._writeTenantCheckpoints(tenantChange);
       this.auditPersist.ok = true;
       this.auditPersist.error = null;
     } catch (err) {
@@ -875,6 +920,8 @@ class ConsoleService {
 
     this.audit.entries = [];
     this.audit.prevHash = 'GENESIS';
+    this._tenantChainState.clear();
+    this._trustedTenantCheckpoints = new Map();
     this._auditJsonl = true;
     this._withAuditActor(by, () => {
       this.audit.append('审计轮转', {
@@ -1211,6 +1258,10 @@ class ConsoleService {
         audit: this.audit.entries.length,
         pendingChallenges: pendingChallenges.length,
         runs: runs.length,
+        queuedTasks: [...this.liveRuns.values()]
+          .filter((r) => r.status === 'running' && !r.started).length,
+        liveRuns: this.liveRuns.size,
+        maxQueuedCommands: this.maxQueuedCommands,
       },
       audit: {
         verified: this.audit.verify() && !this._auditRestoreError,
@@ -1559,6 +1610,17 @@ class ConsoleService {
     return task;
   }
 
+  // 只清理已完成/失败的历史；进行中的任务永远保留（否则界面会查不到进度）
+  _pruneLiveRuns(keepId = null) {
+    if (this.liveRuns.size <= this.maxLiveRuns) return;
+    for (const [id, run] of this.liveRuns) {
+      if (this.liveRuns.size <= this.maxLiveRuns) break;
+      if (id === keepId) continue;
+      if (run.status !== 'running') this.liveRuns.delete(id);
+    }
+    // 若仍超限，说明都是进行中的任务：不删除，靠 maxQueuedCommands 保证有界
+  }
+
   _runVisible(run, actor, role) {
     if (!actor || !run || !run.operator) return true;
     if (['管理员', '审计员'].includes(role)) return true;
@@ -1568,6 +1630,16 @@ class ConsoleService {
   // 异步任务：立即返回 runId，前端轮询进度；离开页面任务照常跑完
   startCommand(input = {}) {
     this._normalizeCommandInput(input); // 参数错误立刻 400，不进队列
+    // 只限制“排队中”的任务；执行中的任务不因新提交被挤掉
+    const queued = [...this.liveRuns.values()]
+      .filter((r) => r.status === 'running' && !r.started).length;
+    if (queued >= this.maxQueuedCommands) {
+      throw new ConsoleError(
+        'BUSY',
+        `任务队列已满（${queued} 条排队，上限 ${this.maxQueuedCommands}），请稍后重试`,
+        429,
+      );
+    }
     const runId = `RUN-${++this.seq}`;
     const live = {
       runId,
@@ -1576,6 +1648,7 @@ class ConsoleService {
       role: input.role || '员工',
       stage: '排队',
       status: 'running',
+      started: false,
       cancelRequested: false,
       startedAt: this.now(),
       stageLog: [{ stage: '排队', at: this._iso() }],
@@ -1583,19 +1656,19 @@ class ConsoleService {
       error: null,
     };
     this.liveRuns.set(runId, live);
-    if (this.liveRuns.size > 50) {
-      const oldest = this.liveRuns.keys().next().value;
-      if (oldest !== runId) this.liveRuns.delete(oldest);
-    }
-    const task = this._runChain.then(() => this._executeCommand(input, {
-      runId,
-      onStage: (stage, info) => {
-        live.stage = stage;
-        live.stageLog.push({ stage, at: this._iso(), ...(info || {}) });
-        if (live.stageLog.length > 40) live.stageLog.shift();
-      },
-      shouldAbort: () => live.cancelRequested,
-    })).then((run) => {
+    this._pruneLiveRuns(runId);
+    const task = this._runChain.then(() => {
+      live.started = true;
+      return this._executeCommand(input, {
+        runId,
+        onStage: (stage, info) => {
+          live.stage = stage;
+          live.stageLog.push({ stage, at: this._iso(), ...(info || {}) });
+          if (live.stageLog.length > 40) live.stageLog.shift();
+        },
+        shouldAbort: () => live.cancelRequested,
+      });
+    }).then((run) => {
       const pending = (run.operations || []).filter((o) => o.state === 'frozen').length;
       live.stage = pending ? '待确认' : '完成';
       live.status = 'done';

@@ -6,6 +6,33 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 
+/**
+ * @typedef {Object} AuditEntry
+ * @property {number} seq
+ * @property {string} kind
+ * @property {any} detail
+ * @property {string} ts
+ * @property {string} prevHash
+ * @property {string} [hash]
+ * @property {string} [actor]
+ * @typedef {Object} Checkpoint
+ * @property {number} count
+ * @property {string} head
+ * @property {string} [alg]
+ * @property {string} [mac]
+ * @property {string} [sig]
+ * @property {string} [keyId]
+ * @typedef {Object} Policy
+ * @property {string} role
+ * @property {string} action
+ * @property {string} decision
+ * @typedef {Policy & {by?:string, reason?:string, ts?:string, before?:string}} PolicyChange
+ * @typedef {Object} RiskEvent
+ * @property {number} points
+ * @property {string} reason
+ * @property {number} score
+ */
+
 // ---------- 策略矩阵：角色 × 动作 → allow | confirm | deny ----------
 // 规则：未声明的动作 = 默认拒绝（fail-closed）
 const DEFAULT_POLICIES = [
@@ -54,17 +81,22 @@ const DEFAULT_POLICIES = [
 ];
 
 class PolicyEngine {
+  /** @param {Policy[]} [policies] */
   constructor(policies = DEFAULT_POLICIES) {
     this.policies = structuredClone(policies);
+    /** @type {PolicyChange[]} */
     this.changes = []; // 策略热更新的变更记录（由调用方写入审计链）
   }
+  /** @param {string} role @param {string} action @returns {string} */
   decide(role, action) {
     const hit = this.policies.find((p) => p.role === role && p.action === action);
     return hit ? hit.decision : 'deny'; // 未声明 = 默认拒绝
   }
   // 策略热更新：不重启即可调整「角色 × 动作」决策；变更必须留痕（返回记录供落审计）
+  /** @param {string} role @param {string} action @param {string} decision @param {{by?:string, reason?:string}} [options] @returns {PolicyChange} */
   update(role, action, decision, { by = '安全管理员', reason = '' } = {}) {
     if (!['allow', 'confirm', 'deny'].includes(decision)) throw new Error('非法策略决策');
+    /** @type {PolicyChange} */
     const rec = { role, action, decision, by, reason, ts: new Date().toISOString() };
     const hit = this.policies.find((p) => p.role === role && p.action === action);
     rec.before = hit ? hit.decision : '(未声明)';
@@ -78,14 +110,20 @@ class PolicyEngine {
 // ---------- 审计日志：哈希链（prevHash 串联，防篡改） ----------
 class AuditLog {
   // onAppend：每次写入后的回调（控制台用它落盘；抛错不影响审计本身）
+  /** @param {{onAppend?: ((rec: AuditEntry) => void)|null}} [options] */
   constructor({ onAppend = null } = {}) {
+    /** @type {AuditEntry[]} */
     this.entries = [];
     this.prevHash = 'GENESIS';
     this.onAppend = onAppend;
+    /** @type {string|null} */
     this.actor = null; // 兼容旧调用；控制台用 actorProvider 读请求级上下文
+    /** @type {(() => string|null)|null} */
     this.actorProvider = null; // 异步上下文（AsyncLocalStorage）优先，避免并发串号
   }
+  /** @param {string} kind @param {any} detail @returns {AuditEntry} */
   append(kind, detail) {
+    /** @type {AuditEntry} */
     const rec = {
       seq: this.entries.length + 1,
       kind,
@@ -96,8 +134,9 @@ class AuditLog {
     rec.detail = structuredClone(detail);
     const actor = this.actorProvider ? this.actorProvider() : this.actor;
     if (actor) rec.actor = String(actor);
-    rec.hash = crypto.createHash('sha256').update(JSON.stringify(rec)).digest('hex');
-    this.prevHash = rec.hash;
+    const hash = crypto.createHash('sha256').update(JSON.stringify(rec)).digest('hex');
+    rec.hash = hash;
+    this.prevHash = hash;
     this.entries.push(rec);
     if (this.onAppend) {
       try { this.onAppend(rec); } catch { /* 落盘失败不打断审计链 */ }
@@ -105,26 +144,31 @@ class AuditLog {
     return rec;
   }
   // 全链校验：任何一条被改动 / 顺序被换 → false
+  /** @returns {Checkpoint} */
   checkpoint() { return { count: this.entries.length, head: this.prevHash }; }
 
   // ---------- 租户分链（v0.33 租户 = 登录用户名） ----------
   // 从全局链派生：只取该 actor 的条目，独立重算哈希，配合独立签名检查点。
   // 派生链不替代全局链；全局链仍然覆盖所有条目。
+  /** @param {string} tenant @returns {AuditEntry[]} */
   tenantEntries(tenant) {
     const t = String(tenant || '');
     return this.entries.filter((e) => String(e.actor || '') === t);
   }
 
+  /** @param {string} tenant */
   tenantChain(tenant) {
     const t = String(tenant || '');
     const src = this.tenantEntries(t);
     let prev = 'GENESIS';
     const chain = [];
     for (const e of src) {
+      /** @type {any} */
       const payload = {
         tenant: t, seq: chain.length + 1, sourceSeq: e.seq,
         kind: e.kind, detail: e.detail, ts: e.ts, prevHash: prev,
       };
+      /** @type {string} */
       const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
       chain.push({ seq: chain.length + 1, sourceSeq: e.seq, kind: e.kind, ts: e.ts, prevHash: prev, hash });
       prev = hash;
@@ -132,10 +176,12 @@ class AuditLog {
     return { tenant: t, entries: chain, checkpoint: { count: chain.length, head: prev } };
   }
 
+  /** @param {string} tenant @returns {Checkpoint} */
   tenantCheckpoint(tenant) { return this.tenantChain(tenant).checkpoint; }
 
   // 校验前缀：可信检查点可以落后于当前链（之后又追加了新条目），
   // 但必须能对上当时保存的 count/head；这样追加不会把旧检查点判成篡改。
+  /** @param {string} tenant @param {Checkpoint} checkpoint @returns {boolean} */
   verifyTenant(tenant, checkpoint) {
     if (!checkpoint || !Number.isInteger(checkpoint.count) || checkpoint.count < 0) return false;
     const chain = this.tenantChain(tenant).entries;
@@ -144,12 +190,14 @@ class AuditLog {
     return checkpoint.head === head;
   }
 
+  /** @returns {Array<{tenant:string} & Checkpoint>} */
   tenantCheckpoints() {
     const tenants = [...new Set(this.entries.map((e) => e.actor).filter(Boolean).map(String))].sort();
     return tenants.map((tenant) => ({ tenant, ...this.tenantCheckpoint(tenant) }));
   }
 
   // 检查点签名：key 配置后，改 count/head 但没有 key 就无法伪造
+  /** @param {Checkpoint} checkpoint @param {Buffer|null} key @returns {Checkpoint} */
   static signCheckpoint(checkpoint, key) {
     if (!key) return checkpoint;
     const body = JSON.stringify({ count: checkpoint.count, head: checkpoint.head });
@@ -157,6 +205,7 @@ class AuditLog {
     return { ...checkpoint, alg: 'HMAC-SHA256', mac };
   }
 
+  /** @param {Checkpoint} checkpoint @param {Buffer|null} key @returns {boolean} */
   static verifyCheckpoint(checkpoint, key) {
     if (!key) return !!checkpoint;
     if (!checkpoint || checkpoint.alg !== 'HMAC-SHA256' || typeof checkpoint.mac !== 'string') return false;
@@ -166,6 +215,7 @@ class AuditLog {
     return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
   }
   // checkpoint 必须由调用者独立保存或签名；与日志放在一起不能抵抗整链替换。
+  /** @param {string} file @returns {Checkpoint} */
   save(file) {
     if (!this.verify()) throw new Error('拒绝持久化损坏的审计链');
     const checkpoint = this.checkpoint();
@@ -173,6 +223,7 @@ class AuditLog {
     return checkpoint;
   }
   // 读取审计文件：兼容旧的整体 JSON 与新的 JSONL（一行一条）
+  /** @param {string} file @returns {AuditEntry[]} */
   static readFile(file) {
     const raw = fs.readFileSync(file, 'utf8').trim();
     if (!raw) return [];
@@ -185,6 +236,7 @@ class AuditLog {
     return [data]; // 只有一条记录的 JSONL
   }
 
+  /** @param {string} file @returns {boolean} */
   static isJsonlFile(file) {
     const raw = fs.readFileSync(file, 'utf8').trim();
     if (!raw || raw.includes('\n')) return true;
@@ -197,16 +249,19 @@ class AuditLog {
   }
 
   // 增量落盘：一行一条，append 是 O(1)，不再每次重写全量
+  /** @param {string} file @param {AuditEntry} rec */
   static appendLine(file, rec) {
     fs.appendFileSync(file, `${JSON.stringify(rec)}\n`, { encoding: 'utf8', mode: 0o600 });
   }
 
   // 全量重写（迁移旧格式 / reset 清盘用）
+  /** @param {string} file @param {AuditEntry[]} entries */
   static writeLines(file, entries) {
     const body = entries.length > 0 ? `${entries.map((e) => JSON.stringify(e)).join('\n')}\n` : '';
     fs.writeFileSync(file, body, { encoding: 'utf8', mode: 0o600 });
   }
 
+  /** @param {string} file @param {Checkpoint} trustedCheckpoint @returns {AuditLog} */
   static load(file, trustedCheckpoint) {
     if (!trustedCheckpoint) throw new Error('恢复审计需要独立可信检查点');
     const log = new AuditLog();
@@ -215,12 +270,14 @@ class AuditLog {
     if (!log.verify(trustedCheckpoint)) throw new Error('审计恢复校验失败');
     return log;
   }
+  /** @param {Checkpoint} [checkpoint] @returns {boolean} */
   verify(checkpoint = this.checkpoint()) {
     let prev = 'GENESIS';
     for (let i = 0; i < this.entries.length; i++) {
       const e = this.entries[i];
       if (e.seq !== i + 1) return false;
       if (e.prevHash !== prev) return false;
+      /** @type {any} */
       const payload = { seq: e.seq, kind: e.kind, detail: e.detail, ts: e.ts, prevHash: e.prevHash };
       if (e.actor) payload.actor = e.actor; // v0.33 起才有；旧条目无此字段，哈希保持兼容
       const h = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
@@ -237,21 +294,27 @@ class AuditLog {
 //   人工复核 outcome=escalate → 保持冻结（升级处置）
 // 评分 = 拦截事件（客观阻力点） + 行为因子（设计骨架 §4 L3：高危频次/异常时段/持续越权）
 class RiskMeter {
+  /** @param {number} [threshold] @param {{onEvent?: Function, behavioral?: boolean, windowMs?: number}} [options] */
   constructor(threshold = 60, { onEvent, behavioral = true, windowMs = 10 * 60 * 1000 } = {}) {
     this.score = 0;
     this.threshold = threshold;
+    /** @type {RiskEvent[]} */
     this.events = [];
     this.frozen = false;     // true = 高危通道已冻结
     this.freezeCount = 0;
+    /** @type {any[]} */
     this.reviews = [];
     this.onEvent = typeof onEvent === 'function' ? onEvent : () => {};
     // —— 行为因子（可解释、确定性：时间戳由调用方给出，便于测试复现）——
     this.behavioral = behavioral;
     this.windowMs = windowMs;
+    /** @type {Map<string, number[]>} */
     this._obs = new Map();       // 观测窗口：key → 时间戳数组（滑窗裁剪）
+    /** @type {number|null} */
     this._offHourFired = null;   // 异常时段因子：每小时最多触发一次
   }
 
+  /** @param {number} points @param {string} reason @returns {number} */
   add(points, reason) {
     this.score += points;
     this.events.push({ points, reason, score: this.score });
@@ -268,7 +331,8 @@ class RiskMeter {
   //   ① 高频：10 分钟窗口内高危动作执行次数达到 3 的整数倍 → 每次 +8
   //   ② 凌晨：00:00–06:00 执行高危动作 → 每小时内 +6（一次性）
   //   ③ 持续越权：同一动作 10 分钟内被拦 3 次 → +10
-  observe({ kind, action = '', ts = Date.now() } = {}) {
+  /** @param {{kind:string, action?:string, ts?:number}} event @returns {number} */
+  observe({ kind, action = '', ts = Date.now() }) {
     if (!this.behavioral) return this.score;
     if (kind === 'executed-high-risk') {
       const n = this._pushObs('exec', ts);
@@ -285,6 +349,7 @@ class RiskMeter {
     return this.score;
   }
 
+  /** @param {string} key @param {number} ts @returns {number} */
   _pushObs(key, ts) {
     const arr = (this._obs.get(key) || []).filter((t) => ts - t < this.windowMs);
     arr.push(ts);
@@ -295,6 +360,7 @@ class RiskMeter {
   get alerting() {
     return this.score >= this.threshold;
   }
+  /** @param {{by?:string, outcome?:string, note?:string}} [options] */
   review({ by = '安全管理员', outcome = 'clear', note = '' } = {}) {
     const scoreBefore = this.score;
     if (outcome === 'clear') {

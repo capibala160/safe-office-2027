@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.46.1');
+  assert.equal(bootstrap.state.version, '0.46.2');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -533,6 +533,50 @@ test('异步任务：起跑即返回 runId，阶段可轮询，完成有结果',
   assert.ok(snap.stageLog.some((s) => s.stage === '规划'), '应有规划阶段');
   assert.ok(snap.stageLog.some((s) => s.stage === '执行'), '应有执行阶段');
   assert.ok(snap.result, '完成后的任务要能取回结果');
+});
+
+test('任务队列：排队超过上限返回 BUSY，完成后再提交可继续', async (t) => {
+  const { service } = setup({ service: { maxQueuedCommands: 1 } });
+  t.after(() => service.close());
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  service._executeCommand = async () => { await gate; return { operations: [] }; };
+  const input = {
+    command: '把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal',
+    role: '员工', tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M2'],
+  };
+  const first = service.startCommand(input);
+  assert.throws(
+    () => service.startCommand(input),
+    (err) => err.code === 'BUSY' && err.status === 429,
+  );
+  release();
+  await service.liveRuns.get(first.runId).done;
+  const second = service.startCommand(input);
+  await service.liveRuns.get(second.runId).done;
+  assert.equal(service.liveRuns.get(second.runId).status, 'done');
+});
+
+test('任务历史：只清理已完成，进行中/排队中的任务不被挤掉', async (t) => {
+  const { service } = setup({ service: { maxQueuedCommands: 2, maxLiveRuns: 2 } });
+  t.after(() => service.close());
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  service._executeCommand = async () => { await gate; return { operations: [] }; };
+  const input = {
+    command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+  };
+  const a = service.startCommand(input);
+  await Promise.resolve(); // 让 a 离开排队态
+  const b = service.startCommand(input);
+  const c = service.startCommand(input);
+  assert.equal(service.liveRuns.size, 3, '超过 maxLiveRuns 也不能删进行中的任务');
+  for (const id of [a.runId, b.runId, c.runId]) assert.ok(service.liveRuns.has(id));
+  release();
+  await Promise.all([a, b, c].map((x) => service.liveRuns.get(x.runId).done));
+  const d = service.startCommand(input);
+  await service.liveRuns.get(d.runId).done;
+  assert.ok(service.liveRuns.size <= service.maxLiveRuns, '触发清理后应回到上限内');
 });
 
 test('取消：规划期间请求取消 → 后续步骤全部不执行，已发生的保留', async (t) => {

@@ -9,6 +9,7 @@
 // ============================================================
 
 class ModelFault extends Error {
+  /** @param {string} faultClass @param {string} reason */
   constructor(faultClass, reason) {
     super(`模型故障（${faultClass}）：${reason}`);
     this.name = 'ModelFault';
@@ -19,10 +20,12 @@ class ModelFault extends Error {
 
 // 分类优先级：已归类 > 明确语义（未配置/边界拒绝/HTTP/空响应）> 超时 > 非法JSON > 网络 > 未知
 // 默认「未知故障」同样 fail-closed——宁可拒绝，不放过不确定。
+/** @param {unknown} err @returns {{class:string, reason:string}} */
 function classifyModelFault(err) {
   if (err instanceof ModelFault) return { class: err.faultClass, reason: err.faultReason };
-  const name = String((err && err.name) || '');
-  const msg = String((err && err.message) || err || '未知错误');
+  const e = /** @type {any} */ (err);
+  const name = String((e && e.name) || '');
+  const msg = String((e && e.message) || e || '未知错误');
   if (name === 'TimeoutError' || name === 'AbortError') return { class: '模型超时', reason: msg };
   if (/未配置/.test(msg)) return { class: '模型未配置', reason: msg };
   if (/模型边界拒绝/.test(msg)) return { class: '模型边界拒绝', reason: msg };
@@ -35,6 +38,7 @@ function classifyModelFault(err) {
   return { class: '未知故障', reason: msg };
 }
 
+/** @param {unknown} err @returns {ModelFault} */
 function asModelFault(err) {
   const f = classifyModelFault(err);
   return new ModelFault(f.class, f.reason);

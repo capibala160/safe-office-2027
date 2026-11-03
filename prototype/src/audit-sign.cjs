@@ -17,11 +17,13 @@ const { AuditLog } = require('./governance.cjs');
 const ALG_ED25519 = 'Ed25519';
 const ALG_HMAC = 'HMAC-SHA256';
 
+/** @param {string} value @returns {string} */
 function normalizePem(value) {
   if (typeof value !== 'string') return '';
   return value.replace(/\\n/g, '\n').trim();
 }
 
+/** @param {string} pem @param {string} [label] @returns {import('node:crypto').KeyObject} */
 function loadPrivateKey(pem, label = 'Ed25519 私钥') {
   const key = crypto.createPrivateKey({ key: normalizePem(pem), format: 'pem' });
   if (key.asymmetricKeyType !== 'ed25519') {
@@ -30,6 +32,7 @@ function loadPrivateKey(pem, label = 'Ed25519 私钥') {
   return key;
 }
 
+/** @param {string} pem @param {string} [label] @returns {import('node:crypto').KeyObject} */
 function loadPublicKey(pem, label = 'Ed25519 公钥') {
   const key = crypto.createPublicKey({ key: normalizePem(pem), format: 'pem' });
   if (key.asymmetricKeyType !== 'ed25519') {
@@ -38,15 +41,18 @@ function loadPublicKey(pem, label = 'Ed25519 公钥') {
   return key;
 }
 
+/** @param {import('node:crypto').KeyObject} privateKey @returns {string} */
 function publicKeyPemFromPrivate(privateKey) {
-  return crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });
+  return String(crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }));
 }
 
+/** @param {import('node:crypto').KeyObject} publicKey @returns {string} */
 function keyIdOf(publicKey) {
   const der = publicKey.export({ type: 'spki', format: 'der' });
   return crypto.createHash('sha256').update(der).digest('hex').slice(0, 16);
 }
 
+/** @param {{count:number, head:string}} checkpoint @returns {Buffer} */
 function checkpointBody(checkpoint) {
   return Buffer.from(JSON.stringify({ count: checkpoint.count, head: checkpoint.head }), 'utf8');
 }
@@ -59,6 +65,7 @@ function generateAuditKeyPair() {
 }
 
 // signer 同时支持 Ed25519 / HMAC；未配置任何密钥时保持旧行为（不签名）
+/** @param {{hmacKey?:Buffer|null, privateKeyPem?:string|null, publicKeyPem?:string|null}} [options] */
 function createAuditSigner({ hmacKey = null, privateKeyPem = null, publicKeyPem = null } = {}) {
   const privateKey = privateKeyPem ? loadPrivateKey(privateKeyPem) : null;
   const publicKey = privateKey
@@ -73,6 +80,7 @@ function createAuditSigner({ hmacKey = null, privateKeyPem = null, publicKeyPem 
     canSign: !!(privateKey || hmacKey),
     canVerify: !!(publicKey || hmacKey),
 
+    /** @param {{count:number, head:string}} checkpoint */
     sign(checkpoint) {
       if (privateKey) {
         const sig = crypto.sign(null, checkpointBody(checkpoint), privateKey).toString('base64');
@@ -85,6 +93,7 @@ function createAuditSigner({ hmacKey = null, privateKeyPem = null, publicKeyPem 
       return checkpoint;
     },
 
+    /** @param {any} checkpoint @returns {boolean} */
     verify(checkpoint) {
       if (!checkpoint || typeof checkpoint !== 'object') return false;
       if (checkpoint.alg === ALG_ED25519) {
@@ -117,6 +126,7 @@ function createAuditSigner({ hmacKey = null, privateKeyPem = null, publicKeyPem 
 }
 
 // 检查点必须能对上日志的前缀（允许保存后又追加了新条目）
+/** @param {any} checkpoint @param {any[]} entries @returns {boolean} */
 function checkpointMatches(checkpoint, entries) {
   if (!checkpoint || !Number.isInteger(checkpoint.count) || checkpoint.count < 0) return false;
   if (checkpoint.count > entries.length) return false;
@@ -125,6 +135,7 @@ function checkpointMatches(checkpoint, entries) {
 }
 
 // 只读校验：日志链 + 检查点前缀 + 检查点签名
+/** @param {{auditFile?:string, checkpointFile?:string, publicKeyPem?:string|null, hmacKey?:Buffer|null}} [options] */
 function verifyAuditFiles({
   auditFile, checkpointFile, publicKeyPem = null, hmacKey = null,
 } = {}) {
@@ -134,13 +145,14 @@ function verifyAuditFiles({
   try {
     checkpoint = JSON.parse(fs.readFileSync(checkpointFile, 'utf8'));
   } catch (err) {
-    return { ok: false, reason: `检查点读取失败：${err.message}`, entries: entries.length };
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: `检查点读取失败：${message}`, entries: entries.length };
   }
 
   const log = new AuditLog();
   log.entries = entries;
   // 从文件加载时没有内存里的 prevHash，必须显式给本文件自己的检查点
-  const ownHead = entries.length ? entries[entries.length - 1].hash : 'GENESIS';
+  const ownHead = entries.length ? String(entries[entries.length - 1].hash || 'GENESIS') : 'GENESIS';
   const chainOk = log.verify({ count: entries.length, head: ownHead });
   const checkpointOk = checkpointMatches(checkpoint, entries);
   const signer = createAuditSigner({ hmacKey, publicKeyPem });

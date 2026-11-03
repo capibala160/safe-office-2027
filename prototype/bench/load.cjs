@@ -19,6 +19,9 @@ const COMMAND = {
   documentIds: ['M2'],
 };
 
+// 长时间压测不保存每个请求：固定容量蓄水池，内存有界
+const DEFAULT_MAX_SAMPLES = 20000;
+
 function percentile(sorted, p) {
   if (sorted.length === 0) return 0;
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * sorted.length)));
@@ -36,12 +39,14 @@ async function runBench({
   store = 'memory',
   durationSec = 0,
   timeoutMs = 120000,
+  maxSamples = DEFAULT_MAX_SAMPLES,
 } = {}) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new TypeError('concurrency 必须是正整数');
   if (!Number.isInteger(requests) || requests < 1) throw new TypeError('requests 必须是正整数');
   if (!['read', 'command', 'mixed'].includes(scenario)) throw new TypeError('scenario 只能是 read/command/mixed');
   if (!['memory', 'file'].includes(store)) throw new TypeError('store 只能是 memory/file');
   if (!Number.isFinite(durationSec) || durationSec < 0) throw new TypeError('durationSec 必须是非负数');
+  if (!Number.isInteger(maxSamples) || maxSamples < 100) throw new TypeError('maxSamples 必须是不小于 100 的整数');
 
   const startedAt = new Date().toISOString();
   const rssBefore = process.memoryUsage().rss;
@@ -51,7 +56,21 @@ async function runBench({
   const storeFile = tmpDir ? path.join(tmpDir, 'ops.db') : ':memory:';
   const auditFile = tmpDir ? path.join(tmpDir, 'audit.jsonl') : null;
   const server = await startServer({ port: 0, storeFile, auditFile });
-  const latencies = [];
+  // 固定容量蓄水池：长压测不会因为保存每个请求而撑大自身 RSS
+  const latencySamples = [];
+  let latencySeen = 0;
+  const recordLatency = (ms) => {
+    latencySeen += 1;
+    if (latencySamples.length < maxSamples) {
+      latencySamples.push(ms);
+      return;
+    }
+    const j = Math.floor(Math.random() * latencySeen);
+    if (j < maxSamples) latencySamples[j] = ms;
+  };
+  const controller = new AbortController();
+  let cancelled = false;
+  let timedOut = false;
   const errors = [];
   const rssSamples = [rssBefore];
   const sampler = setInterval(() => rssSamples.push(process.memoryUsage().rss), 1000);
@@ -64,11 +83,12 @@ async function runBench({
   const readMix = scenario === 'read' ? 1 : scenario === 'command' ? 0 : 0.7;
   const one = async (isRead) => {
     const res = isRead
-      ? await fetch(`${server.url}/api/state`)
+      ? await fetch(`${server.url}/api/state`, { signal: controller.signal })
       : await fetch(`${server.url}/api/commands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(COMMAND),
+        signal: controller.signal,
       });
     if (!res.ok) {
       errors.push(`HTTP ${res.status}`);
@@ -80,7 +100,7 @@ async function runBench({
 
   const worker = async () => {
     for (;;) {
-      if (completed >= target || Date.now() >= deadline) return;
+      if (cancelled || completed >= target || Date.now() >= deadline) return;
       completed += 1;
       const index = next;
       next += 1;
@@ -88,32 +108,34 @@ async function runBench({
       try {
         await one(index % 10 < readMix * 10);
       } catch (err) {
-        errors.push(err && err.message ? err.message : String(err));
+        if (!cancelled) errors.push(err && err.message ? err.message : String(err));
+        return;
       }
-      latencies.push(Number(process.hrtime.bigint() - start) / 1e6);
+      recordLatency(Number(process.hrtime.bigint() - start) / 1e6);
     }
   };
 
+  const timer = setTimeout(() => {
+    timedOut = true;
+    cancelled = true;
+    controller.abort();
+  }, timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
   try {
-    const workers = Array.from({ length: concurrency }, () => worker());
-    await Promise.race([
-      Promise.all(workers),
-      new Promise((_, reject) => {
-        const timer = setTimeout(() => reject(new Error(`压测超时（${timeoutMs}ms）`)), timeoutMs);
-        if (typeof timer.unref === 'function') timer.unref();
-      }),
-    ]);
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
   } finally {
+    clearTimeout(timer);
     clearInterval(sampler);
     await server.close();
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+  if (timedOut) throw new Error(`压测超时（${timeoutMs}ms），已取消在途请求`);
 
   const durationMs = Number(process.hrtime.bigint() - t0) / 1e6;
   const rssAfter = process.memoryUsage().rss;
   rssSamples.push(rssAfter);
   const rssMax = Math.max(...rssSamples);
-  const sorted = [...latencies].sort((a, b) => a - b);
+  const sorted = [...latencySamples].sort((a, b) => a - b);
   const sum = sorted.reduce((acc, n) => acc + n, 0);
   return {
     startedAt,
@@ -136,6 +158,10 @@ async function runBench({
       p99: Math.round(percentile(sorted, 0.99) * 100) / 100,
       max: sorted.length ? Math.round(sorted[sorted.length - 1] * 100) / 100 : 0,
     },
+    // 蓄水池统计：超过 maxSamples 后百分位是抽样估计
+    latencySamples: latencySamples.length,
+    latencySeen,
+    approximate: latencySeen > latencySamples.length,
     rssMb: {
       before: mb(rssBefore),
       after: mb(rssAfter),
@@ -152,7 +178,7 @@ function parseArgs(argv) {
     const m = /^--([a-zA-Z]+)=(.*)$/.exec(arg);
     if (!m) continue;
     const [, key, value] = m;
-    if (['concurrency', 'requests', 'timeoutMs', 'duration', 'durationSec'].includes(key)) opts[key] = Number(value);
+    if (['concurrency', 'requests', 'timeoutMs', 'duration', 'durationSec', 'maxSamples'].includes(key)) opts[key] = Number(value);
     else opts[key] = value;
   }
   return opts;
@@ -176,6 +202,7 @@ async function main() {
     store: opts.store || 'memory',
     durationSec: opts.duration || opts.durationSec || 0,
     timeoutMs: opts.timeoutMs || Math.max(120000, (opts.duration || 0) * 1000 + 60000),
+    maxSamples: opts.maxSamples || undefined,
   });
   if (opts.json === '1' || opts.json === 'true') {
     console.log(JSON.stringify(result, null, 2));

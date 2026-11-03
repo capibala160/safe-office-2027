@@ -3,18 +3,22 @@
 const { createHmac, timingSafeEqual } = require('node:crypto');
 const ACTION_MIN = 1;
 const ACTION_MAX = 4;
+/** @param {any} value @param {number} length @param {string} name @returns {Buffer} */
 function bytes(value, length, name) {
   if (!Buffer.isBuffer(value) || value.length !== length) throw new TypeError(`${name}: expected ${length} bytes`);
   return value;
 }
+/** @param {number} value @returns {Buffer} */
 function u32(value) {
   if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new RangeError('invalid uint32');
   const b = Buffer.alloc(4); b.writeUInt32LE(value); return b;
 }
+/** @param {number} value @param {number} [max] @returns {Buffer} */
 function byte(value, max = 255) {
   if (!Number.isInteger(value) || value < 0 || value > max) throw new RangeError('invalid byte');
   return Buffer.from([value]);
 }
+/** @param {number} type @param {Buffer} payload @param {Buffer} key @returns {Buffer} */
 function frame(type, payload, key) {
   bytes(key, 32, 'key');
   const header = Buffer.from([83, 70, 67, 49, 1, type, 0, 0, 0, 0]);
@@ -22,6 +26,7 @@ function frame(type, payload, key) {
   const data = Buffer.concat([header, payload]);
   return Buffer.concat([data, createHmac('sha256', key).update(data).digest()]);
 }
+/** @param {{taskId:Buffer, nonce:Buffer, action:number, operationHash:Buffer, issuedAt:number, expiresAt:number, summary:string}} c @param {Buffer} key @returns {Buffer} */
 function encodeChallenge(c, key) {
   if (typeof c.summary !== 'string') throw new TypeError('summary must be a string');
   const summary = Buffer.from(c.summary, 'utf8');
@@ -32,10 +37,12 @@ function encodeChallenge(c, key) {
     byte(c.action), bytes(c.operationHash, 32, 'operationHash'), u32(c.issuedAt), u32(c.expiresAt),
     byte(summary.length), summary]), key);
 }
+/** @param {{taskId:Buffer, nonce:Buffer, decision:number, deviceId:Buffer, decidedAt:number}} d @param {Buffer} key @returns {Buffer} */
 function encodeDecision(d, key) {
   return frame(2, Buffer.concat([bytes(d.taskId, 8, 'taskId'), bytes(d.nonce, 16, 'nonce'),
     byte(d.decision, 1), bytes(d.deviceId, 8, 'deviceId'), u32(d.decidedAt)]), key);
 }
+/** @param {Buffer} input @param {Buffer} key @returns {any} */
 function decodeFrame(input, key) {
   bytes(key, 32, 'key');
   if (!Buffer.isBuffer(input) || input.length < 42) throw new Error('invalid frame');

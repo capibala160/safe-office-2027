@@ -60,6 +60,7 @@ const crypto = require('node:crypto');
  * @property {string} [createdBy]
  */
 
+/** @type {Record<number, string>} */
 const PROTOCOL_ACTIONS = {
   1: '外发',
   2: '删除',
@@ -67,6 +68,7 @@ const PROTOCOL_ACTIONS = {
   4: '设备控制',
 };
 
+/** @type {Record<string, Set<string>>} */
 const TRANSITIONS = {
   frozen: new Set(['confirmed', 'rejected', 'expired']),
   confirmed: new Set(['executing', 'expired', 'failed']),
@@ -77,10 +79,12 @@ const TRANSITIONS = {
   expired: new Set(),
 };
 
+/** @param {string|Buffer} data @returns {string} */
 function sha256Hex(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+/** @param {unknown} value @param {string} name @returns {string} */
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new TypeError(`${name} 必须是非空字符串`);
@@ -88,6 +92,7 @@ function requiredString(value, name) {
   return value;
 }
 
+/** @param {any} value @returns {any} */
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -96,7 +101,7 @@ function deepFreeze(value) {
   return value;
 }
 
-/** @param {OperationInput['attachments']} [attachments] @returns {{name:string,sha256:string,size:number}[]} */
+/** @param {any[]} [attachments] @returns {{name:string,sha256:string,size:number}[]} */
 function normalizeAttachments(attachments = []) {
   if (!Array.isArray(attachments)) throw new TypeError('attachments 必须是数组');
   return attachments.map((a, i) => {
@@ -120,6 +125,7 @@ function normalizeAttachments(attachments = []) {
 
 /** @param {OperationRecord} record @returns {string} */
 function canonicalRecord(record) {
+  /** @type {Record<string, any>} */
   const canonical = {
     operationId: record.operationId,
     taskId: record.taskId,
@@ -165,15 +171,18 @@ function sealOperation(input = {}) {
   if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
     throw new RangeError('expiresAt 必须晚于 createdAt');
   }
-  const protocolAction = input.protocolAction;
-  if (!PROTOCOL_ACTIONS[protocolAction]) throw new RangeError('protocolAction 必须是 1–4');
+  const protocolAction = Number(input.protocolAction);
+  if (!Number.isInteger(protocolAction) || !PROTOCOL_ACTIONS[protocolAction]) {
+    throw new RangeError('protocolAction 必须是 1–4');
+  }
 
+  /** @type {OperationRecord} */
   const base = {
     operationId: input.operationId || crypto.randomUUID(),
     taskId: requiredString(input.taskId, 'taskId'),
     action: requiredString(input.action, 'action'),
     protocolAction,
-    tool: input.tool || input.action,
+    tool: input.tool || requiredString(input.action, 'action'),
     recipient: requiredString(input.recipient, 'recipient'),
     subject: input.subject || '',
     mailAccount: input.mailAccount ? String(input.mailAccount).slice(0, 64) : '',
@@ -210,7 +219,8 @@ function verifyOperation(record) {
   try {
     attachments = normalizeAttachments(record.attachments || []);
   } catch (err) {
-    return { ok: false, reason: `附件非法：${err.message}` };
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: `附件非法：${message}` };
   }
   const attachmentHashes = attachments.map((a) => ({ ...a }));
   if (JSON.stringify(attachmentHashes) !== JSON.stringify(record.attachmentHashes)) {
