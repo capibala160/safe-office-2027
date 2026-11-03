@@ -44,6 +44,26 @@ test('SMTP：白名单内发送，返回 messageId', async () => {
   assert.equal(transport.calls[0].headers['X-Idempotency-Key'], 'idem-1');
 });
 
+test('SMTP：别名作为 From；未配置的别名拒绝', async () => {
+  const transport = recordingTransport();
+  const m = mailer(transport, {
+    from: 'sender@example.com', fromName: '张工',
+    aliases: [{ address: 'notice@example.com', name: '通知' }],
+  });
+  await m.send({ operation: { ...OP, mailAlias: 'notice@example.com' }, idempotencyKey: 'idem-alias' });
+  assert.deepEqual(transport.calls[0].from, { name: '通知', address: 'notice@example.com' });
+
+  // 主地址也带显示名
+  await m.send({ operation: { ...OP, operationId: 'op-2' }, idempotencyKey: 'idem-plain' });
+  assert.deepEqual(transport.calls[1].from, { name: '张工', address: 'sender@example.com' });
+
+  await assert.rejects(
+    () => m.send({ operation: { ...OP, mailAlias: 'other@example.com' }, idempotencyKey: 'idem-bad' }),
+    (err) => err instanceof MailerError && err.kind === 'rejected',
+  );
+  assert.equal(transport.calls.length, 2);
+});
+
 test('SMTP：白名单外地址 / 空白名单一律拒绝', async () => {
   const transport = recordingTransport();
   await assert.rejects(

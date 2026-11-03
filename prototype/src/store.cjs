@@ -52,6 +52,7 @@ class OperationStore {
         recipient TEXT NOT NULL,
         subject TEXT NOT NULL DEFAULT '',
         mail_account TEXT NOT NULL DEFAULT '',
+        mail_alias TEXT NOT NULL DEFAULT '',
         body TEXT NOT NULL,
         body_hash TEXT NOT NULL,
         attachments TEXT NOT NULL DEFAULT '[]',
@@ -111,6 +112,15 @@ class OperationStore {
         prev_hash TEXT NOT NULL,
         hash TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS auto_replies (
+        message_key TEXT PRIMARY KEY,
+        recipient TEXT NOT NULL,
+        operation_id TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL,
+        reason TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_auto_replies_created ON auto_replies(created_at);
     `);
     // 旧库补列：v0.31 之前的 operations 表没有 created_by
     const columns = this.db.prepare('PRAGMA table_info(operations)').all().map((c) => c.name);
@@ -120,6 +130,10 @@ class OperationStore {
     // v0.43：多发送账号绑进操作记录（旧库补列）
     if (!columns.includes('mail_account')) {
       this.db.exec("ALTER TABLE operations ADD COLUMN mail_account TEXT NOT NULL DEFAULT ''");
+    }
+    // v0.45：发件别名绑进操作记录（旧库补列；旧记录为空，仍能通过校验）
+    if (!columns.includes('mail_alias')) {
+      this.db.exec("ALTER TABLE operations ADD COLUMN mail_alias TEXT NOT NULL DEFAULT ''");
     }
   }
 
@@ -150,13 +164,14 @@ class OperationStore {
       this.db.prepare(`
         INSERT INTO operations (
           operation_id, task_id, action, protocol_action, tool, recipient, subject, mail_account,
-          body, body_hash, attachments, source_doc_ids, level, created_at, expires_at,
+          mail_alias, body, body_hash, attachments, source_doc_ids, level, created_at, expires_at,
           model_id, plan_hash, created_by, operation_hash, state, confirmation_id, device_id,
           updated_at, result
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         operation.operationId, operation.taskId, operation.action, operation.protocolAction,
-        operation.tool, operation.recipient, operation.subject, operation.mailAccount || '', operation.body,
+        operation.tool, operation.recipient, operation.subject, operation.mailAccount || '',
+        operation.mailAlias || '', operation.body,
         operation.bodyHash, JSON.stringify(operation.attachments),
         JSON.stringify(operation.sourceDocIds), operation.level, operation.createdAt,
         operation.expiresAt, operation.modelId, operation.planHash, operation.createdBy || '',
@@ -183,6 +198,7 @@ class OperationStore {
       recipient: row.recipient,
       subject: row.subject,
       mailAccount: row.mail_account || '',
+      mailAlias: row.mail_alias || '',
       body: row.body,
       bodyHash: row.body_hash,
       attachments: parseJson(row.attachments, []),
@@ -439,6 +455,65 @@ class OperationStore {
 
   setOutboxState(outboxId, next, options = {}) {
     return this._transaction(() => this._outboxStateInTx(outboxId, next, options));
+  }
+
+  // ---------- 自动回信去重 / 限速（v0.46） ----------
+  // 先占位再发送：同一 Message-ID 的并发扫描只会有一个成功。
+  claimAutoReply(messageKey, { recipient, operationId = '', state = 'claimed', reason = '' } = {}) {
+    const key = String(messageKey || '').trim();
+    if (!key) throw new TypeError('messageKey 不能为空');
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO auto_replies (message_key, recipient, operation_id, state, reason, created_at)
+      VALUES (?,?,?,?,?,?)
+    `).run(key, String(recipient || ''), String(operationId || ''), String(state), String(reason || ''), this.now());
+    return Number(result.changes) > 0;
+  }
+
+  setAutoReplyState(messageKey, state, { operationId = '', reason = '' } = {}) {
+    this.db.prepare(`
+      UPDATE auto_replies SET state = ?, operation_id = COALESCE(NULLIF(?, ''), operation_id), reason = ?
+       WHERE message_key = ?
+    `).run(String(state), String(operationId || ''), String(reason || ''), String(messageKey));
+    return this.getAutoReply(messageKey);
+  }
+
+  _rowToAutoReply(row) {
+    if (!row) return null;
+    return {
+      messageKey: row.message_key,
+      recipient: row.recipient,
+      operationId: row.operation_id || '',
+      state: row.state,
+      reason: row.reason || '',
+      createdAt: row.created_at,
+    };
+  }
+
+  getAutoReply(messageKey) {
+    return this._rowToAutoReply(
+      this.db.prepare('SELECT * FROM auto_replies WHERE message_key = ?').get(String(messageKey)),
+    );
+  }
+
+  listAutoReplies() {
+    return this.db.prepare('SELECT * FROM auto_replies ORDER BY created_at ASC')
+      .all().map((row) => this._rowToAutoReply(row));
+  }
+
+  // 限速只统计真正尝试过的记录；内部错误（error）不占配额，避免配置错误后永久静默
+  countAutoRepliesSince(iso) {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM auto_replies WHERE created_at >= ? AND state <> 'error'",
+    ).get(String(iso));
+    return Number(row && row.n) || 0;
+  }
+
+  lastAutoReplyTo(recipient) {
+    const row = this.db.prepare(`
+      SELECT MAX(created_at) AS at FROM auto_replies
+       WHERE recipient = ? AND state <> 'error'
+    `).get(String(recipient || ''));
+    return row ? row.at : null;
   }
 
   // ---------- events（本地哈希链） ----------

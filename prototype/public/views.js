@@ -87,7 +87,7 @@
   function operationCard(op) {
     return `<article class="op-card" data-op-card="${esc(op.operationId)}">
       <div class="op-head"><span class="tag">${esc(op.protocolLabel)}</span><strong>${esc(op.subject)}</strong>${badge(op.state)}${op.expired ? '<span class="badge block">已过期</span>' : ''}</div>
-      <div class="op-meta">目标：${esc(op.recipient)} · 密级：${esc(op.level)} · ${confirmationLabel(op)}${op.mailAccount ? ` · 发件账号：${esc(op.mailAccount)}` : ''}${op.createdBy ? ` · 发起人：${esc(op.createdBy)}` : ''}</div>
+      <div class="op-meta">目标：${esc(op.recipient)} · 密级：${esc(op.level)} · ${confirmationLabel(op)}${op.mailAccount ? ` · 发件账号：${esc(op.mailAccount)}` : ''}${op.mailAlias ? ` · 别名：${esc(op.mailAlias)}` : ''}${op.createdBy ? ` · 发起人：${esc(op.createdBy)}` : ''}</div>
       <div class="op-hash">operationHash ${esc(short(op.operationHash, 28))} · ${op.outbox ? `outbox ${esc(statusText[op.outbox.state] || op.outbox.state)}` : '暂无 outbox'}</div>
       ${op.attachments && op.attachments.length ? `<div class="op-meta">附件（${op.attachments.length}）：${op.attachments.map((a) => (EXPORTABLE.has(op.state)
         ? `<a href="/api/operations/${encodeURIComponent(op.operationId)}/attachments/${esc(a.sha256)}" download="${esc(a.name)}">${esc(a.name)}</a>`
@@ -505,6 +505,9 @@
   async function mail(root, c) {
     const emails = await API.get('/api/emails');
     const accounts = (c.store.bootstrap && c.store.bootstrap.mailAccounts) || [];
+    const autoReply = (c.store.bootstrap && c.store.bootstrap.autoReply) || { enabled: false };
+    const authUser = c.store.bootstrap && c.store.bootstrap.authUser;
+    const canScanAutoReply = !authUser || ['管理员', '审计员'].includes(authUser.role);
     root.innerHTML = `${page('邮件', '内网邮件策略自动确认；外发需 WS63 虚拟确认')}
       <section class="card">
         <div class="card-head"><h2>写邮件</h2><span class="sub">MockLLM 计划固定演示收件人</span></div>
@@ -512,6 +515,7 @@
           <div><label class="label">文档</label><select class="select" id="mail-doc"><option value="M2">周例会纪要（草稿）</option><option value="M1">预算评审会纪要（终稿）</option></select></div>
           <div><label class="label">通道</label><select class="select" id="mail-mode"><option value="external">外发（需 WS63）</option><option value="internal">内网（自动确认）</option></select></div>
           ${accounts.length ? `<div><label class="label">发件账号</label><select class="select" id="mail-account">${accounts.map((a) => `<option value="${esc(a.name)}" ${a.default ? 'selected' : ''}>${esc(a.name)}${a.default ? '（默认）' : ''}</option>`).join('')}</select></div>` : ''}
+          ${accounts.some((a) => (a.aliases || []).length) ? '<div><label class="label">发件身份</label><select class="select" id="mail-alias"></select></div>' : ''}
           <div class="full"><label class="label">收件人</label><input class="input" id="mail-to" value="partner@partner-example.com" readonly></div>
         </div>
         <div class="btn-row mt12"><button class="btn" id="mail-run">生成并发起</button></div>
@@ -519,13 +523,27 @@
       </section>
       <section class="card"><div class="card-head"><h2>邮件记录</h2><span class="sub">${emails.items.length} 条${emails.counts && emails.counts.bounced ? ` · 退信 ${emails.counts.bounced}` : ''}</span></div><div class="stack">${emails.items.length ? emails.items.map(operationCard).join('') : '<div class="empty">还没有邮件记录</div>'}</div></section>
       <section class="card"><div class="card-head"><h2>收件箱（只读）</h2><span class="sub">不标已读 / 不执行邮件内容</span></div>
-        <div class="btn-row"><button class="btn ghost small" id="inbox-load">读取最近 10 封</button></div>
+        <div class="btn-row"><button class="btn ghost small" id="inbox-load">读取最近 10 封</button>${autoReply.enabled && canScanAutoReply ? '<button class="btn small" id="auto-reply-scan">按策略自动回信</button>' : ''}</div>
+        <div class="sub-text mt8">自动回信：${autoReply.enabled ? `已启用（白名单 ${esc((autoReply.config.allow || []).join('、'))} · 每发件人 ${esc(autoReply.config.perSenderHours)}h 一次 · 每小时 ${esc(autoReply.config.maxPerHour)} 封 · 固定模板）` : '未启用'}</div>
         <div id="inbox-result" class="mt12"></div>
+        <div id="auto-reply-result" class="mt12"></div>
       </section>
       <div id="mail-result"></div>`;
 
     const mode = root.querySelector('#mail-mode');
     const to = root.querySelector('#mail-to');
+    const accountSelect = root.querySelector('#mail-account');
+    const aliasSelect = root.querySelector('#mail-alias');
+    // 别名下拉跟着账号走；空值 = 用账号主地址
+    const fillAliases = () => {
+      if (!aliasSelect) return;
+      const account = accounts.find((a) => a.name === (accountSelect ? accountSelect.value : ''));
+      const list = (account && account.aliases) || [];
+      aliasSelect.innerHTML = `<option value="">主地址${account && account.from ? `（${esc(account.from)}）` : ''}</option>`
+        + list.map((x) => `<option value="${esc(x.address)}">${esc(x.name ? `${x.name} <${x.address}>` : x.address)}</option>`).join('');
+    };
+    fillAliases();
+    if (accountSelect) accountSelect.addEventListener('change', fillAliases);
     mode.addEventListener('change', () => {
       const internal = mode.value === 'internal';
       to.value = internal ? 'team@corp.internal' : 'partner@partner-example.com';
@@ -534,6 +552,19 @@
         : '外发：partner@partner-example.com；冻结后需 WS63 确认。';
     });
     bindOpActions(root, c);
+    root.querySelector('#auto-reply-scan')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const box = root.querySelector('#auto-reply-result');
+      btn.disabled = true;
+      try {
+        const res = await API.post('/api/mail/auto-reply/scan', {});
+        const reasons = Object.entries(res.reasons || {}).map(([k, v]) => `${k} ${v}`).join(' · ');
+        box.innerHTML = `<div class="notice info">扫描 ${esc(res.scanned)} 封 · 已回 ${esc(res.replied)} 封 · 跳过 ${esc(res.skipped)} 封${res.errors ? ` · 失败 ${esc(res.errors)} 封` : ''}${reasons ? `<div class="sub-text mt8">跳过原因：${esc(reasons)}</div>` : ''}</div>`;
+        await c.refreshState();
+      } catch (err) {
+        box.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
+      } finally { btn.disabled = false; }
+    });
     root.querySelector('#inbox-load')?.addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       const box = root.querySelector('#inbox-result');
@@ -582,9 +613,11 @@
             tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: [doc],
           };
         const account = root.querySelector('#mail-account')?.value;
+        const alias = root.querySelector('#mail-alias')?.value;
         const run = await c.runCommand({
           ...payload, role: c.store.role, nearfieldOnline: c.store.nearfieldOnline,
           ...(account ? { mailAccount: account } : {}),
+          ...(alias ? { mailAlias: alias } : {}),
         });
         root.querySelector('#mail-result').innerHTML = renderRun(run);
         bindOpActions(root, c);
@@ -1016,9 +1049,11 @@
             <div class="spread"><span>事件链（SQLite）</span>${badge(gov.events.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.events.count)} 条</span></div>
             ${(gov.audit.tenants || []).length ? `<div class="sub-text mt8">租户链：${gov.audit.tenants.map((t) => `${esc(t.tenant)} ${esc(t.count)} 条`).join(' · ')}</div>` : ''}
             ${gov.audit.archiveDir ? `<div class="sub-text mt8">归档目录：${esc(gov.audit.archiveDir)}${gov.audit.rotation && gov.audit.rotation.lastAt ? ` · 上次轮转 ${esc(gov.audit.rotation.lastAt)}` : ''} · 保留 ${esc(gov.audit.archiveKeep || 14)} 份</div>` : ''}
-            <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-rotate">轮转审计</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
+            ${gov.audit.external && gov.audit.external.configured ? `<div class="sub-text mt8">外部存储：${esc(gov.audit.external.dir)} · ${esc(gov.audit.external.snapshots || 0)} 个快照${gov.audit.external.latest ? ` · 最新 ${esc(gov.audit.external.latest.name)}（${esc(gov.audit.external.latest.files)} 个文件）` : ''}${gov.audit.external.lastVerify ? ` · 上次校验 ${gov.audit.external.lastVerify.ok ? '通过' : '失败'}` : ''}</div>` : ''}
+            <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-rotate">轮转审计</button>' : ''}${canAdmin && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-export">导出外部快照</button>' : ''}${canReport && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-verify-export">校验外部快照</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
           </div>
           <div id="gov-tamper-result" class="mt12"></div>
+          <div id="gov-export-result" class="mt12"></div>
         </section>
       </div>
       ${users ? `<section class="card"><div class="card-head"><h2>用户管理</h2><span class="sub">${users.items.length} 个</span></div>
@@ -1034,7 +1069,14 @@
     : `IMAP 未配置${gov.bouncePoll && gov.bouncePoll.error ? `（${esc(gov.bouncePoll.error)}）` : ''}——只能手动导入 .eml`}</div>
         <div id="bounce-result" class="mt12"></div>
       </section>` : ''}
-      ${(gov.mailAccounts || []).length ? `<section class="card"><div class="card-head"><h2>发件账号</h2><span class="sub">${gov.mailAccounts.length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>账号</th><th>发件人</th><th>服务器</th><th>默认</th></tr></thead><tbody>${gov.mailAccounts.map((a) => `<tr><td class="mono">${esc(a.name)}</td><td>${esc(a.from)}</td><td class="mono">${esc(a.host)}</td><td>${a.default ? '是' : ''}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
+      ${canReview ? `<section class="card"><div class="card-head"><h2>自动回信</h2><span class="sub">默认关闭；白名单 + 固定模板 + 去重限速</span></div>
+        <div class="sub-text">${gov.autoReply && gov.autoReply.enabled
+    ? `已启用：白名单 ${esc((gov.autoReply.config.allow || []).join('、'))} · 每小时 ${esc(gov.autoReply.config.maxPerHour)} 封 · 每发件人 ${esc(gov.autoReply.config.perSenderHours)}h 一次 · 只回 ${esc(gov.autoReply.config.maxAgeHours)}h 内邮件${gov.autoReply.polling ? ' · 轮询中' : ''}${gov.autoReply.lastAt ? ` · 上次 ${esc(gov.autoReply.lastAt)}` : ''}`
+    : `未启用${gov.autoReply && gov.autoReply.error ? `（配置错误：${esc(gov.autoReply.error)}）` : '（SAFE_OFFICE_AUTOREPLY=1 + 白名单）'}`}</div>
+        <div class="btn-row mt12"><button class="btn small" id="gov-auto-reply">立即扫描并回信</button></div>
+        <div id="auto-reply-gov-result" class="mt12"></div>
+      </section>` : ''}
+      ${(gov.mailAccounts || []).length ? `<section class="card"><div class="card-head"><h2>发件账号</h2><span class="sub">${gov.mailAccounts.length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>账号</th><th>发件人</th><th>别名</th><th>签名</th><th>服务器</th><th>默认</th></tr></thead><tbody>${gov.mailAccounts.map((a) => `<tr><td class="mono">${esc(a.name)}</td><td>${esc(a.from)}${a.fromName ? `（${esc(a.fromName)}）` : ''}</td><td>${(a.aliases || []).length ? esc(a.aliases.map((x) => x.address).join('、')) : '—'}</td><td>${a.hasSignature ? '已配置' : '—'}</td><td class="mono">${esc(a.host)}</td><td>${a.default ? '是' : ''}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
       <section class="card"><div class="card-head"><h2>策略矩阵</h2><span class="sub">未声明 = 拒绝（fail-closed）</span></div><div class="table-wrap"><table class="table"><thead><tr><th>角色</th>${actions.map((a) => `<th>${esc(a)}</th>`).join('')}</tr></thead><tbody>${roles.map((r) => `<tr><td><strong>${esc(r)}</strong></td>${actions.map((a) => `<td>${badge((policy[r] && policy[r][a]) || 'deny')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>办公能力分级</h2><span class="sub">${gov.capabilities.length} 类</span></div><div class="table-wrap"><table class="table"><thead><tr><th>能力</th><th>级别</th><th>工具</th><th>约束</th></tr></thead><tbody>${gov.capabilities.map((cap) => `<tr><td>${esc(cap.name)}</td><td>${badge(cap.level)}</td><td class="mono">${esc(cap.tools.join(', '))}</td><td>${esc(cap.constraints)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="card"><div class="card-head"><h2>工具注册表</h2><span class="sub">${(gov.tools || []).length} 个</span></div><div class="table-wrap"><table class="table"><thead><tr><th>工具</th><th>能力</th><th>级别</th><th>高危</th><th>转交</th><th>来源</th></tr></thead><tbody>${(gov.tools || []).map((tool) => `<tr><td class="mono">${esc(tool.name)}</td><td>${esc(tool.capability)}</td><td>${badge(tool.level)}</td><td>${tool.highRisk ? '是' : '否'}</td><td>${tool.deferred ? '是' : '否'}</td><td>${esc(tool.source)}</td></tr>`).join('')}</tbody></table></div></section>
@@ -1128,6 +1170,20 @@
         c.rerender();
       } catch (err) { toast(c.errorText(err), 'error'); }
     });
+    root.querySelector('#gov-export')?.addEventListener('click', async () => {
+      try {
+        const res = await API.post('/api/audit/export', { includeArchives: true });
+        root.querySelector('#gov-export-result').innerHTML = `<div class="notice info">已导出 ${esc(res.files.length)} 个文件到 ${esc(res.dir)}<div class="sub-text mt8">检查点 ${esc(res.checkpoint.count)} 条 · ${esc(res.checkpoint.head.slice(0, 16))}…</div></div>`;
+        await c.refreshState();
+      } catch (err) { toast(c.errorText(err), 'error'); }
+    });
+    root.querySelector('#gov-verify-export')?.addEventListener('click', async () => {
+      try {
+        const res = await API.post('/api/audit/external/verify', {});
+        root.querySelector('#gov-export-result').innerHTML = `<div class="notice ${res.ok ? 'info' : 'block'}">外部快照校验：${res.ok ? '通过' : '失败'} · 检查 ${esc(res.checked || 0)}/${esc(res.files || 0)} 个文件${(res.missing || []).length ? ` · 缺失 ${esc(res.missing.length)}` : ''}${(res.mismatches || []).length ? ` · 不一致 ${esc(res.mismatches.length)}` : ''}${res.reason ? `<div class="sub-text mt8">${esc(res.reason)}</div>` : ''}</div>`;
+        await c.refreshState();
+      } catch (err) { toast(c.errorText(err), 'error'); }
+    });
     root.querySelector('#gov-report')?.addEventListener('click', () => {
       window.open('/api/report', '_blank', 'noopener');
     });
@@ -1139,6 +1195,17 @@
         root.querySelector('#bounce-eml').value = await file.text();
         toast(`已读入 ${file.name}`, 'info');
       } catch (err) { toast(`读取失败：${err.message}`, 'error'); }
+    });
+    root.querySelector('#gov-auto-reply')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await API.post('/api/mail/auto-reply/scan', {});
+        const reasons = Object.entries(res.reasons || {}).map(([k, v]) => `${k} ${v}`).join(' · ');
+        root.querySelector('#auto-reply-gov-result').innerHTML = `<div class="notice ${res.errors ? 'block' : 'info'}">扫描 ${esc(res.scanned)} 封 · 已回 ${esc(res.replied)} 封 · 跳过 ${esc(res.skipped)} 封 · 失败 ${esc(res.errors)} 封${reasons ? `<div class="sub-text mt8">跳过原因：${esc(reasons)}</div>` : ''}</div>`;
+        await c.refreshState();
+      } catch (err) { toast(c.errorText(err), 'error'); }
+      finally { btn.disabled = false; }
     });
     root.querySelector('#bounce-poll')?.addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;

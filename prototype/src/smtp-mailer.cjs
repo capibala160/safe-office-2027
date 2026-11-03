@@ -31,7 +31,7 @@ function assertOperation(operation) {
 class SMTPMailer {
   constructor({
     host, port = 465, secure = true, user, pass, from = null,
-    allowTo = [], transport = null, timeoutMs = 20000,
+    fromName = '', aliases = [], allowTo = [], transport = null, timeoutMs = 20000,
   } = {}) {
     this.host = host;
     this.port = Number(port) || 465;
@@ -39,9 +39,27 @@ class SMTPMailer {
     this.user = user;
     this.pass = pass;
     this.from = from || user;
+    this.fromName = String(fromName || '');
+    this.aliases = (aliases || []).map((a) => (
+      a && typeof a === 'object'
+        ? { address: String(a.address || '').trim().toLowerCase(), name: String(a.name || '').trim() }
+        : { address: String(a || '').trim().toLowerCase(), name: '' }
+    )).filter((a) => a.address);
     this.allowTo = (allowTo || []).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
     this.transport = transport;
     this.timeoutMs = timeoutMs;
+  }
+
+  // 别名只能来自本账号配置；冻结记录里的 mailAlias 是地址
+  _resolveFrom(operation) {
+    const alias = String((operation && operation.mailAlias) || '').trim().toLowerCase();
+    if (!alias) {
+      return this.fromName ? { name: this.fromName, address: this.from } : this.from;
+    }
+    const hit = this.aliases.find((a) => a.address === alias);
+    if (!hit) throw new MailerError('rejected', `发件账号不支持别名「${alias}」`);
+    const name = hit.name || this.fromName;
+    return name ? { name, address: hit.address } : hit.address;
   }
 
   _transport() {
@@ -86,7 +104,7 @@ class SMTPMailer {
     }
 
     const mail = {
-      from: this.from,
+      from: this._resolveFrom(operation),
       to,
       subject: operation.subject || '',
       text: operation.body,

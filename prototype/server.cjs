@@ -650,6 +650,15 @@ function createConsoleServer({
           },
         });
       }
+      if (pathname === '/api/mail/auto-reply' && method === 'GET') {
+        requireRole(req, ROLE_AUDIT, '查看自动回信状态');
+        return sendJson(res, 200, { ok: true, ...service.getAutoReplyStatus() });
+      }
+      if (pathname === '/api/mail/auto-reply/scan' && method === 'POST') {
+        requireRole(req, ROLE_REVIEW, '执行自动回信扫描');
+        const ctx = userContext(req);
+        return sendJson(res, 200, await service.scanAutoReplies({ by: ctx.actor }));
+      }
       const outboxMatch = pathname.match(/^\/api\/outbox\/([^/]+)\/reconcile$/);
       if (outboxMatch) requireRole(req, ROLE_STAFF, '核对发件');
       if (outboxMatch && method === 'POST') {
@@ -847,6 +856,23 @@ function createConsoleServer({
         const body = await readJson(req);
         return sendJson(res, 200, service.pruneAuditArchives({ keep: body.keep }));
       }
+      if (pathname === '/api/audit/export' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '导出审计快照到外部存储');
+        const body = await readJson(req);
+        return sendJson(res, 200, service.exportAuditSnapshot({
+          by: req.user ? req.user.username : null,
+          includeArchives: body.includeArchives !== false,
+        }));
+      }
+      if (pathname === '/api/audit/external' && method === 'GET') {
+        requireRole(req, ROLE_AUDIT, '查看审计外部存储状态');
+        return sendJson(res, 200, service.getAuditExternalStatus());
+      }
+      if (pathname === '/api/audit/external/verify' && method === 'POST') {
+        requireRole(req, ROLE_AUDIT, '校验审计外部快照');
+        const body = await readJson(req);
+        return sendJson(res, 200, service.verifyAuditExport({ name: body.name || null }));
+      }
       const tenantAudit = pathname.match(/^\/api\/audit\/tenant\/([^/]+)$/);
       if (tenantAudit && method === 'GET') {
         requireRole(req, ROLE_AUDIT, '读取租户审计链');
@@ -931,11 +957,13 @@ async function startServer({
         storeFile,
         auditFile,
         mcpConfigFile,
+        inboxReader,
         mailer: mailer || new FakeMailer(),
       });
     } else {
       instance = new ConsoleService({
         documentsStore, blobStore, storeFile, auditFile, mcpConfigFile,
+        inboxReader,
         mailer: mailer || new FakeMailer(),
       });
     }
@@ -964,6 +992,7 @@ async function startServer({
     try { await instance.mcpRestorePromise; } catch { /* 恢复失败不阻塞 */ }
   }
   if (instance.startBouncePolling) instance.startBouncePolling();
+  if (instance.startAutoReplyPolling) instance.startAutoReplyPolling();
   const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm, inboxReader });
   return new Promise((resolve, reject) => {
     const listen = () => {
@@ -1124,6 +1153,13 @@ if (require.main === module) {
       if (poller.state.lastError) console.log(`    ⚠ 上次轮询失败：${poller.state.lastError}`);
     } else if (service.bouncePollerError) {
       console.warn(`  ⚠ IMAP 配置不完整：${service.bouncePollerError}`);
+    }
+    const autoReply = service.getAutoReplyStatus ? service.getAutoReplyStatus() : null;
+    if (autoReply && autoReply.enabled) {
+      console.log(`  自动回信：已启用（白名单 ${autoReply.config.allow.join('、')}；每 ${Math.round(autoReply.config.pollMs / 1000)}s 扫描）`);
+      if (!autoReply.inboxConfigured) console.warn('    ⚠ IMAP 收件箱未配置，自动回信不会执行');
+    } else if (autoReply && autoReply.error) {
+      console.warn(`  ⚠ 自动回信配置错误：${autoReply.error}`);
     }
     if (documentsStore) {
       const imported = documentsStore.list().length;

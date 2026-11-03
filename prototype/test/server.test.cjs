@@ -3,7 +3,11 @@
 //   使用 port=0 启动独立实例，fetch 走真实 HTTP 栈。
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { startServer, DEFAULT_COMMAND_BODY_LIMIT } = require('../server.cjs');
+const { ConsoleService } = require('../src/console-service.cjs');
 const { AuthService, hashPassword } = require('../src/auth.cjs');
 const { totpCode } = require('../src/totp.cjs');
 const { DocumentStore } = require('../src/ingest.cjs');
@@ -118,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.43.0');
+  assert.equal(data.version, '0.45.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -692,6 +696,91 @@ test('收件箱回信草稿：只返回草稿，autoSend=false', async (t) => {
   assert.equal(data.draft.to, 'alice@example.com');
   assert.match(data.draft.subject, /^Re: 周报/);
   assert.match(data.note, /不自动发送/);
+});
+
+test('自动回信接口：未启用时状态如实、扫描 409 而不是 500', async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const status = await json(`${started.url}/api/mail/auto-reply`);
+  assert.equal(status.res.status, 200);
+  assert.equal(status.data.enabled, false);
+
+  const scan = await post(`${started.url}/api/mail/auto-reply/scan`, {});
+  assert.equal(scan.res.status, 409);
+  assert.match(scan.data.error.message, /自动回信未启用/);
+
+  const boot = await json(`${started.url}/api/bootstrap`);
+  assert.equal(boot.res.status, 200);
+  assert.equal(boot.data.autoReply.enabled, false);
+});
+
+test('自动回信接口：策略启用并配置收件箱后可手动扫描', async (t) => {
+  const { parseAutoReplyConfig } = require('../src/auto-reply.cjs');
+  const policy = parseAutoReplyConfig({
+    SAFE_OFFICE_AUTOREPLY: '1',
+    SAFE_OFFICE_AUTOREPLY_ALLOW_TO: 'alice@partner-example.com',
+  });
+  const inboxReader = {
+    async fetch() {
+      return {
+        configured: true,
+        items: [{
+          uid: 9,
+          from: 'Alice <alice@partner-example.com>',
+          subject: '对接',
+          date: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          headers: { 'message-id': '<route-test@partner-example.com>' },
+        }],
+      };
+    },
+  };
+  const started = await startServer({ port: 0, inboxReader });
+  t.after(() => started.close());
+  // 通过服务实例注入策略（服务由 startServer 创建）
+  started.service.autoReplyPolicy = policy;
+  const scan = await post(`${started.url}/api/mail/auto-reply/scan`, {});
+  assert.equal(scan.res.status, 200);
+  assert.equal(scan.data.replied, 1);
+  assert.equal(scan.data.errors, 0);
+});
+
+test('审计外部存储接口：导出 → 校验 → 状态', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-http-'));
+  const service = new ConsoleService({
+    auditFile: path.join(dir, 'audit.jsonl'),
+    auditArchiveDir: path.join(dir, 'audit-archive'),
+    auditExternalDir: path.join(dir, 'external'),
+  });
+  service.audit.append('测试事件', { n: 1 });
+  const started = await startServer({ port: 0, service });
+  t.after(async () => {
+    await started.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const exported = await post(`${started.url}/api/audit/export`, { includeArchives: true });
+  assert.equal(exported.res.status, 200);
+  assert.ok(exported.data.files.length > 0);
+
+  const verified = await post(`${started.url}/api/audit/external/verify`, {});
+  assert.equal(verified.res.status, 200);
+  assert.equal(verified.data.ok, true);
+  assert.equal(verified.data.checked, verified.data.files);
+
+  const status = await json(`${started.url}/api/audit/external`);
+  assert.equal(status.res.status, 200);
+  assert.equal(status.data.configured, true);
+  assert.equal(status.data.snapshots, 1);
+  assert.ok(status.data.latest.name.startsWith('snapshot-'));
+});
+
+test('审计外部存储接口：未配置时导出 409、状态 configured=false', async (t) => {
+  const started = await boot(t);
+  const exported = await post(`${started.url}/api/audit/export`, {});
+  assert.equal(exported.res.status, 409);
+  const status = await json(`${started.url}/api/audit/external`);
+  assert.equal(status.res.status, 200);
+  assert.equal(status.data.configured, false);
 });
 
 test('用户管理：管理员可列出/重置，非管理员 403', async (t) => {

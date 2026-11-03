@@ -18,6 +18,12 @@ try {
 const MAX_PREVIEW_BYTES = 256 * 1024;
 const CACHE_MS = 30 * 1000;
 
+// 自动回信安全判断需要的头：只拉这几个，不下载整封
+const SAFETY_HEADERS = [
+  'message-id', 'auto-submitted', 'x-auto-response-suppress',
+  'list-id', 'list-unsubscribe', 'precedence', 'return-path', 'from', 'reply-to',
+];
+
 function stripHtml(text) {
   return String(text || '')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -35,6 +41,23 @@ function headerValue(head, name) {
   const re = new RegExp(`^${name}:\\s*(.*)$`, 'im');
   const m = String(head || '').match(re);
   return m ? m[1].trim() : '';
+}
+
+// 只解析安全判断要用的头；同名头保留第一个，折叠行拼回去
+function parseSafetyHeaders(raw) {
+  const text = String(raw || '');
+  const out = {};
+  if (!text) return out;
+  const unfolded = text.replace(/\r?\n[ \t]+/g, ' ');
+  for (const line of unfolded.split(/\r?\n/)) {
+    const idx = line.indexOf(':');
+    if (idx <= 0) continue;
+    const name = line.slice(0, idx).trim().toLowerCase();
+    if (!SAFETY_HEADERS.includes(name)) continue;
+    const value = line.slice(idx + 1).trim();
+    if (!(name in out)) out[name] = value;
+  }
+  return out;
 }
 
 function mimeOf(node) {
@@ -221,28 +244,30 @@ class ImapInboxReader {
     this._inflight = new Map();   // limit → Promise；不同条数的并发请求不能共用
   }
 
-  async fetch({ limit = 10, refresh = false } = {}) {
+  async fetch({ limit = 10, refresh = false, includeHeaders = false } = {}) {
     const max = Math.min(50, Math.max(1, Number(limit) || 10));
-    if (!refresh && this._cache && this.now() - this._cache.at < CACHE_MS && this._cache.limit === max) {
+    const withHeaders = !!includeHeaders;
+    if (!refresh && this._cache && this.now() - this._cache.at < CACHE_MS
+        && this._cache.limit === max && this._cache.includeHeaders === withHeaders) {
       return { ...this._cache.result, cached: true };
     }
-    const key = String(max);
+    const key = `${max}|${withHeaders ? 'h' : ''}`;
     if (this._inflight.has(key)) return this._inflight.get(key);
     const client = this.factory(this.config);
     const task = withTimeout(
-      this._fetchUncached(client, max),
+      this._fetchUncached(client, max, withHeaders),
       this.readTimeoutMs,
       '收件箱读取超时',
       () => closeClient(client, this.closeTimeoutMs),
     ).then((result) => {
-      this._cache = { at: this.now(), limit: max, result };
+      this._cache = { at: this.now(), limit: max, includeHeaders: withHeaders, result };
       return result;
     }).finally(() => { this._inflight.delete(key); });
     this._inflight.set(key, task);
     return task;
   }
 
-  async _fetchUncached(client, max) {
+  async _fetchUncached(client, max, includeHeaders = false) {
     try {
       await client.connect();
       await client.mailboxOpen(this.config.mailbox);
@@ -258,10 +283,17 @@ class ImapInboxReader {
         .slice(-max);
       const items = [];
       for (const uid of list) {
-        const msg = await client.fetchOne(uid, { envelope: true, bodyStructure: true, flags: true }, { uid: true });
+        const query = { envelope: true, bodyStructure: true, flags: true };
+        if (includeHeaders) query.headers = SAFETY_HEADERS;
+        const msg = await client.fetchOne(uid, query, { uid: true });
         if (!msg) continue;
         const item = envelopeItem(uid, msg.envelope, msg.flags);
         item.size = Number(msg.size) || 0;
+        if (includeHeaders) {
+          const headers = parseSafetyHeaders(msg.headers);
+          item.headers = headers;
+          item.messageId = headers['message-id'] || '';
+        }
         const part = selectPart(msg.bodyStructure);
         if (!part) {
           item.previewError = '没有可读文本段';
@@ -300,4 +332,5 @@ function createInboxReaderFromEnv({ env = process.env, factory = null, now = () 
 module.exports = {
   ImapInboxReader, createInboxReaderFromEnv,
   parseMessage, stripHtml, selectPart, previewFromDownloaded, decodeRawBody, decodeQuotedPrintable,
+  parseSafetyHeaders, SAFETY_HEADERS,
 };

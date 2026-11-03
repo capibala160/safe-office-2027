@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.43.0');
+  assert.equal(bootstrap.state.version, '0.45.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -91,6 +91,46 @@ test('bootstrap 暴露发件账号列表（不回传密码）', (t) => {
   const bootstrap = service.getBootstrap();
   assert.deepEqual(bootstrap.mailAccounts, [{ name: 'work', from: 'work@example.com', host: 'smtp.example.com', default: true }]);
   assert.equal('pass' in bootstrap.mailAccounts[0], false);
+});
+
+test('发件别名 + 签名：冻结时定稿，改别名必须断链', async (t) => {
+  const { MailerPool, normalizeAccount } = require('../src/mail-accounts.cjs');
+  const account = normalizeAccount({
+    name: 'work', host: 'smtp.example.com', user: 'work@example.com', pass: 'secret',
+    from: 'work@example.com', fromName: '张工',
+    aliases: [{ address: 'notice@example.com', name: '通知' }],
+    signature: '安全智慧办公\n内线 8001',
+  }, 0);
+  const usedAliases = [];
+  const pool = new MailerPool({
+    accounts: [account], defaultName: 'work',
+    mailerFactory: () => ({
+      async send({ operation }) {
+        usedAliases.push(operation.mailAlias || '');
+        return { status: 'sent', messageId: `<m-${usedAliases.length}@example>` };
+      },
+    }),
+  });
+  const { service } = setup({ service: { mailer: pool } });
+  t.after(() => service.close());
+  const run = await runSample(service, 'normal-minutes', { mailAlias: 'notice@example.com' });
+  const op = run.operations.find((o) => o.action === 'sendInternalEmail');
+  assert.ok(op);
+  assert.equal(op.mailAlias, 'notice@example.com');
+  assert.equal(op.mailAccount, 'work');
+  assert.ok(op.bodyPreview.includes('-- \n安全智慧办公'), '签名应进入冻结正文');
+  assert.deepEqual(usedAliases, ['notice@example.com'], '发送使用别名');
+
+  const stored = service.store.getOperation(op.operationId);
+  const { verifyOperation } = require('../src/operation.cjs');
+  assert.equal(verifyOperation(stored).ok, true);
+  assert.equal(verifyOperation({ ...stored, mailAlias: 'sales@example.com' }).ok, false, '改别名必须断链');
+  assert.equal(verifyOperation({ ...stored, mailAlias: '' }).ok, false, '去掉别名必须断链');
+
+  await assert.rejects(
+    () => runSample(service, 'normal-minutes', { mailAlias: 'other@example.com' }),
+    /没有配置别名/,
+  );
 });
 
 test('正常内网纪要：冻结 → 策略自动确认 → FakeMailer 发送', async (t) => {

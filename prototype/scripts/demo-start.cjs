@@ -61,6 +61,9 @@ function buildDemoEnv(dir = DEMO_DIR, extra = {}) {
     SAFE_OFFICE_IMAP_HOST: '',
     SAFE_OFFICE_IMAP_USER: '',
     SAFE_OFFICE_IMAP_PASS: '',
+    // 自动回信默认关闭，演示包也必须关（避免误回任何真实来信）
+    SAFE_OFFICE_AUTOREPLY: '',
+    SAFE_OFFICE_AUTOREPLY_ALLOW_TO: '',
     SAFE_OFFICE_PRINTER: '',
     SAFE_OFFICE_LLM_ENDPOINT: '',
     SAFE_OFFICE_LLM_KEY: '',

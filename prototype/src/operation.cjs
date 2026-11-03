@@ -89,6 +89,8 @@ function canonicalRecord(record) {
   if (record.createdBy) canonical.createdBy = record.createdBy;
   // v0.43：发件账号也绑进哈希；空值不写入，兼容旧记录。
   if (record.mailAccount) canonical.mailAccount = record.mailAccount;
+  // v0.45：发件别名（地址）同样绑进哈希；空值不写入，兼容旧记录。
+  if (record.mailAlias) canonical.mailAlias = record.mailAlias;
   return JSON.stringify(canonical);
 }
 
@@ -121,6 +123,7 @@ function sealOperation(input = {}) {
     recipient: requiredString(input.recipient, 'recipient'),
     subject: input.subject || '',
     mailAccount: input.mailAccount ? String(input.mailAccount).slice(0, 64) : '',
+    mailAlias: input.mailAlias ? String(input.mailAlias).slice(0, 254) : '',
     body,
     bodyHash: sha256Hex(Buffer.from(body, 'utf8')),
     attachments,

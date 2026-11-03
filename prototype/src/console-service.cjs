@@ -34,6 +34,7 @@ const { FakeMailer, MailerError } = require('./mailer.cjs');
 const { printDocument } = require('./print-adapter.cjs');
 const { writeMeeting } = require('./calendar-adapter.cjs');
 const { createBouncePollerFromEnv } = require('./imap-poller.cjs');
+const { parseAutoReplyConfig, evaluateAutoReply } = require('./auto-reply.cjs');
 const { scanAttachment } = require('./file-scan.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
@@ -41,7 +42,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.43.0';
+const VERSION = '0.45.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -113,6 +114,8 @@ class ConsoleService {
     allowRemoteMcp = null,
     mcpConfigFile = process.env.SAFE_OFFICE_MCP_FILE || null,
     bouncePoller = null,
+    inboxReader = null,
+    autoReplyPolicy = null,
     pairingCode = null,
     llm = null,
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
@@ -120,6 +123,7 @@ class ConsoleService {
     auditCheckpointFile = process.env.SAFE_OFFICE_AUDIT_CHECKPOINT || null,
     auditTenantCheckpointFile = process.env.SAFE_OFFICE_AUDIT_TENANT_CHECKPOINT || null,
     auditArchiveDir = process.env.SAFE_OFFICE_AUDIT_ARCHIVE_DIR || null,
+    auditExternalDir = process.env.SAFE_OFFICE_AUDIT_EXTERNAL_DIR || null,
     auditRetentionDays = Number(process.env.SAFE_OFFICE_AUDIT_RETENTION_DAYS) || 0,
     auditArchiveKeep = Number(process.env.SAFE_OFFICE_AUDIT_ARCHIVE_KEEP) || 14,
     auditKey = process.env.SAFE_OFFICE_AUDIT_KEY || null,
@@ -148,6 +152,9 @@ class ConsoleService {
       || (this.auditFile ? `${this.auditFile}.tenants` : null);
     this.auditArchiveDir = auditArchiveDir
       || (this.auditFile ? path.join(path.dirname(this.auditFile), 'audit-archive') : null);
+    // v0.47：审计快照的"外部"副本目录（另一个盘/挂载的网络共享），只做本地文件复制
+    this.auditExternalDir = auditExternalDir ? String(auditExternalDir) : null;
+    this.auditExternalState = { lastVerify: null, lastError: null };
     this.auditRetentionDays = Math.max(0, Number(auditRetentionDays) || 0);
     this.auditArchiveKeep = Math.max(1, Number(auditArchiveKeep) || 14);
     this.auditRotation = { lastAt: null, lastResult: null };
@@ -212,6 +219,21 @@ class ConsoleService {
         this.bouncePollerError = err.message;
       }
     }
+    // v0.46：自动回信（默认关闭；配置不全只记录错误，不阻塞启动）
+    this.inboxReader = inboxReader;
+    this.autoReplyPolicy = autoReplyPolicy;
+    this.autoReplyError = null;
+    this._autoReplyTimer = null;
+    this.autoReplyState = { lastAt: null, lastResult: null, lastError: null };
+    if (!this.autoReplyPolicy) {
+      try {
+        const cfg = parseAutoReplyConfig(process.env);
+        this.autoReplyPolicy = cfg.enabled ? cfg : null;
+      } catch (err) {
+        this.autoReplyError = err.message;
+      }
+    }
+    if (this.autoReplyPolicy && !this.autoReplyPolicy.enabled) this.autoReplyPolicy = null;
   }
 
   startBouncePolling() {
@@ -241,6 +263,228 @@ class ConsoleService {
       this.audit.append('IMAP 手动轮询', { mailbox: this.bouncePoller.config.mailbox });
       const result = await this.bouncePoller.poll();
       return { ok: true, result, state: this.bouncePoller.state };
+    });
+  }
+
+  // ---------- 自动回信（v0.46） ----------
+  getAutoReplyStatus() {
+    const policy = this.autoReplyPolicy;
+    const enabled = !!(policy && policy.enabled);
+    return {
+      enabled,
+      inboxConfigured: !!this.inboxReader,
+      error: this.autoReplyError,
+      polling: !!this._autoReplyTimer,
+      config: enabled ? {
+        allow: policy.allow.map((r) => (r.address ? r.address : `@${r.domain}`)),
+        subject: policy.subject,
+        account: policy.account || '(默认账号)',
+        maxPerHour: policy.maxPerHour,
+        perSenderHours: policy.perSenderHours,
+        maxAgeHours: policy.maxAgeHours,
+        maxPerScan: policy.maxPerScan,
+        pollMs: policy.pollMs,
+      } : null,
+      ...this.autoReplyState,
+    };
+  }
+
+  startAutoReplyPolling() {
+    const policy = this.autoReplyPolicy;
+    if (!policy || !policy.enabled || !this.inboxReader || this._autoReplyTimer) return false;
+    const run = async () => {
+      try {
+        await this.scanAutoReplies({ by: 'system' });
+      } catch (err) {
+        this.autoReplyState.lastError = err && err.message ? err.message : String(err);
+      }
+    };
+    run();
+    this._autoReplyTimer = setInterval(run, policy.pollMs);
+    if (typeof this._autoReplyTimer.unref === 'function') this._autoReplyTimer.unref();
+    return true;
+  }
+
+  stopAutoReplyPolling() {
+    if (this._autoReplyTimer) {
+      clearInterval(this._autoReplyTimer);
+      this._autoReplyTimer = null;
+    }
+  }
+
+  _autoReplySelfAddresses() {
+    const set = new Set();
+    if (typeof this.mailer.list === 'function') {
+      for (const a of this.mailer.list()) {
+        if (a.from) set.add(String(a.from).toLowerCase());
+        for (const alias of a.aliases || []) {
+          if (alias.address) set.add(String(alias.address).toLowerCase());
+        }
+      }
+    }
+    if (this.mailer && this.mailer.accounts && typeof this.mailer.accounts.values === 'function') {
+      for (const a of this.mailer.accounts.values()) {
+        if (a.user) set.add(String(a.user).toLowerCase());
+        if (a.from) set.add(String(a.from).toLowerCase());
+      }
+    }
+    return set;
+  }
+
+  _autoReplyAccountName() {
+    const wanted = this.autoReplyPolicy && this.autoReplyPolicy.account;
+    const list = typeof this.mailer.list === 'function' ? this.mailer.list() : [];
+    if (wanted) {
+      if (list.length > 0 && !list.some((a) => a.name === wanted)) {
+        throw new ConsoleError('CONFLICT', `自动回信发件账号不存在：${wanted}`, 409);
+      }
+      return wanted;
+    }
+    const def = list.find((a) => a && a.default);
+    if (def) return def.name;
+    return this.mailer.defaultName ? String(this.mailer.defaultName) : '';
+  }
+
+  // 扫描收件箱并按策略自动回信。先占位再发送：同一 Message-ID 只回一次。
+  async scanAutoReplies({ by = null } = {}) {
+    const policy = this.autoReplyPolicy;
+    if (!policy || !policy.enabled) {
+      throw new ConsoleError(
+        'CONFLICT',
+        this.autoReplyError || '自动回信未启用（SAFE_OFFICE_AUTOREPLY=1 且配置白名单）',
+        409,
+      );
+    }
+    if (!this.inboxReader) {
+      throw new ConsoleError('CONFLICT', 'IMAP 收件箱未配置，无法自动回信', 409);
+    }
+    const accountName = this._autoReplyAccountName();
+    const account = this.mailer && typeof this.mailer.getAccount === 'function'
+      ? this.mailer.getAccount(accountName)
+      : null;
+    const signature = account && account.signature ? String(account.signature) : '';
+
+    return this._withAuditActor(by, async () => {
+      const startedAt = this.now();
+      const inbox = await this.inboxReader.fetch({ limit: 50, refresh: true, includeHeaders: true });
+      const items = Array.isArray(inbox.items) ? inbox.items : [];
+      const selfAddresses = this._autoReplySelfAddresses();
+      const summary = {
+        scanned: items.length, replied: 0, skipped: 0, errors: 0,
+        reasons: {}, items: [],
+      };
+      let sentThisScan = 0;
+
+      for (const item of items) {
+        if (sentThisScan >= policy.maxPerScan) break;
+        const decision = evaluateAutoReply(item, policy, {
+          selfAddresses,
+          now: this.now(),
+          hasReplied: (key) => !!this.store.getAutoReply(key),
+          lastReplyTo: (addr) => this.store.lastAutoReplyTo(addr),
+          countLastHour: () => this.store.countAutoRepliesSince(
+            new Date(this.now() - 60 * 60 * 1000).toISOString(),
+          ),
+        });
+        if (decision.decision !== 'reply') {
+          summary.skipped += 1;
+          summary.reasons[decision.reason] = (summary.reasons[decision.reason] || 0) + 1;
+          summary.items.push({
+            uid: Number(item.uid) || null, from: String(item.from || ''), decision: 'skip',
+            reason: decision.reason, operationId: null, state: null,
+          });
+          continue;
+        }
+
+        // 原子占位：并发扫描/重启后都不会重复回复同一封
+        if (!this.store.claimAutoReply(decision.messageKey, {
+          recipient: decision.recipient, state: 'claimed', reason: 'allowed',
+        })) {
+          summary.skipped += 1;
+          summary.reasons.duplicate = (summary.reasons.duplicate || 0) + 1;
+          continue;
+        }
+
+        const entry = {
+          uid: Number(item.uid) || null, from: decision.recipient, decision: 'reply',
+          reason: 'allowed', operationId: null, state: null,
+        };
+        try {
+          const body = signature
+            ? `${policy.template}\n\n-- \n${signature}`
+            : policy.template;
+          const createdAt = this._iso();
+          const operation = this.fulfillment.prepare({
+            taskId: 'AUTO-REPLY',
+            action: 'autoReplyEmail',
+            protocolAction: 1,
+            tool: 'autoReplyEmail',
+            recipient: decision.recipient,
+            subject: policy.subject,
+            mailAccount: accountName,
+            body,
+            attachments: [],
+            sourceDocIds: [],
+            level: '内部',
+            createdAt,
+            expiresAt: this._iso(this.now() + this.operationTtlMs),
+            modelId: 'policy:auto-reply-v1',
+            planHash: sha256Hex(`auto-reply|${decision.messageKey}`),
+            createdBy: 'auto-reply',
+          });
+          this.store.setAutoReplyState(decision.messageKey, 'frozen', {
+            operationId: operation.operationId,
+          });
+          const confirmed = this.fulfillment.confirm(operation.operationId, {
+            confirmedHash: operation.operationHash,
+            confirmationId: 'policy-auto-reply',
+            deviceId: 'policy-auto-reply',
+          });
+          const sent = await this._sendChecked(operation, confirmed.outbox.outboxId);
+          this.store.setAutoReplyState(decision.messageKey, sent.state, {
+            operationId: operation.operationId,
+            reason: sent.error || '',
+          });
+          entry.operationId = operation.operationId;
+          entry.state = sent.state;
+          summary.replied += 1;
+          sentThisScan += 1;
+          this.audit.append('自动回信', {
+            messageKey: decision.messageKey,
+            recipient: decision.recipient,
+            operationId: operation.operationId,
+            state: sent.state,
+            account: accountName,
+          });
+        } catch (err) {
+          const message = err && err.message ? err.message : String(err);
+          this.store.setAutoReplyState(decision.messageKey, 'error', { reason: message });
+          entry.state = 'error';
+          entry.error = message;
+          summary.errors += 1;
+          this.audit.append('自动回信失败', {
+            messageKey: decision.messageKey,
+            recipient: decision.recipient,
+            error: message,
+          });
+        }
+        summary.items.push(entry);
+      }
+
+      summary.lastAt = this._iso(startedAt);
+      this.autoReplyState = {
+        lastAt: summary.lastAt,
+        lastResult: { ...summary, items: summary.items.slice(0, 20) },
+        lastError: summary.errors > 0 ? '部分邮件回信失败，详见审计' : null,
+      };
+      // 只有真的回了信或出错才写审计，避免每 5 分钟一条"扫描 0 封"把审计刷满
+      if (summary.replied > 0 || summary.errors > 0) {
+        this.audit.append('自动回信扫描', {
+          scanned: summary.scanned, replied: summary.replied,
+          skipped: summary.skipped, errors: summary.errors,
+        });
+      }
+      return { ok: true, ...summary };
     });
   }
 
@@ -667,6 +911,202 @@ class ConsoleService {
     return { ...rotated, pruned };
   }
 
+  // ---------- 审计快照外部存储（v0.47） ----------
+  // 只做本地文件复制（另一块盘/挂载的共享目录），不接对象存储。
+  // 清单能证明"副本与导出时一致"；有写权限的人可以同时改文件和清单，
+  // 所以它不是防篡改介质，防篡改仍靠本地独立检查点 + 审计链。
+  _auditExternalPath() {
+    if (!this.auditExternalDir) {
+      throw new ConsoleError('CONFLICT', '未配置 SAFE_OFFICE_AUDIT_EXTERNAL_DIR（外部存储目录）', 409);
+    }
+    const ext = path.resolve(this.auditExternalDir);
+    if (this.auditArchiveDir) {
+      const archive = path.resolve(this.auditArchiveDir);
+      if (ext === archive || ext.startsWith(`${archive}${path.sep}`) || archive.startsWith(`${ext}${path.sep}`)) {
+        throw new ConsoleError('CONFLICT', '外部存储目录不能与本地归档目录互相包含', 409);
+      }
+    }
+    return ext;
+  }
+
+  _listAuditSnapshots(ext) {
+    if (!ext || !fs.existsSync(ext)) return [];
+    return fs.readdirSync(ext)
+      .filter((name) => /^snapshot-/.test(name) && fs.statSync(path.join(ext, name)).isDirectory())
+      .sort()
+      .reverse();
+  }
+
+  _hashFile(file) {
+    return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  }
+
+  _walkFiles(dir, base = dir) {
+    const out = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...this._walkFiles(full, base));
+      else if (entry.isFile()) out.push(path.relative(base, full).split(path.sep).join('/'));
+    }
+    return out.sort();
+  }
+
+  // 把当前审计链 + 本地归档复制成一个带 manifest 的快照目录
+  exportAuditSnapshot({ by = null, includeArchives = true } = {}) {
+    if (!this.auditFile) throw new ConsoleError('CONFLICT', '未启用审计落盘，无法导出', 409);
+    if (this._auditPersistBlocked) throw new ConsoleError('CONFLICT', '审计已停止落盘，拒绝导出', 409);
+    if (!this.audit.verify()) throw new ConsoleError('CONFLICT', '审计链校验失败，拒绝导出', 409);
+    const ext = this._auditExternalPath();
+
+    const at = new Date(this.now()).toISOString();
+    const stamp = at.replace(/[:.]/g, '-');
+    const dirName = `snapshot-${stamp}`;
+    const snapshotDir = path.join(ext, dirName);
+    const activeDir = path.join(snapshotDir, 'active');
+    fs.mkdirSync(activeDir, { recursive: true });
+
+    const copied = [];
+    const copyIfExists = (from, to) => {
+      if (!fs.existsSync(from)) return;
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+      copied.push(path.relative(snapshotDir, to).split(path.sep).join('/'));
+    };
+    try {
+      copyIfExists(this.auditFile, path.join(activeDir, 'audit.jsonl'));
+      if (this.auditCheckpointFile) copyIfExists(this.auditCheckpointFile, path.join(activeDir, 'audit.jsonl.head'));
+      if (this.auditTenantCheckpointFile) {
+        copyIfExists(this.auditTenantCheckpointFile, path.join(activeDir, 'audit.tenants.json'));
+      }
+      if (includeArchives && this.auditArchiveDir && fs.existsSync(this.auditArchiveDir)) {
+        for (const name of fs.readdirSync(this.auditArchiveDir)) {
+          if (!/^audit-.*\.jsonl(\.head|\.tenants)?$/.test(name)) continue;
+          copyIfExists(path.join(this.auditArchiveDir, name), path.join(snapshotDir, 'archive', name));
+        }
+      }
+    } catch (err) {
+      throw new ConsoleError('CONFLICT', `外部快照复制失败：${err.message}`, 409);
+    }
+
+    const files = this._walkFiles(snapshotDir).map((rel) => {
+      const full = path.join(snapshotDir, rel);
+      return { path: rel, bytes: fs.statSync(full).size, sha256: this._hashFile(full) };
+    });
+    const manifest = {
+      version: 1,
+      at,
+      by: by || null,
+      source: {
+        auditFile: path.basename(this.auditFile),
+        archiveDir: this.auditArchiveDir ? path.basename(this.auditArchiveDir) : null,
+      },
+      checkpoint: this.audit.checkpoint(),
+      files,
+      note: '清单只证明副本与导出时一致；防篡改以本地独立检查点为准',
+    };
+    // manifest 最后写，且原子替换：中途失败不会留下"看起来完整"的清单
+    const manifestPath = path.join(snapshotDir, 'manifest.json');
+    const tmp = `${manifestPath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, manifestPath);
+
+    this.audit.append('审计外部导出', {
+      dir: dirName, files: files.length, archives: includeArchives,
+      checkpoint: manifest.checkpoint,
+    });
+    return { ok: true, dir: snapshotDir, name: dirName, at, files, checkpoint: manifest.checkpoint };
+  }
+
+  // 只校验最新快照（或指定名字）；只读，不修改任何文件
+  verifyAuditExport({ name = null } = {}) {
+    const ext = this._auditExternalPath();
+    const snapshots = this._listAuditSnapshots(ext);
+    if (snapshots.length === 0) {
+      return { ok: false, reason: '外部存储里没有快照', dir: ext };
+    }
+    const dirName = name ? String(name) : snapshots[0];
+    if (!/^snapshot-[A-Za-z0-9._-]+$/.test(dirName)) {
+      throw new ConsoleError('BAD_REQUEST', '快照名非法', 400);
+    }
+    const snapshotDir = path.join(ext, dirName);
+    const manifestPath = path.join(snapshotDir, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      const result = { ok: false, reason: '缺少 manifest.json', dir: snapshotDir };
+      this.auditExternalState.lastVerify = { at: this._iso(), ...result };
+      return result;
+    }
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch (err) {
+      const result = { ok: false, reason: `manifest 解析失败：${err.message}`, dir: snapshotDir };
+      this.auditExternalState.lastVerify = { at: this._iso(), ...result };
+      return result;
+    }
+    const files = Array.isArray(manifest.files) ? manifest.files : [];
+    const missing = [];
+    const mismatches = [];
+    let checked = 0;
+    for (const entry of files) {
+      const rel = String((entry && entry.path) || '');
+      const full = path.resolve(snapshotDir, rel);
+      if (!rel || (full !== snapshotDir && !full.startsWith(`${snapshotDir}${path.sep}`))) {
+        mismatches.push({ path: rel, reason: '路径越界' });
+        continue;
+      }
+      if (!fs.existsSync(full)) {
+        missing.push(rel);
+        continue;
+      }
+      const stat = fs.statSync(full);
+      if (stat.size !== Number(entry.bytes)) {
+        mismatches.push({ path: rel, reason: '大小不一致', expected: entry.bytes, actual: stat.size });
+        continue;
+      }
+      const sha = this._hashFile(full);
+      if (sha !== entry.sha256) {
+        mismatches.push({ path: rel, reason: '哈希不一致', expected: entry.sha256, actual: sha });
+        continue;
+      }
+      checked += 1;
+    }
+    const ok = files.length > 0 && missing.length === 0 && mismatches.length === 0;
+    const result = {
+      ok, dir: snapshotDir, name: dirName, at: manifest.at || null, by: manifest.by || null,
+      checkpoint: manifest.checkpoint || null, files: files.length, checked, missing, mismatches,
+    };
+    this.auditExternalState.lastVerify = { at: this._iso(), ...result };
+    this.audit.append('审计外部校验', {
+      dir: dirName, ok, checked, missing: missing.length, mismatches: mismatches.length,
+    });
+    return result;
+  }
+
+  getAuditExternalStatus() {
+    if (!this.auditExternalDir) return { configured: false, lastVerify: this.auditExternalState.lastVerify };
+    let ext;
+    try { ext = this._auditExternalPath(); } catch (err) {
+      return { configured: true, error: err.message, lastVerify: this.auditExternalState.lastVerify };
+    }
+    const snapshots = this._listAuditSnapshots(ext);
+    let latest = null;
+    if (snapshots.length > 0) {
+      const manifestPath = path.join(ext, snapshots[0], 'manifest.json');
+      try {
+        const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        latest = {
+          name: snapshots[0], at: m.at || null, by: m.by || null,
+          files: Array.isArray(m.files) ? m.files.length : 0,
+          checkpoint: m.checkpoint || null,
+        };
+      } catch { /* 清单损坏：只报告快照存在 */ }
+    }
+    return {
+      configured: true, dir: ext, snapshots: snapshots.length, latest,
+      lastVerify: this.auditExternalState.lastVerify,
+    };
+  }
+
   // 模型信息要如实反映实际用的实现，不能对真实模型还标"MockLLM（演示）"
   _modelInfo() {
     const llm = this.planner && this.planner.llm;
@@ -766,6 +1206,7 @@ class ConsoleService {
         rotation: this.auditRotation,
         retentionDays: this.auditRetentionDays,
         archiveKeep: this.auditArchiveKeep,
+        external: this.getAuditExternalStatus(),
         checkpoint: this.audit.checkpoint(),
         recent: recentAudit.map((e) => ({
           seq: e.seq, kind: e.kind, ts: e.ts, detail: e.detail, actor: e.actor || null,
@@ -797,6 +1238,7 @@ class ConsoleService {
     return {
       state: this.getState({ actor, role }),
       mailAccounts: typeof this.mailer.list === 'function' ? this.mailer.list() : [],
+      autoReply: this.getAutoReplyStatus(),
       roles: Object.entries(ROLE_DEFS).map(([name, def]) => ({ name, ...def })),
       tools: this.toolRegistry.publicList(),
       roleTools: Object.fromEntries(
@@ -1238,9 +1680,24 @@ class ConsoleService {
     if (mailAccount && !/^[A-Za-z0-9._-]{1,64}$/.test(mailAccount)) {
       throw new ConsoleError('BAD_REQUEST', 'mailAccount 只能包含字母/数字/._-');
     }
-    if (mailAccount && typeof this.mailer.list === 'function'
-        && !this.mailer.list().some((a) => a.name === mailAccount)) {
+    const accounts = typeof this.mailer.list === 'function' ? this.mailer.list() : [];
+    if (mailAccount && accounts.length > 0 && !accounts.some((a) => a.name === mailAccount)) {
       throw new ConsoleError('BAD_REQUEST', `未知发件账号：${mailAccount}`);
+    }
+    // v0.45：别名必须是所选账号（未选则默认账号）已配置的地址
+    let mailAlias = input.mailAlias ? String(input.mailAlias).trim().toLowerCase().slice(0, 254) : '';
+    if (mailAlias) {
+      if (!/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(mailAlias)) {
+        throw new ConsoleError('BAD_REQUEST', 'mailAlias 不是合法邮箱地址');
+      }
+      if (accounts.length === 0) {
+        throw new ConsoleError('BAD_REQUEST', '当前邮件适配器不支持发件别名');
+      }
+      const effective = mailAccount || (accounts.find((a) => a.default) || accounts[0]).name;
+      const account = accounts.find((a) => a.name === effective);
+      if (!account || !(account.aliases || []).some((x) => x.address === mailAlias)) {
+        throw new ConsoleError('BAD_REQUEST', `账号「${effective}」没有配置别名：${mailAlias}`);
+      }
     }
     return {
       command,
@@ -1250,6 +1707,7 @@ class ConsoleService {
       domains: uniqueStrings(input.domains),
       maxCalls,
       mailAccount,
+      mailAlias,
       modelLocation,
       commandLevel: input.commandLevel || '内部',
       nearfieldOnline: !!input.nearfieldOnline,
@@ -1413,7 +1871,9 @@ class ConsoleService {
 
     const operations = [];
     for (const descriptor of deferred) {
-      const operation = this._freezeDeferred(runId, descriptor, auditStart, options.attachments, operator, options.mailAccount);
+      const operation = this._freezeDeferred(
+        runId, descriptor, auditStart, options.attachments, operator, options.mailAccount, options.mailAlias,
+      );
       const autoMode = this._autoDecision(descriptor.action, operation);
       if (autoMode) {
         try {
@@ -1494,7 +1954,7 @@ class ConsoleService {
     });
   }
 
-  _freezeDeferred(runId, d, auditStart, attachments = [], operator = null, mailAccount = '') {
+  _freezeDeferred(runId, d, auditStart, attachments = [], operator = null, mailAccount = '', mailAlias = '') {
     const action = d.action;
     const protocolAction = this.toolRegistry.protocolAction(action);
     if (!protocolAction) {
@@ -1520,8 +1980,6 @@ class ConsoleService {
     const sourceDocIds = d.sourceDocIds && d.sourceDocIds.length
       ? d.sourceDocIds
       : (d.docId ? [d.docId] : []);
-    // 只有邮件动作才把附件落库；非邮件动作一个字节都不存（避免静默丢弃 + 孤儿）
-    const storedAttachments = isEmail ? this._storeAttachments(attachments) : [];
     // 默认账号必须在冻结时解析成具体账号：否则发送时才读当前默认值，
     // 同一冻结记录换配置会换账号发信，且哈希无法发现。
     let resolvedAccount = mailAccount || '';
@@ -1532,6 +1990,32 @@ class ConsoleService {
       }
       if (!resolvedAccount && this.mailer.defaultName) resolvedAccount = String(this.mailer.defaultName);
     }
+    // v0.45：别名与签名都在冻结时定稿。
+    // 签名写进正文 → 进入 bodyHash/operationHash，确认的就是最终发出去的内容。
+    let resolvedAlias = '';
+    let signature = '';
+    if (isEmail && this.mailer) {
+      const account = typeof this.mailer.getAccount === 'function'
+        ? this.mailer.getAccount(resolvedAccount)
+        : null;
+      if (account) {
+        if (mailAlias) {
+          try {
+            resolvedAlias = this.mailer.resolveIdentity(account.name, mailAlias).address;
+          } catch (err) {
+            throw new ConsoleError('BAD_REQUEST', err.message, 400);
+          }
+        }
+        signature = String(account.signature || '');
+      } else if (mailAlias) {
+        throw new ConsoleError('BAD_REQUEST', `未知发件账号，不能使用别名：${mailAlias}`, 400);
+      }
+    }
+    const finalBody = isEmail && signature
+      ? `${body || `（${action}）`}\n\n-- \n${signature}`
+      : body;
+    // 只有邮件动作才把附件落库；非邮件动作一个字节都不存（避免静默丢弃 + 孤儿）
+    const storedAttachments = isEmail ? this._storeAttachments(attachments) : [];
     let operation;
     try {
       operation = this.fulfillment.prepare({
@@ -1542,7 +2026,8 @@ class ConsoleService {
         recipient: recipient || '（未指定）',
         subject: subject.slice(0, 160),
         mailAccount: resolvedAccount,
-        body: body || `（${action}）`,
+        mailAlias: resolvedAlias,
+        body: finalBody || `（${action}）`,
         attachments: storedAttachments.map((a) => ({ name: a.name, sha256: a.sha256, size: a.size })),
         sourceDocIds,
         level: d.docLevel || '内部',
@@ -1698,6 +2183,7 @@ class ConsoleService {
       recipient: current.recipient,
       subject: current.subject,
       mailAccount: current.mailAccount,
+      mailAlias: current.mailAlias,
       body: text,
       attachments: current.attachments,
       sourceDocIds: current.sourceDocIds,
@@ -1803,6 +2289,7 @@ class ConsoleService {
       recipient: operation.recipient,
       subject: operation.subject,
       mailAccount: operation.mailAccount || '',
+      mailAlias: operation.mailAlias || '',
       level: operation.level,
       sourceDocIds: operation.sourceDocIds,
       attachments: operation.attachments,
@@ -2309,6 +2796,7 @@ class ConsoleService {
         rotation: this.auditRotation,
         retentionDays: this.auditRetentionDays,
         archiveKeep: this.auditArchiveKeep,
+        external: this.getAuditExternalStatus(),
         entries: canSeeAll ? this.audit.entries.slice(-100) : [],
         tenants: canSeeAll ? this._tenantAuditSummaries() : [],
       },
@@ -2331,6 +2819,7 @@ class ConsoleService {
           ...this.bouncePoller.state,
         }
         : { configured: false, error: this.bouncePollerError },
+      autoReply: this.getAutoReplyStatus(),
       autoMode: this.autoMode,
       autoSafe: this._autoSafeStats(),
       roles: Object.entries(ROLE_DEFS).map(([name, def]) => ({ name, ...def })),
@@ -2959,6 +3448,7 @@ class ConsoleService {
     if (this.closed) return;
     this.closed = true;
     this.stopBouncePolling();
+    this.stopAutoReplyPolling();
     this._saveAudit();
     try { this.store.close(); } catch { /* ignore */ }
     if (this._ownsBlobStore) {
