@@ -11,13 +11,14 @@ const crypto = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const fs = require('node:fs');
 const path = require('node:path');
-const { PolicyEngine, AuditLog, RiskMeter, signCheckpoint, verifyCheckpoint } = require('./governance.cjs');
+const { PolicyEngine, AuditLog, RiskMeter } = require('./governance.cjs');
+const { createAuditSigner } = require('./audit-sign.cjs');
 const { GuardedPlanner } = require('./planner.cjs');
 const { createLlmFromEnv } = require('./llm.cjs');
 const { PerfMeter } = require('./perf.cjs');
 const { AgentRuntime } = require('./runtime.cjs');
 const { DEFAULT_SANDBOX } = require('./sandbox.cjs');
-const { defineAgent, issueToken, ROLE_DEFS, ROLE_DOC_IDS, roleDocIds } = require('./agents.cjs');
+const { defineAgent, issueToken, ROLE_DEFS, roleDocIds } = require('./agents.cjs');
 const {
   IMAGES, AUDIOS, CONTACTS, allDocuments, getDocumentById, registerDocuments, unregisterDocument,
 } = require('./scenario.cjs');
@@ -42,7 +43,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.45.1';
+const VERSION = '0.46.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -127,6 +128,10 @@ class ConsoleService {
     auditRetentionDays = Number(process.env.SAFE_OFFICE_AUDIT_RETENTION_DAYS) || 0,
     auditArchiveKeep = Number(process.env.SAFE_OFFICE_AUDIT_ARCHIVE_KEEP) || 14,
     auditKey = process.env.SAFE_OFFICE_AUDIT_KEY || null,
+    auditPrivateKeyPem = process.env.SAFE_OFFICE_AUDIT_ED25519_PRIVATE_KEY || null,
+    auditPublicKeyPem = process.env.SAFE_OFFICE_AUDIT_ED25519_PUBLIC_KEY || null,
+    auditPrivateKeyFile = process.env.SAFE_OFFICE_AUDIT_ED25519_PRIVATE_KEY_FILE || null,
+    auditPublicKeyFile = process.env.SAFE_OFFICE_AUDIT_ED25519_PUBLIC_KEY_FILE || null,
     documentsStore = null,
     blobStore = null,
     printer = process.env.SAFE_OFFICE_PRINTER || null,
@@ -160,6 +165,17 @@ class ConsoleService {
     this.auditRotation = { lastAt: null, lastResult: null };
     this.auditKey = auditKey ? Buffer.from(String(auditKey), /^[0-9a-fA-F]{64}$/.test(String(auditKey)) ? 'hex' : 'base64') : null;
     if (this.auditKey && this.auditKey.length < 16) throw new Error('SAFE_OFFICE_AUDIT_KEY 至少 16 字节');
+    // v0.46：Ed25519 检查点签名（优先）；HMAC 保留用于旧检查点/兼容
+    const privatePem = auditPrivateKeyPem
+      || (auditPrivateKeyFile ? fs.readFileSync(String(auditPrivateKeyFile), 'utf8') : null);
+    const publicPem = auditPublicKeyPem
+      || (auditPublicKeyFile ? fs.readFileSync(String(auditPublicKeyFile), 'utf8') : null);
+    this.auditSigner = createAuditSigner({
+      hmacKey: this.auditKey, privateKeyPem: privatePem, publicKeyPem: publicPem,
+    });
+    if (this.auditFile && this.auditSigner.publicKeyPem && !this.auditSigner.canSign) {
+      throw new Error('只配置了审计公钥，无法签发新检查点；请同时配置 Ed25519 私钥');
+    }
     this.auditPersist = { enabled: !!this.auditFile, ok: true, error: null };
     this._auditPersistBlocked = false;   // 恢复失败且原文件无法隔离时，禁止覆盖原日志
     this._auditQuarantine = null;
@@ -702,8 +718,10 @@ class ConsoleService {
     try {
       this._auditJsonl = AuditLog.isJsonlFile(this.auditFile); // 旧格式是整体 JSON；新格式一行一条
       const checkpoint = JSON.parse(fs.readFileSync(this.auditCheckpointFile, 'utf8'));
-      if (checkpoint.alg && !this.auditKey) throw new Error('检查点已签名，但未配置 SAFE_OFFICE_AUDIT_KEY');
-      if (this.auditKey && !verifyCheckpoint(checkpoint, this.auditKey)) throw new Error('检查点签名无效');
+      if (checkpoint.alg && !this.auditSigner.canVerify) {
+        throw new Error('检查点已签名，但未配置验签密钥（Ed25519 公钥或 SAFE_OFFICE_AUDIT_KEY）');
+      }
+      if (!this.auditSigner.verify(checkpoint)) throw new Error('检查点签名无效');
       return AuditLog.load(this.auditFile, checkpoint);
     } catch (err) {
       this._auditJsonl = true;
@@ -726,7 +744,7 @@ class ConsoleService {
       const data = JSON.parse(fs.readFileSync(this.auditTenantCheckpointFile, 'utf8'));
       const map = data && data.checkpoints && typeof data.checkpoints === 'object' ? data.checkpoints : {};
       for (const [tenant, cp] of Object.entries(map)) {
-        if (this.auditKey && !verifyCheckpoint(cp, this.auditKey)) {
+        if (!this.auditSigner.verify(cp)) {
           throw new Error(`租户「${tenant}」检查点签名无效`);
         }
         this._trustedTenantCheckpoints.set(tenant, cp);
@@ -742,7 +760,7 @@ class ConsoleService {
     try {
       const checkpoints = {};
       for (const t of this.audit.tenantCheckpoints()) {
-        checkpoints[t.tenant] = signCheckpoint({ count: t.count, head: t.head }, this.auditKey);
+        checkpoints[t.tenant] = this.auditSigner.sign({ count: t.count, head: t.head });
       }
       fs.mkdirSync(path.dirname(this.auditTenantCheckpointFile), { recursive: true });
       const tmp = `${this.auditTenantCheckpointFile}.${process.pid}.tmp`;
@@ -780,7 +798,7 @@ class ConsoleService {
       } else {
         AuditLog.appendLine(this.auditFile, rec);
       }
-      const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
+      const checkpoint = this.auditSigner.sign(this.audit.checkpoint());
       fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
       this._writeTenantCheckpoints();
       this.auditPersist.ok = true;
@@ -801,7 +819,7 @@ class ConsoleService {
       fs.mkdirSync(path.dirname(this.auditCheckpointFile), { recursive: true });
       AuditLog.writeLines(this.auditFile, this.audit.entries);
       this._auditJsonl = true;
-      const checkpoint = signCheckpoint(this.audit.checkpoint(), this.auditKey);
+      const checkpoint = this.auditSigner.sign(this.audit.checkpoint());
       fs.writeFileSync(this.auditCheckpointFile, JSON.stringify(checkpoint), { encoding: 'utf8', mode: 0o600 });
       this._writeTenantCheckpoints();
       this.auditPersist.ok = true;
@@ -1207,6 +1225,11 @@ class ConsoleService {
         retentionDays: this.auditRetentionDays,
         archiveKeep: this.auditArchiveKeep,
         external: this.getAuditExternalStatus(),
+        signing: {
+          alg: this.auditSigner.algorithm,
+          keyId: this.auditSigner.keyId,
+          publicKeyPem: this.auditSigner.publicKeyPem,
+        },
         checkpoint: this.audit.checkpoint(),
         recent: recentAudit.map((e) => ({
           seq: e.seq, kind: e.kind, ts: e.ts, detail: e.detail, actor: e.actor || null,
@@ -2800,6 +2823,11 @@ class ConsoleService {
         retentionDays: this.auditRetentionDays,
         archiveKeep: this.auditArchiveKeep,
         external: this.getAuditExternalStatus(),
+        signing: {
+          alg: this.auditSigner.algorithm,
+          keyId: this.auditSigner.keyId,
+          publicKeyPem: this.auditSigner.publicKeyPem,
+        },
         entries: canSeeAll ? this.audit.entries.slice(-100) : [],
         tenants: canSeeAll ? this._tenantAuditSummaries() : [],
       },
@@ -2811,7 +2839,7 @@ class ConsoleService {
       policy: this._policyMatrix(),
       tools: this.toolRegistry.publicList(),
       mailAccounts: typeof this.mailer.list === 'function' ? this.mailer.list() : [],
-      mcpServers: this.mcpConfig.map(({ token, ...rest }) => rest),   // 永不回传 token
+      mcpServers: this.mcpConfig.map(({ token: _token, ...rest }) => rest),   // 永不回传 token
       mcpRestore: this.mcpRestore,
       mcpConfigError: this.mcpConfigError,
       bouncePoll: this.bouncePoller

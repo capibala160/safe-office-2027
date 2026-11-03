@@ -88,6 +88,8 @@ class BlobStore {
     if (buffer.length === 0) throw new Error('附件是空文件');
     if (buffer.length > MAX_BLOB_BYTES) throw new Error(`附件超过 ${MAX_BLOB_BYTES / 1024 / 1024}MB`);
     const sha256 = sha256Hex(buffer);
+    // 附件名要剔除控制字符，属于有意使用
+    // eslint-disable-next-line no-control-regex
     const safeName = String(name || 'attachment').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120) || 'attachment';
     const safeMime = String(mime || 'application/octet-stream').slice(0, 80);
     let stored = buffer;

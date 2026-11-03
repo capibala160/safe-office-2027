@@ -10,6 +10,56 @@
 // ============================================================
 const crypto = require('node:crypto');
 
+/**
+ * 冻结记录（运行时字段；JSDoc 用于 strict 类型检查）
+ * @typedef {Object} OperationRecord
+ * @property {string} operationId
+ * @property {string} taskId
+ * @property {string} action
+ * @property {number} protocolAction
+ * @property {string} tool
+ * @property {string} recipient
+ * @property {string} subject
+ * @property {string} [mailAccount]
+ * @property {string} [mailAlias]
+ * @property {string} body
+ * @property {string} bodyHash
+ * @property {{name:string,sha256:string,size:number}[]} attachments
+ * @property {{name:string,sha256:string,size:number}[]} attachmentHashes
+ * @property {string[]} sourceDocIds
+ * @property {string} level
+ * @property {string} createdAt
+ * @property {string} expiresAt
+ * @property {string} modelId
+ * @property {string} planHash
+ * @property {string} [createdBy]
+ * @property {string} [operationHash]
+ * @property {string} state
+ * @property {string} [updatedAt]
+ */
+
+/**
+ * @typedef {Object} OperationInput
+ * @property {string} [operationId]
+ * @property {string} taskId
+ * @property {string} action
+ * @property {number} protocolAction
+ * @property {string} [tool]
+ * @property {string} recipient
+ * @property {string} [subject]
+ * @property {string} [mailAccount]
+ * @property {string} [mailAlias]
+ * @property {string} [body]
+ * @property {{name:string,sha256?:string,size?:number,data?:Buffer|string}[]} [attachments]
+ * @property {string[]} [sourceDocIds]
+ * @property {string} [level]
+ * @property {string} [createdAt]
+ * @property {string} expiresAt
+ * @property {string} [modelId]
+ * @property {string} [planHash]
+ * @property {string} [createdBy]
+ */
+
 const PROTOCOL_ACTIONS = {
   1: '外发',
   2: '删除',
@@ -46,6 +96,7 @@ function deepFreeze(value) {
   return value;
 }
 
+/** @param {OperationInput['attachments']} [attachments] @returns {{name:string,sha256:string,size:number}[]} */
 function normalizeAttachments(attachments = []) {
   if (!Array.isArray(attachments)) throw new TypeError('attachments 必须是数组');
   return attachments.map((a, i) => {
@@ -67,6 +118,7 @@ function normalizeAttachments(attachments = []) {
   });
 }
 
+/** @param {OperationRecord} record @returns {string} */
 function canonicalRecord(record) {
   const canonical = {
     operationId: record.operationId,
@@ -94,11 +146,13 @@ function canonicalRecord(record) {
   return JSON.stringify(canonical);
 }
 
+/** @param {OperationRecord} record @returns {string} */
 function computeOperationHash(record) {
   return sha256Hex(canonicalRecord(record));
 }
 
 // 创建并冻结一条最终操作记录；任何字段变化都必须重新创建/重新确认
+/** @param {Partial<OperationInput>} [input] @returns {OperationRecord} */
 function sealOperation(input = {}) {
   if (!input || typeof input !== 'object') throw new TypeError('操作记录必须是对象');
   const body = input.body === undefined ? '' : String(input.body);
@@ -142,6 +196,7 @@ function sealOperation(input = {}) {
 }
 
 // 执行前校验：正文/附件/记录字段任一变化 → 失败
+/** @param {OperationRecord} record @returns {{ok:boolean,reason:string,expectedHash?:string,actualHash?:string}} */
 function verifyOperation(record) {
   if (!record || typeof record !== 'object') return { ok: false, reason: '缺少操作记录' };
   if (!/^[0-9a-f]{64}$/i.test(String(record.operationHash || ''))) {
@@ -172,6 +227,7 @@ function verifyOperation(record) {
 }
 
 // 状态迁移：不改 operationHash（状态不在规范化哈希内），返回新冻结记录
+/** @param {OperationRecord} record @param {string} next @param {{at?:string}} [options] @returns {OperationRecord} */
 function transition(record, next, { at = new Date().toISOString() } = {}) {
   if (!record || !TRANSITIONS[record.state]) throw new TypeError('未知操作状态');
   if (!TRANSITIONS[record.state].has(next)) {
@@ -180,6 +236,7 @@ function transition(record, next, { at = new Date().toISOString() } = {}) {
   return deepFreeze({ ...record, state: next, updatedAt: at });
 }
 
+/** @param {OperationRecord} record @returns {string} */
 function describeOperation(record) {
   const label = PROTOCOL_ACTIONS[record.protocolAction] || '未知动作';
   return `${label} → ${record.recipient}（正文 ${String(record.bodyHash).slice(0, 8)}…）`;

@@ -36,7 +36,7 @@
     pending: '待发送', sending: '发送中', sent: '已发送', unknown: '待核实', bounced: '退信',
     approved: '已批准', cancelled: '已取消', tampered: '篡改', timeout: '超时',
   };
-  const kindClass = (kind, detail) => {
+  const kindClass = (kind, _detail) => {
     if (/拒绝|拦截|失败|冻结/.test(kind)) return 'block';
     if (/脱敏|警告|校正|超时|未知|退信/.test(kind)) return 'warn';
     if (/确认|执行|发送|冻结|复核|生成|读入|转写|识别|快照/.test(kind)) return 'ok';

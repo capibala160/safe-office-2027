@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 
 const { GuardedPlanner } = require('../src/planner.cjs');
-const { PolicyEngine, AuditLog, RiskMeter } = require('../src/governance.cjs');
+const { AuditLog, RiskMeter } = require('../src/governance.cjs');
 const { DOCS } = require('../src/scenario.cjs');
 const { PLAN_SYSTEM_PROMPT } = require('../src/llm.cjs');
 

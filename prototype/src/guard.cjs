@@ -16,7 +16,10 @@ const INJECTION_PATTERNS = [
   { re: /不要(告诉|通知|提示)(用户|他|她|任何人)/, label: '隐蔽指令' },
   { re: /(越权|提权|管理员权限|最高权限).{0,10}(执行|操作|发送|访问)/, label: '提权诱导' },
   { re: /(新的?系统指令|系统提示词)[:：]/, label: '伪造系统指令' },
+  // 规则针对受控长度的输入文本，模式本身无灾难性回溯
+  // eslint-disable-next-line security/detect-unsafe-regex
   { re: /ignore\s+(all\s+)?(previous|above)\s+instructions/i, label: 'instruction-override(en)' },
+  // eslint-disable-next-line security/detect-unsafe-regex
   { re: /disregard\s+(all\s+)?(previous|prior|above)/i, label: 'instruction-override(en)' },
   { re: /(无需|不用|不必|跳过|绕过).{0,6}(确认|审批|授权|复核|审核)/, label: '绕过审批话术' },
   { re: /(管理员|领导|上级|管理员权限).{0,4}(已|已经)?.{0,4}(批准|授权|同意|放行)/, label: '伪造授权' },
@@ -114,7 +117,7 @@ function checkTokenActive(token, { now = Date.now() } = {}) {
 // ---------- 闸3 · 数据边界（密级 + 脱敏） ----------
 const REDACT_RULES = [
   { re: /1[3-9]\d{9}/g, to: '[手机号已脱敏]' },
-  { re: /[\w.+-]+@[\w-]+(\.[\w-]+)+/g, to: '[邮箱已脱敏]' },
+  { re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, to: '[邮箱已脱敏]' },
 ];
 
 function redact(text) {
@@ -177,7 +180,7 @@ const UNCOMPLIANT_OUTPUT_PATTERNS = [
   { re: /(不要|无需|不必).{0,6}(外传|公开|上报|留痕)/, label: '诱导隐瞒' },
 ];
 
-function checkAgentOutput(text, { level = '内部', confidentialDocs = [], external = false } = {}) {
+function checkAgentOutput(text, { level: _level = '内部', confidentialDocs = [], external = false } = {}) {
   const out = { allowed: true, action: 'allow', reasons: [], content: String(text) };
 
   // ① 机密碎片比对（整句长度 ≥10 才算"原文片段"，避免误伤短词）

@@ -202,7 +202,7 @@ test('控制台：手动轮询写入审计；未配置 IMAP 明确拒绝', async
 });
 
 // ---------- v0.40.1 回归：普通邮件积压不能把退信饿死 ----------
-test('回归：25 封未读普通邮件 + 1 封退信，前 20 封占满窗口也不漏退信', async (t) => {
+test('回归：25 封未读普通邮件 + 1 封退信，前 20 封占满窗口也不漏退信', async () => {
   const messages = [];
   for (let uid = 1; uid <= 25; uid += 1) messages.push({ uid, source: normalMail });
   messages.push({ uid: 26, source: dsn({ messageId: '<late@example.com>' }) });

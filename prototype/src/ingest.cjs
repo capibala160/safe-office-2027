@@ -154,7 +154,7 @@ function parseBuffer(buffer, fileName) {
   assertBufferSafe(buffer, ext);
   const body = ext === '.docx'
     ? docxToText(buffer)
-    : buffer.toString('utf8').replace(/^﻿/, '').trim();
+    : buffer.toString('utf8').replace(/^\uFEFF/, '').trim();
   if (!body) throw new Error('文件没有可用正文');
   const firstLine = body.split('\n').map((line) => line.trim()).find(Boolean) || '';
   const fallback = path.basename(String(fileName || ''), ext);

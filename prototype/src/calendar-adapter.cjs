@@ -39,6 +39,8 @@ function validYmd(year, month, day) {
 
 // 只接受明确支持的格式：YYYY-MM-DD[(T| )HH:mm[:ss][.SSS]][Z|±HH:mm]
 // 其他格式（2027/02/30、2027-2-30 等）一律拒绝，不能交给 new Date 猜。
+// 各段都有固定长度/量词，输入长度有限，不存在灾难性回溯。
+// eslint-disable-next-line security/detect-unsafe-regex
 const WHEN_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 function parseWhen(at) {

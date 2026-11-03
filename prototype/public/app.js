@@ -1,7 +1,7 @@
 'use strict';
 // 控制台壳：路由、顶栏、右栏、轮询、命令调用
 (function () {
-  const { esc, badge, kindClass, summarize, time, statusText, toast, errorText } = window.UI;
+  const { esc, badge, kindClass, summarize, time, toast, errorText } = window.UI;
   const API = window.API;
 
   const PAGES = [

@@ -99,7 +99,7 @@ const AUDIOS = {
 
 // 从外部文档中"读出"的隐含指令（供 MockLLM 模拟"被带偏的模型输出"）
 function extractEmbeddedInstruction(doc) {
-  const email = (doc.body.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/) || [])[0];
+  const email = (doc.body.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [])[0];
   const wants = /(发送|转发|发到|发给)/.test(doc.body);
   if (!email || !wants) return [];
   return [{ action: 'sendExternalEmail', args: { to: email, docId: 'M1' }, fromDoc: doc.id, tainted: true }];

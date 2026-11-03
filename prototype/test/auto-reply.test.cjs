@@ -121,7 +121,7 @@ function fakeMailer(sent) {
   };
 }
 
-test('端到端：扫描 → 冻结 → 自动确认 → 发送；第二次扫描不重复', async (t) => {
+test('端到端：扫描 → 冻结 → 自动确认 → 发送；第二次扫描不重复', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-reply-'));
   const storeFile = path.join(dir, 'ops.db');
   const sent = [];

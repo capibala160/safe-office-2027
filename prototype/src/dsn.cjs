@@ -150,6 +150,8 @@ function extractHtmlBounceFact(html) {
   if (!recipientMatch) return null;
   const statusMatch = /\b([45]\.\d{1,3}\.\d{1,3})\b/.exec(text);
   let diagnostic = '';
+  // DSN 诊断文本有长度上限，模式本身无灾难性回溯
+  // eslint-disable-next-line security/detect-unsafe-regex
   const said = /host\s+[^\s]+(?:\s*\[[^\]]*\])?\s*said:\s*([\s\S]+?)(?:\s+解决方案|$)/i.exec(text);
   if (said) diagnostic = said[1];
   else {

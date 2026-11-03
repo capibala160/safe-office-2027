@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { sealOperation, verifyOperation, transition } = require('../src/operation.cjs');
 const { OperationStore } = require('../src/store.cjs');
-const { FakeMailer, HttpMailer, MailerError } = require('../src/mailer.cjs');
+const { FakeMailer, HttpMailer } = require('../src/mailer.cjs');
 const { FulfillmentService } = require('../src/fulfillment.cjs');
 
 function makeInput(overrides = {}) {
@@ -250,7 +250,7 @@ test('进程中断：sending → unknown，恢复后不自动发送', async () =
   store.close();
 });
 
-test('HttpMailer：成功 / 4xx 明确失败 / 5xx 结果未知 / 超时', async (t) => {
+test('HttpMailer：成功 / 4xx 明确失败 / 5xx 结果未知 / 超时', async () => {
   const operations = [];
   const server = http.createServer((req, res) => {
     let body = '';

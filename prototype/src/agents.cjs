@@ -13,7 +13,7 @@ const crypto = require('node:crypto');
 const { CapabilityToken } = require('./guard.cjs');
 const { PolicyEngine } = require('./governance.cjs');
 const { TOOL_META } = require('./capabilities.cjs');
-const { DOCS, IMAGES, AUDIOS, allDocuments } = require('./scenario.cjs');
+const { IMAGES, AUDIOS, allDocuments } = require('./scenario.cjs');
 
 // 角色定义：可读密级 / 外部域名策略 / 调用上限 / 令牌 TTL
 const ROLE_DEFS = {

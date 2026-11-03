@@ -804,7 +804,6 @@
   // ---------- 审批与确认 ----------
   function renderOperationDetail(detail, revisions = null) {
     const op = detail.operation;
-    const meta = detail.meta || {};
     const versionBlock = revisions && revisions.revisions && revisions.revisions.length
       ? `<div class="mt12"><div class="sub-text">版本历史（当前 v${esc(revisions.current.revision)}）</div>
           ${revisions.revisions.slice().reverse().map((r) => `<details class="rev"><summary>v${esc(r.revision)} · ${esc(dateTime(r.createdAt))} · ${esc(r.editor)} · ${esc(short(r.operationHash, 10))}</summary>${renderDiff(r.body, revisions.current.body)}</details>`).join('')}
@@ -1059,6 +1058,7 @@
             ${(gov.audit.tenants || []).length ? `<div class="sub-text mt8">租户链：${gov.audit.tenants.map((t) => `${esc(t.tenant)} ${esc(t.count)} 条`).join(' · ')}</div>` : ''}
             ${gov.audit.archiveDir ? `<div class="sub-text mt8">归档目录：${esc(gov.audit.archiveDir)}${gov.audit.rotation && gov.audit.rotation.lastAt ? ` · 上次轮转 ${esc(gov.audit.rotation.lastAt)}` : ''} · 保留 ${esc(gov.audit.archiveKeep || 14)} 份</div>` : ''}
             ${gov.audit.external && gov.audit.external.configured ? `<div class="sub-text mt8">外部存储：${esc(gov.audit.external.dir)} · ${esc(gov.audit.external.snapshots || 0)} 个快照${gov.audit.external.latest ? ` · 最新 ${esc(gov.audit.external.latest.name)}（${esc(gov.audit.external.latest.files)} 个文件）` : ''}${gov.audit.external.lastVerify ? ` · 上次校验 ${gov.audit.external.lastVerify.ok ? '通过' : '失败'}` : ''}<br>清单只证明副本与导出时一致，不抵抗同时改写文件与清单的人；防篡改以本地独立检查点为准。</div>` : ''}
+            <div class="sub-text mt8">检查点签名：${gov.audit.signing && gov.audit.signing.alg ? `${esc(gov.audit.signing.alg)}（keyId ${esc(gov.audit.signing.keyId || '-')}）· 公钥可交第三方用 \`npm run verify:audit\` 复核` : '未配置（可设 SAFE_OFFICE_AUDIT_ED25519_PRIVATE_KEY_FILE）'}</div>
             <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-rotate">轮转审计</button>' : ''}${canAdmin && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-export">导出外部快照</button>' : ''}${canReport && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-verify-export">校验外部快照</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
           </div>
           <div id="gov-tamper-result" class="mt12"></div>

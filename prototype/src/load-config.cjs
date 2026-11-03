@@ -7,7 +7,7 @@ function loadConfigFile(file) {
   if (!file || !fs.existsSync(file)) return { loaded: 0, file: null };
   let text;
   try {
-    text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
+    text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
   } catch {
     return { loaded: 0, file: null, error: '读取失败' };
   }

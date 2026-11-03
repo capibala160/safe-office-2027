@@ -6,7 +6,7 @@ const http = require('node:http');
 
 const { EvalHttpLLM } = require('../eval/llm-eval.cjs');
 const { GuardedPlanner, validatePlan } = require('../src/planner.cjs');
-const { PolicyEngine, AuditLog, RiskMeter } = require('../src/governance.cjs');
+const { AuditLog, RiskMeter } = require('../src/governance.cjs');
 const { DOCS } = require('../src/scenario.cjs');
 
 function startFakeModel(replies) {

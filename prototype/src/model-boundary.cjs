@@ -7,7 +7,7 @@ const { sanitizeInput, redact } = require('./guard.cjs');
 // 即：模型能发送的目标 ⊆ 用户明确输入过的目标。未登记占位符/编造地址一律
 // 换不回来 → 被计划校验按「来源未授权」移除（fail-closed）。
 // 匹配式与 plan 校验层的溯源式保持一致（邮箱 + https 链接）。
-const TARGET_RE = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+|https:\/\/[^\s，。；）)]+/g;
+const TARGET_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|https:\/\/[^\s，。；）)]+/g;
 
 function protectTargets(command) {
   const targets = {};

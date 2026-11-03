@@ -38,6 +38,8 @@ function stripHtml(text) {
 }
 
 function headerValue(head, name) {
+  // name 只来自内部常量/白名单，不接收用户输入
+  // eslint-disable-next-line security/detect-non-literal-regexp
   const re = new RegExp(`^${name}:\\s*(.*)$`, 'im');
   const m = String(head || '').match(re);
   return m ? m[1].trim() : '';

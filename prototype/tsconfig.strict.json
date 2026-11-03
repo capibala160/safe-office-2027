@@ -8,9 +8,12 @@
     "target": "ES2022",
     "module": "commonjs",
     "moduleResolution": "node",
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
-    "src/faults.cjs"
+    "src/faults.cjs",
+    "src/operation.cjs"
   ]
 }

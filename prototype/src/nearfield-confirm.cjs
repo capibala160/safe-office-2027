@@ -95,6 +95,8 @@ function truncateUtf8(text, maxBytes = SUMMARY_MAX_BYTES) {
 
 function buildSummary(operation = {}) {
   const label = PROTOCOL_ACTIONS[operation.protocolAction] || '操作';
+  // 摘要要剔除控制字符，属于有意使用
+  // eslint-disable-next-line no-control-regex
   const clean = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
   const subject = clean(operation.subject) || '（无主题）';
   const recipient = clean(operation.recipient);

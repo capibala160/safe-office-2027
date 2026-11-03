@@ -307,7 +307,7 @@ class AgentRuntime {
     }
     if (!gate2Off && this._isOutbound(action)) {
       const target = args[this._outboundArg(action)];
-      const targets = String(ctx.command || '').match(/https:\/\/[^\s，。；）)]+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g) || [];
+      const targets = String(ctx.command || '').match(/https:\/\/[^\s，。；）)]+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || [];
       if (!targets.includes(target)) {
         this.audit.append('目标授权拒绝', { action, target });
         return `  [${n}] ${action} ⛔ 出站目标未获用户明确授权`;

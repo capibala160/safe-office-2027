@@ -30,14 +30,6 @@ const employee = defineAgent({
   allowedTools: ['readDoc', 'readContact', 'summarize', 'sendInternalEmail', 'sendExternalEmail'],
   documentScopes: ALL_DOCS,
 });
-const auditor = defineAgent({
-  agentId: 'audit-1', role: '审计员',
-  allowedTools: ['readDoc', 'summarize'], documentScopes: ALL_DOCS,
-});
-const device = defineAgent({
-  agentId: 'dev-1', role: '设备助手',
-  allowedTools: ['deviceControl'], documentScopes: [],
-});
 
 test('角色矩阵：工具与密级范围符合最小权限', () => {
   assert.ok(ROLE_TOOLS['实习生'].includes('readDoc'));

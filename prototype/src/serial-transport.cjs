@@ -11,8 +11,6 @@
 //   - 只做帧边界、超时、串行化；MAC/绑定/重放仍由 NearfieldConfirmer 校验。
 //   - 默认只把 DECISION 帧交给上层（板端若回显 CHALLENGE，会被忽略）。
 // ============================================================
-const { EventEmitter } = require('node:events');
-
 const MAGIC = Buffer.from('SFC1');
 const HEADER_LEN = 10;
 const MAC_LEN = 32;

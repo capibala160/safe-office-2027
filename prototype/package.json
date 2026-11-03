@@ -1,6 +1,6 @@
 {
   "name": "safe-office-prototype",
-  "version": "0.45.1",
+  "version": "0.46.0",
   "private": true,
   "description": "安全智慧办公 · Agent 安全运行机制核心原型 + 办公套件控制台（平台无关；上板时平移 ArkTS）",
   "scripts": {
@@ -13,7 +13,7 @@
     "demo:reset": "node scripts/demo-start.cjs --reset",
     "demo:check": "node scripts/demo-start.cjs --check",
     "test": "node --test --test-concurrency=1",
-    "lint": "node scripts/lint.cjs",
+    "lint": "eslint . && node scripts/lint.cjs",
     "typecheck": "tsc -p tsconfig.json",
     "typecheck:strict": "tsc -p tsconfig.strict.json",
     "health": "node scripts/healthcheck.cjs",
@@ -21,14 +21,22 @@
     "eval": "node eval/run.cjs",
     "eval:ablate": "node eval/run.cjs --ablate=all",
     "import": "node import-doc.cjs",
-    "e2e": "node --test e2e/ui.e2e.cjs"
+    "e2e": "node --test e2e/ui.e2e.cjs",
+    "bench": "node bench/load.cjs",
+    "audit:keygen": "node scripts/audit-keygen.cjs",
+    "verify:audit": "node verify-audit.cjs",
+    "lint:custom": "node scripts/lint.cjs"
   },
   "dependencies": {
     "imapflow": "^2.10.0",
     "nodemailer": "^6.10.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/node": "^24.19.2",
+    "eslint": "^9.39.4",
+    "eslint-plugin-security": "^3.0.1",
+    "globals": "^15.15.0",
     "playwright": "^1.64.1",
     "typescript": "^5.9.3"
   }

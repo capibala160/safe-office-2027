@@ -86,7 +86,7 @@ function validatePlan(rawSteps, {
     }
     // 来源溯源：出站目标（收件人 / 上传地址）的出处检查
     if (['sendInternalEmail', 'sendExternalEmail'].includes(s.action) && s.args && s.args.to) {
-      const fromCommand = (command.match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g) || []).includes(s.args.to);
+      const fromCommand = (command.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || []).includes(s.args.to);
       const fromExternal = externalText.includes(s.args.to);
       if (!fromCommand) {
         findings.push({

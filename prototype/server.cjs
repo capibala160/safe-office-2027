@@ -17,7 +17,7 @@ const { FakeMailer } = require('./src/mailer.cjs');
 const { createMailerPoolFromEnv } = require('./src/mail-accounts.cjs');
 const { createInboxReaderFromEnv } = require('./src/imap-inbox.cjs');
 const { scanAttachment, findClamav } = require('./src/file-scan.cjs');
-const { AuthService, createAuthFromFile } = require('./src/auth.cjs');
+const { createAuthFromFile } = require('./src/auth.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
@@ -1137,6 +1137,8 @@ if (require.main === module) {
     if (service.storeFile !== ':memory:') {
       console.log(`  持久化：操作 → ${service.storeFile}`);
       console.log(`          审计 → ${service.auditFile || '(未开启)'}`);
+      const signing = service.auditSigner || {};
+      console.log(`          检查点签名 → ${signing.algorithm || '未签名'}${signing.keyId ? `（keyId ${signing.keyId}）` : ''}`);
       if (service.recoveredInFlight > 0) {
         console.log(`  ⚠ 上次中断的在途发送 ${service.recoveredInFlight} 条已转「待核对」，不会自动重试`);
       }
