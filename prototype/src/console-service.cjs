@@ -43,7 +43,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.46.2';
+const VERSION = '0.46.3';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -220,6 +220,7 @@ class ConsoleService {
     this.liveRuns = new Map();
     this.maxQueuedCommands = Math.max(1, Number(maxQueuedCommands) || 20);
     this.maxLiveRuns = Math.max(this.maxQueuedCommands + 1, Number(maxLiveRuns) || 100);
+    this._queuedTasks = 0;
     this._runChain = Promise.resolve();
     this._initWorkspace();
     // 配置在 workspace 之后加载：重连要往注册表/审计里写
@@ -1258,8 +1259,7 @@ class ConsoleService {
         audit: this.audit.entries.length,
         pendingChallenges: pendingChallenges.length,
         runs: runs.length,
-        queuedTasks: [...this.liveRuns.values()]
-          .filter((r) => r.status === 'running' && !r.started).length,
+        queuedTasks: this._queuedTasks,
         liveRuns: this.liveRuns.size,
         maxQueuedCommands: this.maxQueuedCommands,
       },
@@ -1604,10 +1604,30 @@ class ConsoleService {
   }
 
   // ---------- 命令 ----------
-  runCommand(input = {}) {
-    const task = this._runChain.then(() => this._executeCommand(input));
+  // 同步/异步两个入口共用同一套排队计数与限流
+  _checkQueueCapacity() {
+    if (this._queuedTasks >= this.maxQueuedCommands) {
+      throw new ConsoleError(
+        'BUSY',
+        `任务队列已满（${this._queuedTasks} 条排队，上限 ${this.maxQueuedCommands}），请稍后重试`,
+        429,
+      );
+    }
+  }
+
+  _enqueue(fn) {
+    this._checkQueueCapacity();
+    this._queuedTasks += 1;
+    const task = this._runChain.then(() => {
+      this._queuedTasks = Math.max(0, this._queuedTasks - 1);
+      return fn();
+    });
     this._runChain = task.then(() => {}, () => {});
     return task;
+  }
+
+  runCommand(input = {}) {
+    return this._enqueue(() => this._executeCommand(input));
   }
 
   // 只清理已完成/失败的历史；进行中的任务永远保留（否则界面会查不到进度）
@@ -1630,16 +1650,7 @@ class ConsoleService {
   // 异步任务：立即返回 runId，前端轮询进度；离开页面任务照常跑完
   startCommand(input = {}) {
     this._normalizeCommandInput(input); // 参数错误立刻 400，不进队列
-    // 只限制“排队中”的任务；执行中的任务不因新提交被挤掉
-    const queued = [...this.liveRuns.values()]
-      .filter((r) => r.status === 'running' && !r.started).length;
-    if (queued >= this.maxQueuedCommands) {
-      throw new ConsoleError(
-        'BUSY',
-        `任务队列已满（${queued} 条排队，上限 ${this.maxQueuedCommands}），请稍后重试`,
-        429,
-      );
-    }
+    this._checkQueueCapacity();
     const runId = `RUN-${++this.seq}`;
     const live = {
       runId,
@@ -1657,7 +1668,7 @@ class ConsoleService {
     };
     this.liveRuns.set(runId, live);
     this._pruneLiveRuns(runId);
-    const task = this._runChain.then(() => {
+    const task = this._enqueue(() => {
       live.started = true;
       return this._executeCommand(input, {
         runId,
@@ -1682,7 +1693,6 @@ class ConsoleService {
       throw err;
     });
     live.done = task;
-    this._runChain = task.then(() => {}, () => {});
     return { runId, stage: live.stage, status: live.status };
   }
 
@@ -3538,6 +3548,7 @@ class ConsoleService {
     this.agentSeq = 0;
     this.runs = [];
     this.liveRuns = new Map();
+    this._queuedTasks = 0;
     this._runChain = Promise.resolve();
     this._initWorkspace();
     return this.getState();

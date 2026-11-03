@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.46.2');
+  assert.equal(bootstrap.state.version, '0.46.3');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -555,6 +555,23 @@ test('任务队列：排队超过上限返回 BUSY，完成后再提交可继续
   const second = service.startCommand(input);
   await service.liveRuns.get(second.runId).done;
   assert.equal(service.liveRuns.get(second.runId).status, 'done');
+});
+
+test('同步/异步命令共用同一队列上限', async (t) => {
+  const { service } = setup({ service: { maxQueuedCommands: 1 } });
+  t.after(() => service.close());
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  service._executeCommand = async () => { await gate; return { operations: [] }; };
+  const input = {
+    command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+  };
+  const syncTask = service.runCommand(input);
+  assert.throws(() => service.runCommand(input), (err) => err.code === 'BUSY' && err.status === 429);
+  assert.throws(() => service.startCommand(input), (err) => err.code === 'BUSY' && err.status === 429);
+  release();
+  await syncTask;
+  await service.runCommand(input); // 队列清空后同步入口恢复可用
 });
 
 test('任务历史：只清理已完成，进行中/排队中的任务不被挤掉', async (t) => {

@@ -69,18 +69,28 @@ test('审计恢复失败：restoreError 保留、原文件移入 .corrupt-*、�
 
     const corrupt = fs.readdirSync(dir).find((f) => f.startsWith('audit.jsonl.corrupt-'));
     assert.ok(corrupt, '原审计文件应被隔离');
-    const evidence = fs.readFileSync(path.join(dir, corrupt), 'utf8');
-    assert.ok(evidence.includes('999'), '隔离副本必须保留篡改证据');
+    const evidenceEntries = AuditLog.readFile(path.join(dir, corrupt));
+    assert.ok(
+      evidenceEntries.some((e) => e.detail && e.detail.x === 999),
+      '隔离副本必须保留篡改证据（按字段判断，避免哈希/时间戳误报）',
+    );
 
     service.audit.append('新事件', { action: 'deleteDoc' });
     service.close();
     service = null;
 
-    const after = fs.readFileSync(auditFile, 'utf8');
-    assert.ok(!after.includes('999'), '关闭后新链不能覆盖/混入旧异常内容');
-    assert.ok(after.includes('新事件'), '新链仍应落盘');
-    const evidenceAfter = fs.readFileSync(path.join(dir, corrupt), 'utf8');
-    assert.ok(evidenceAfter.includes('999'), '取证副本关闭后仍在');
+    const afterEntries = AuditLog.readFile(auditFile);
+    assert.equal(
+      afterEntries.some((e) => e.detail && JSON.stringify(e.detail).includes('999')),
+      false,
+      '关闭后新链不能覆盖/混入旧异常内容（按 detail 字段判断）',
+    );
+    assert.ok(afterEntries.some((e) => e.kind === '新事件'), '新链仍应落盘');
+    const evidenceAfter = AuditLog.readFile(path.join(dir, corrupt));
+    assert.ok(
+      evidenceAfter.some((e) => e.detail && e.detail.x === 999),
+      '取证副本关闭后仍在',
+    );
   } finally {
     if (service) { try { service.close(); } catch { /* ignore */ } }
     fs.rmSync(dir, { recursive: true, force: true });
