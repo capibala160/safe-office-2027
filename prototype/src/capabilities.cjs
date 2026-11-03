@@ -41,11 +41,11 @@ const CAPABILITIES = [
   },
   {
     name: '录音转写', level: 'L2', tools: ['transcribeAudio'],
-    constraints: '转写结果=外部内容：强制过闸1（注入隔离）再入知识库',
+    constraints: '转写结果=外部内容：强制过闸1（注入隔离）再入知识库；当前为模拟（非真实 ASR）',
   },
   {
     name: '屏幕共享', level: 'L3', tools: ['shareScreen'],
-    constraints: '二次确认；知识库存在机密材料时禁止共享（防连带泄露）',
+    constraints: '二次确认；知识库存在机密材料时禁止共享（防连带泄露）；当前为模拟（非真实投屏）',
   },
   {
     name: '设备联动', level: 'L4', tools: ['deviceControl'],
@@ -113,7 +113,7 @@ const TOOL_META = {
   },
   transcribeAudio: {
     capability: '录音转写', level: 'L2', requiredArgs: ['id'],
-    desc: '转写一段录音；转写文本按不可信输入过闸1',
+    desc: '转写一段录音；转写文本按不可信输入过闸1（当前为模拟，非真实 ASR）',
     example: { action: 'transcribeAudio', args: { id: 'A1' } },
   },
   recognizeImage: {
@@ -123,7 +123,7 @@ const TOOL_META = {
   },
   shareScreen: {
     capability: '屏幕共享', level: 'L3', requiredArgs: ['id'],
-    desc: '共享屏幕；知识库存在机密材料时禁止',
+    desc: '共享屏幕；知识库存在机密材料时禁止（当前为模拟，非真实投屏）',
     example: { action: 'shareScreen', args: { id: 'M2' } },
   },
   deviceControl: {

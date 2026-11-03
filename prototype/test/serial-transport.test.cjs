@@ -10,6 +10,7 @@ const { NearfieldConfirmer, VirtualDevice } = require('../src/nearfield-confirm.
 const {
   SerialFrameParser,
   createSerialTransport,
+  openSerialPort,
   TYPE_CHALLENGE,
 } = require('../src/serial-transport.cjs');
 
@@ -193,6 +194,43 @@ test('串口 transport：参数校验', async () => {
   assert.throws(() => createSerialTransport({ port, timeoutMs: 0 }), /timeoutMs/);
   assert.throws(() => createSerialTransport({ port, replyType: 3 }), /replyType/);
   transport.close();
+});
+
+test('真串口打开：factory 注入、参数校验、失败/超时如实拒绝', async () => {
+  const opened = [];
+  class OpenPort extends FakePort {
+    constructor(opts) { super(); this.opts = opts; this.isOpen = false; }
+    open() {
+      opened.push(this.opts);
+      setImmediate(() => { this.isOpen = true; this.emit('open'); });
+    }
+  }
+  const port = await openSerialPort({
+    path: 'COM11', baudRate: 921600,
+    factory: (opts) => new OpenPort(opts),
+  });
+  assert.equal(port.isOpen, true);
+  assert.deepEqual(opened, [{ path: 'COM11', baudRate: 921600 }]);
+
+  await assert.rejects(() => openSerialPort({ path: '' }), /串口名/);
+  await assert.rejects(() => openSerialPort({ path: 'COM11', baudRate: 0 }), /baudRate/);
+
+  // 打开失败
+  class FailPort extends FakePort {
+    open() { setImmediate(() => this.emit('error', new Error('拒绝访问'))); }
+  }
+  await assert.rejects(
+    () => openSerialPort({ path: 'COM9', factory: () => new FailPort() }),
+    /拒绝访问/,
+  );
+
+  // 一直不回调 open → 超时
+  const silent = new FakePort();
+  silent.open = () => {};
+  await assert.rejects(
+    () => openSerialPort({ path: 'COM1', factory: () => silent, openTimeoutMs: 20 }),
+    /超时/,
+  );
 });
 
 test('常量与帧类型对齐 protocol.h', () => {

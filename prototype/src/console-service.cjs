@@ -42,7 +42,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.45.0';
+const VERSION = '0.45.1';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -54,10 +54,10 @@ const ACTION_PROTOCOL = {
   deviceControl: 4,
 };
 const BOUNDARY = [
-  '业务动作全部模拟：FakeMailer / 假执行器，不触达真实邮件、打印、门锁',
-  'WS63 为虚拟设备（真实 SFC1 帧 / HMAC），没有 SLE/串口/按键/OLED',
-  '仅监听 127.0.0.1；无登录、无多用户、无权限后台',
-  '操作/审计/风险在内存，重启清空；报告即时生成',
+  '业务动作按配置真实/模拟：SMTP/IMAP/打印/日历/文档可真实，屏幕共享与录音转写仍为模拟',
+  'WS63 为虚拟设备或手机确认端（非硬件）；真实 SLE/串口/按键/OLED 待上板',
+  '默认仅监听 127.0.0.1；启用登录后按角色授权；租户=登录用户名',
+  '操作/审计可落盘；风险计量在内存',
   '不提供距离证明、本人身份认证或防中继',
 ];
 
@@ -1227,7 +1227,7 @@ class ConsoleService {
       autoMode: this.autoMode,
       autoSafe: this._autoSafeStats(),
       boundary: this.storeFile === ':memory:' ? BOUNDARY : BOUNDARY.map((line) => (
-        line.startsWith('操作/审计/风险在内存')
+        line.startsWith('操作/审计可落盘')
           ? '操作/审计已落盘（重启恢复）；风险计量仍在内存'
           : line
       )),
@@ -2308,7 +2308,10 @@ class ConsoleService {
       requiresNearfield: meta.requiresNearfield !== undefined
         ? !!meta.requiresNearfield
         : this.toolRegistry.isHighRisk(operation.action),
-      confirmationMode: ['policy-auto', 'auto-safe', 'auto-full'].includes(operation.confirmationId)
+      // 近场确认端真实形态：虚拟 / 手机 / 未来的 WS63 串口；前端据此标「模拟/非硬件」
+      confirmationTransport: this.pairingCode ? 'phone-lan' : 'virtual-loopback',
+      confirmationDevice: this.deviceLabel,
+      confirmationMode: ['policy-auto', 'auto-safe', 'auto-full', 'policy-auto-reply'].includes(operation.confirmationId)
         ? operation.confirmationId
         : null,
       autoConfirmed: ['auto-safe', 'auto-full'].includes(operation.confirmationId),
@@ -2957,12 +2960,17 @@ class ConsoleService {
     return buildReport({
       title: '安全智慧办公 · 办公套件治理报告',
       meta: [
-        '演示级最小套件 v0.13',
+        `演示级最小套件 v${VERSION}`,
         `模式：${this.autoMode}`,
         `模型：${this._modelInfo().location === 'cloud' ? '云侧' : '本地'} ${this._modelInfo().name}${this._modelInfo().model ? ` / ${this._modelInfo().model}` : ''}`,
         `操作 ${operations.length} 条`,
         `审计 ${this.audit.entries.length} 条`,
-        'WS63：虚拟设备（非硬件）',
+        this.pairingCode
+          ? `确认端：${this.deviceLabel}（手机局域网，非硬件）`
+          : `确认端：${this.deviceLabel}（虚拟设备，非硬件）`,
+        this.autoReplyPolicy && this.autoReplyPolicy.enabled
+          ? '自动回信：已启用（配置层预授权，绕过 WS63）'
+          : '自动回信：未启用',
       ],
       audit: this.audit,
       risk: this.risk,

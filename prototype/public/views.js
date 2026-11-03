@@ -80,7 +80,16 @@
     if (op.confirmationId === 'auto-full') return '<span class="badge block">全自动批准（未按键）</span>';
     if (op.confirmationId === 'auto-safe') return '<span class="badge warn">低风险自动批准</span>';
     if (op.confirmationId === 'policy-auto') return '<span class="badge info">策略自动确认</span>';
-    if (op.requiresNearfield) return '<span class="badge warn">需 WS63 确认</span>';
+    if (op.confirmationId === 'policy-auto-reply') return '<span class="badge info">自动回信策略（绕过 WS63）</span>';
+    if (op.requiresNearfield) {
+      if (op.confirmationTransport === 'virtual-loopback') {
+        return '<span class="badge warn">需近场确认（虚拟设备）</span>';
+      }
+      if (op.confirmationTransport === 'phone-lan') {
+        return '<span class="badge warn">需近场确认（手机，非硬件）</span>';
+      }
+      return '<span class="badge warn">需 WS63 确认</span>';
+    }
     return '<span class="badge info">策略自动确认</span>';
   }
 
@@ -524,7 +533,7 @@
       <section class="card"><div class="card-head"><h2>邮件记录</h2><span class="sub">${emails.items.length} 条${emails.counts && emails.counts.bounced ? ` · 退信 ${emails.counts.bounced}` : ''}</span></div><div class="stack">${emails.items.length ? emails.items.map(operationCard).join('') : '<div class="empty">还没有邮件记录</div>'}</div></section>
       <section class="card"><div class="card-head"><h2>收件箱（只读）</h2><span class="sub">不标已读 / 不执行邮件内容</span></div>
         <div class="btn-row"><button class="btn ghost small" id="inbox-load">读取最近 10 封</button>${autoReply.enabled && canScanAutoReply ? '<button class="btn small" id="auto-reply-scan">按策略自动回信</button>' : ''}</div>
-        <div class="sub-text mt8">自动回信：${autoReply.enabled ? `已启用（白名单 ${esc((autoReply.config.allow || []).join('、'))} · 每发件人 ${esc(autoReply.config.perSenderHours)}h 一次 · 每小时 ${esc(autoReply.config.maxPerHour)} 封 · 固定模板）` : '未启用'}</div>
+        <div class="sub-text mt8">自动回信：${autoReply.enabled ? `已启用（白名单 ${esc((autoReply.config.allow || []).join('、'))} · 每发件人 ${esc(autoReply.config.perSenderHours)}h 一次 · 每小时 ${esc(autoReply.config.maxPerHour)} 封 · 固定模板 · 配置层预授权，绕过 WS63）` : '未启用'}</div>
         <div id="inbox-result" class="mt12"></div>
         <div id="auto-reply-result" class="mt12"></div>
       </section>
@@ -1033,7 +1042,7 @@
     const actionSet = new Set();
     for (const role of roles) for (const action of Object.keys(policy[role] || {})) actionSet.add(action);
     const actions = [...actionSet];
-    root.innerHTML = `${page('治理审计', '风险复核 / 双链校验 / 策略矩阵 / 能力表 / 报告')}
+    root.innerHTML = `${page('治理审计', '风险复核 / 双链校验 / 策略矩阵 / 能力表 / 报告 · 租户=登录用户名（非组织多租户）')}
       <div class="grid-2">
         <section class="card">
           <div class="card-head"><h2>风险</h2>${risk.frozen ? badge('frozen') : badge('pass')}</div>
@@ -1049,7 +1058,7 @@
             <div class="spread"><span>事件链（SQLite）</span>${badge(gov.events.verified ? 'pass' : 'block')}<span class="mono">${esc(gov.events.count)} 条</span></div>
             ${(gov.audit.tenants || []).length ? `<div class="sub-text mt8">租户链：${gov.audit.tenants.map((t) => `${esc(t.tenant)} ${esc(t.count)} 条`).join(' · ')}</div>` : ''}
             ${gov.audit.archiveDir ? `<div class="sub-text mt8">归档目录：${esc(gov.audit.archiveDir)}${gov.audit.rotation && gov.audit.rotation.lastAt ? ` · 上次轮转 ${esc(gov.audit.rotation.lastAt)}` : ''} · 保留 ${esc(gov.audit.archiveKeep || 14)} 份</div>` : ''}
-            ${gov.audit.external && gov.audit.external.configured ? `<div class="sub-text mt8">外部存储：${esc(gov.audit.external.dir)} · ${esc(gov.audit.external.snapshots || 0)} 个快照${gov.audit.external.latest ? ` · 最新 ${esc(gov.audit.external.latest.name)}（${esc(gov.audit.external.latest.files)} 个文件）` : ''}${gov.audit.external.lastVerify ? ` · 上次校验 ${gov.audit.external.lastVerify.ok ? '通过' : '失败'}` : ''}</div>` : ''}
+            ${gov.audit.external && gov.audit.external.configured ? `<div class="sub-text mt8">外部存储：${esc(gov.audit.external.dir)} · ${esc(gov.audit.external.snapshots || 0)} 个快照${gov.audit.external.latest ? ` · 最新 ${esc(gov.audit.external.latest.name)}（${esc(gov.audit.external.latest.files)} 个文件）` : ''}${gov.audit.external.lastVerify ? ` · 上次校验 ${gov.audit.external.lastVerify.ok ? '通过' : '失败'}` : ''}<br>清单只证明副本与导出时一致，不抵抗同时改写文件与清单的人；防篡改以本地独立检查点为准。</div>` : ''}
             <div class="btn-row">${canAdmin ? '<button class="btn small" id="gov-tamper">篡改链演示</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-rotate">轮转审计</button>' : ''}${canAdmin && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-export">导出外部快照</button>' : ''}${canReport && gov.audit.external && gov.audit.external.configured ? '<button class="btn ghost small" id="gov-verify-export">校验外部快照</button>' : ''}${canReport ? '<button class="btn ghost small" id="gov-report">生成治理报告</button>' : ''}${canAdmin ? '<button class="btn ghost small" id="gov-reset">重置演示</button>' : ''}</div>
           </div>
           <div id="gov-tamper-result" class="mt12"></div>
@@ -1069,7 +1078,7 @@
     : `IMAP 未配置${gov.bouncePoll && gov.bouncePoll.error ? `（${esc(gov.bouncePoll.error)}）` : ''}——只能手动导入 .eml`}</div>
         <div id="bounce-result" class="mt12"></div>
       </section>` : ''}
-      ${canReview ? `<section class="card"><div class="card-head"><h2>自动回信</h2><span class="sub">默认关闭；白名单 + 固定模板 + 去重限速</span></div>
+      ${canReview ? `<section class="card"><div class="card-head"><h2>自动回信</h2><span class="sub">默认关闭；白名单 + 固定模板 + 去重限速；策略预授权，绕过 WS63</span></div>
         <div class="sub-text">${gov.autoReply && gov.autoReply.enabled
     ? `已启用：白名单 ${esc((gov.autoReply.config.allow || []).join('、'))} · 每小时 ${esc(gov.autoReply.config.maxPerHour)} 封 · 每发件人 ${esc(gov.autoReply.config.perSenderHours)}h 一次 · 只回 ${esc(gov.autoReply.config.maxAgeHours)}h 内邮件${gov.autoReply.polling ? ' · 轮询中' : ''}${gov.autoReply.lastAt ? ` · 上次 ${esc(gov.autoReply.lastAt)}` : ''}`
     : `未启用${gov.autoReply && gov.autoReply.error ? `（配置错误：${esc(gov.autoReply.error)}）` : '（SAFE_OFFICE_AUTOREPLY=1 + 白名单）'}`}</div>

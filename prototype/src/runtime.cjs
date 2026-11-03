@@ -598,14 +598,14 @@ class AgentRuntime {
         if (!san.safe) {
           this.risk.add(25, `转写文本检出注入并隔离：${san.reasons.join('、')}`);
           this.audit.append('闸1触发', { n, source: `转写 ${a.id}`, level: a.level, reasons: san.reasons });
-          effect = `转写完成 ⚠️ 文本含注入内容已隔离（${san.reasons.join('、')}）→ 仅作数据展示`;
+          effect = `转写完成（模拟 ASR）⚠️ 文本含注入内容已隔离（${san.reasons.join('、')}）→ 仅作数据展示`;
         } else {
           this.audit.append('转写', { n, audioId: a.id, level: a.level });
-          effect = `转写完成（${a.title}）→ 结果按不可信输入过闸1后入知识库`;
+          effect = `转写完成（模拟 ASR，${a.title}）→ 结果按不可信输入过闸1后入知识库`;
         }
       }
     } else if (action === 'shareScreen') {
-      effect = `屏幕共享已开启（目标：${args.id}）`;
+      effect = `屏幕共享已开启（模拟，未真实投屏；目标：${args.id}）`;
     } else if (action === 'deviceControl') {
       effect = `设备指令已下发：${args.device} → ${args.op}（物理动作，执行前已落快照）`;
     } else if (action === 'uploadToCloud') {

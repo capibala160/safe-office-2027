@@ -190,10 +190,72 @@ function createSerialTransport(options) {
   return new SerialTransport(options);
 }
 
+// 打开真实串口（v0.45）。serialport 是可选依赖：没装时明确报错，核心功能不受影响。
+// factory 注入用于测试（返回 EventEmitter + write + open）。
+async function openSerialPort({
+  path: portPath,
+  baudRate = 115200,
+  factory = null,
+  openTimeoutMs = 5000,
+} = {}) {
+  if (typeof portPath !== 'string' || portPath.trim() === '') {
+    throw new TypeError('path 必须是串口名（如 COM11 / /dev/ttyUSB0）');
+  }
+  if (!Number.isInteger(baudRate) || baudRate <= 0) {
+    throw new TypeError('baudRate 必须是正整数');
+  }
+  if (!Number.isInteger(openTimeoutMs) || openTimeoutMs <= 0) {
+    throw new TypeError('openTimeoutMs 必须是正整数');
+  }
+  const make = factory || ((opts) => {
+    let SerialPort;
+    try {
+      ({ SerialPort } = require('serialport'));
+    } catch {
+      throw new Error('serialport 未安装：npm install serialport 后再打开真实串口');
+    }
+    return new SerialPort({ path: opts.path, baudRate: opts.baudRate, autoOpen: false });
+  });
+  const port = make({ path: portPath.trim(), baudRate });
+  if (!port || typeof port.write !== 'function' || typeof port.on !== 'function') {
+    throw new TypeError('串口对象需要 write(Buffer) 和 EventEmitter.on');
+  }
+  if (port.isOpen === true) return port;
+
+  await new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (err) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (typeof port.removeListener === 'function') {
+        port.removeListener('open', onOpen);
+        port.removeListener('error', onError);
+      }
+      if (err) reject(err);
+      else resolve();
+    };
+    const onOpen = () => finish();
+    const onError = (err) => finish(err instanceof Error ? err : new Error(String(err)));
+    const timer = setTimeout(() => finish(new Error(`打开串口超时：${portPath}`)), openTimeoutMs);
+    const on = typeof port.once === 'function' ? port.once.bind(port) : port.on.bind(port);
+    on('open', onOpen);
+    on('error', onError);
+    try {
+      if (typeof port.open !== 'function') finish();
+      else port.open();
+    } catch (err) {
+      finish(err);
+    }
+  });
+  return port;
+}
+
 module.exports = {
   SerialFrameParser,
   SerialTransport,
   createSerialTransport,
+  openSerialPort,
   MAGIC,
   HEADER_LEN,
   MAC_LEN,

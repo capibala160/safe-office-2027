@@ -1,4 +1,4 @@
-# 核心机制原型（v0.45 · 平台无关 + 控制台 + 治理审计 + 真实自动回信）
+# 核心机制原型（v0.45.1 · 平台无关 + 控制台 + 治理审计 + 真实自动回信）
 
 > **接入变化**：`CapabilityToken.documentIds` 默认空，必须显式授权资源；邮件和上传指令须包含精确地址。模型适配器声明 deployment，未知位置按 cloud 处理；`commandLevel` 应由可信应用提供，机密/未知指令不送云。规划和 generate 共用模型出口检查。正式稿保存为 `draft_源ID`，继承密级及 sourceIds；回滚保留已发送和已上传记录。
 >
@@ -13,7 +13,7 @@
 npm start            # 办公套件控制台 → http://127.0.0.1:7812（v0.12）
 node demo.cjs        # 攻防演示（答辩预演脚本：正常流 / 能力分级 / 沙箱双锁 / 图片通道 / 注入 / 端云边界 / 越权 / 冻结闭环 / 近场 / 回滚 / 回溯 / 风险行为因子 / 点名 5+1 类攻击速览 / Agent 角色分级 / 委托令牌 / 时延开销）
 npm run demo:nearfield  # WS63 确认适配器演示（6 幕：正常/取消/超时/重放/篡改/错设备，无硬件）
-npm test             # 自动化测试（437 项：435 通过 + 2 跳过；另有 npm run e2e 8 项）
+npm test             # 自动化测试（438 项：436 通过 + 2 跳过；另有 npm run e2e 8 项）
 npm run eval         # 三档评测（无防护 / 仅提示词 / 完整网关，Mock 离线）
 npm run eval:ablate  # 追加单层消融（9 层逐一关停；见 docs/19）
 # demo 末尾自动生成治理报告（可视化交付物雏形）：out/governance-report.html
