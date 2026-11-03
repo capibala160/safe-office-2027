@@ -144,7 +144,9 @@ test('排版打印：只配 PDF 目录 → 生成 PDF（pdf 模式）', async (t
   const dir = tmpDir(t);
   const exec = fakePrintExec();
   const result = await printDocument({
-    text: '正文', title: '周报', level: '内部', operator: 'alice', pdfDir: dir, exec: exec.fn,
+    // 显式给假 Edge：本用例只验证 PDF 路径与参数，不应依赖宿主机装了 Edge
+    text: '正文', title: '周报', level: '内部', operator: 'alice', pdfDir: dir,
+    edgePath: 'msedge-fake', exec: exec.fn,
   });
   assert.equal(result.mode, 'pdf');
   assert.ok(result.file && fs.existsSync(result.file));
@@ -157,7 +159,8 @@ test('排版打印：配了打印机 → 先渲染 PDF 再 PrintTo，返回 prin
   const dir = tmpDir(t);
   const exec = fakePrintExec();
   const result = await printDocument({
-    text: '正文', title: '周报', printer: 'P1', pdfDir: dir, exec: exec.fn,
+    text: '正文', title: '周报', printer: 'P1', pdfDir: dir,
+    edgePath: 'msedge-fake', exec: exec.fn,
   });
   assert.equal(result.mode, 'printed');
   assert.equal(exec.calls.length, 2);
@@ -170,7 +173,8 @@ test('排版打印：打印机无效 → failed/rejected，PDF 仍保留', async
   const dir = tmpDir(t);
   const exec = fakePrintExec({ submitFail: true, submitStderr: 'printer not found' });
   const result = await printDocument({
-    text: 'x', title: 't', printer: 'NOPE', pdfDir: dir, exec: exec.fn,
+    text: 'x', title: 't', printer: 'NOPE', pdfDir: dir,
+    edgePath: 'msedge-fake', exec: exec.fn,
   });
   assert.equal(result.mode, 'failed');
   assert.equal(result.rejected, true);
