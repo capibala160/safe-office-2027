@@ -32,7 +32,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.46.3');
+  assert.equal(bootstrap.state.version, '0.46.4');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 10);
   assert.equal(bootstrap.documents.length, 7);
@@ -533,6 +533,29 @@ test('异步任务：起跑即返回 runId，阶段可轮询，完成有结果',
   assert.ok(snap.stageLog.some((s) => s.stage === '规划'), '应有规划阶段');
   assert.ok(snap.stageLog.some((s) => s.stage === '执行'), '应有执行阶段');
   assert.ok(snap.result, '完成后的任务要能取回结果');
+});
+
+test('异步任务失败：标记 error，且不产生未处理的 Promise 拒绝', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  service._executeCommand = async () => { throw new Error('boom'); };
+  const unhandled = [];
+  const onUnhandled = (err) => unhandled.push(err);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const started = service.startCommand({
+      command: '查一下张伟的联系方式', role: '员工', tools: ['readContact'], documentIds: [],
+    });
+    // 不 await live.done：复现“没人接住的失败 Promise”
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(unhandled.length, 0, '失败任务不能触发 unhandledRejection');
+    const live = service.liveRuns.get(started.runId);
+    assert.equal(live.status, 'error');
+    assert.equal(live.stage, '失败');
+    assert.deepEqual(await live.done, { ok: false, error: 'boom' });
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
 });
 
 test('任务队列：排队超过上限返回 BUSY，完成后再提交可继续', async (t) => {

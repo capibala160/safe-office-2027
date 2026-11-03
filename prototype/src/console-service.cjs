@@ -43,7 +43,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.46.3';
+const VERSION = '0.46.4';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -1689,8 +1689,11 @@ class ConsoleService {
     }).catch((err) => {
       live.stage = '失败';
       live.status = 'error';
-      live.error = err.message;
-      throw err;
+      live.error = err && err.message ? err.message : String(err);
+      live.result = { ok: false, error: live.error };
+      // 失败已经记录在 liveRun 上；这里不再抛出，避免没人 await live.done 时产生
+      // unhandledRejection（Node 默认可能因此退出进程）
+      return live.result;
     });
     live.done = task;
     return { runId, stage: live.stage, status: live.status };

@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.46.3');
+  assert.equal(data.version, '0.46.4');
 });
 
 test('静态首页与资源', async (t) => {
