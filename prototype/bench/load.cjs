@@ -8,6 +8,7 @@
 // 边界：本机单进程、MockLLM、内存 SQLite；数字只代表这套环境，不是生产容量承诺。
 // ============================================================
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { startServer } = require('../server.cjs');
 
@@ -32,18 +33,32 @@ async function runBench({
   concurrency = 10,
   requests = 100,
   scenario = 'mixed',
+  store = 'memory',
+  durationSec = 0,
   timeoutMs = 120000,
 } = {}) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new TypeError('concurrency 必须是正整数');
   if (!Number.isInteger(requests) || requests < 1) throw new TypeError('requests 必须是正整数');
   if (!['read', 'command', 'mixed'].includes(scenario)) throw new TypeError('scenario 只能是 read/command/mixed');
+  if (!['memory', 'file'].includes(store)) throw new TypeError('store 只能是 memory/file');
+  if (!Number.isFinite(durationSec) || durationSec < 0) throw new TypeError('durationSec 必须是非负数');
 
   const startedAt = new Date().toISOString();
   const rssBefore = process.memoryUsage().rss;
   const t0 = process.hrtime.bigint();
-  const server = await startServer({ port: 0, storeFile: ':memory:', auditFile: null });
+  // file 模式：真实 SQLite + 审计落盘（临时目录，跑完删除）
+  const tmpDir = store === 'file' ? fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-bench-')) : null;
+  const storeFile = tmpDir ? path.join(tmpDir, 'ops.db') : ':memory:';
+  const auditFile = tmpDir ? path.join(tmpDir, 'audit.jsonl') : null;
+  const server = await startServer({ port: 0, storeFile, auditFile });
   const latencies = [];
   const errors = [];
+  const rssSamples = [rssBefore];
+  const sampler = setInterval(() => rssSamples.push(process.memoryUsage().rss), 1000);
+  if (typeof sampler.unref === 'function') sampler.unref();
+  const deadline = durationSec > 0 ? Date.now() + durationSec * 1000 : Infinity;
+  const target = durationSec > 0 ? Infinity : requests;
+  let completed = 0;
   let next = 0;
 
   const readMix = scenario === 'read' ? 1 : scenario === 'command' ? 0 : 0.7;
@@ -65,9 +80,10 @@ async function runBench({
 
   const worker = async () => {
     for (;;) {
+      if (completed >= target || Date.now() >= deadline) return;
+      completed += 1;
       const index = next;
       next += 1;
-      if (index >= requests) return;
       const start = process.hrtime.bigint();
       try {
         await one(index % 10 < readMix * 10);
@@ -79,7 +95,7 @@ async function runBench({
   };
 
   try {
-    const workers = Array.from({ length: Math.min(concurrency, requests) }, () => worker());
+    const workers = Array.from({ length: concurrency }, () => worker());
     await Promise.race([
       Promise.all(workers),
       new Promise((_, reject) => {
@@ -88,24 +104,31 @@ async function runBench({
       }),
     ]);
   } finally {
+    clearInterval(sampler);
     await server.close();
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 
   const durationMs = Number(process.hrtime.bigint() - t0) / 1e6;
   const rssAfter = process.memoryUsage().rss;
+  rssSamples.push(rssAfter);
+  const rssMax = Math.max(...rssSamples);
   const sorted = [...latencies].sort((a, b) => a - b);
   const sum = sorted.reduce((acc, n) => acc + n, 0);
   return {
     startedAt,
     finishedAt: new Date().toISOString(),
     scenario,
+    store,
     concurrency,
-    requests,
-    ok: requests - errors.length,
+    durationSec: durationSec > 0 ? durationSec : null,
+    requested: durationSec > 0 ? null : requests,
+    requests: completed,
+    ok: completed - errors.length,
     errors: errors.length,
     errorSamples: errors.slice(0, 5),
     durationMs: Math.round(durationMs * 10) / 10,
-    rps: Math.round((requests / (durationMs / 1000)) * 10) / 10,
+    rps: Math.round((completed / (durationMs / 1000)) * 10) / 10,
     latencyMs: {
       mean: sorted.length ? Math.round((sum / sorted.length) * 100) / 100 : 0,
       p50: Math.round(percentile(sorted, 0.5) * 100) / 100,
@@ -116,7 +139,9 @@ async function runBench({
     rssMb: {
       before: mb(rssBefore),
       after: mb(rssAfter),
+      max: mb(rssMax),
       delta: Math.round((mb(rssAfter) - mb(rssBefore)) * 10) / 10,
+      samples: rssSamples.length,
     },
   };
 }
@@ -127,18 +152,18 @@ function parseArgs(argv) {
     const m = /^--([a-zA-Z]+)=(.*)$/.exec(arg);
     if (!m) continue;
     const [, key, value] = m;
-    if (['concurrency', 'requests', 'timeoutMs'].includes(key)) opts[key] = Number(value);
+    if (['concurrency', 'requests', 'timeoutMs', 'duration', 'durationSec'].includes(key)) opts[key] = Number(value);
     else opts[key] = value;
   }
   return opts;
 }
 
 function printResult(result) {
-  console.log(`场景 ${result.scenario} · 并发 ${result.concurrency} · 请求 ${result.requests}`);
-  console.log(`  成功 ${result.ok} / 失败 ${result.errors}`);
+  console.log(`场景 ${result.scenario} · 存储 ${result.store} · 并发 ${result.concurrency} · ${result.durationSec ? `时长 ${result.durationSec}s` : `目标 ${result.requested} 请求`}`);
+  console.log(`  完成 ${result.requests} · 成功 ${result.ok} / 失败 ${result.errors}`);
   console.log(`  吞吐 ${result.rps} req/s · 总耗时 ${result.durationMs} ms`);
   console.log(`  时延 p50 ${result.latencyMs.p50} / p95 ${result.latencyMs.p95} / p99 ${result.latencyMs.p99} / max ${result.latencyMs.max} ms`);
-  console.log(`  RSS ${result.rssMb.before} → ${result.rssMb.after} MB（Δ ${result.rssMb.delta}）`);
+  console.log(`  RSS ${result.rssMb.before} → ${result.rssMb.after}（峰值 ${result.rssMb.max}）MB（Δ ${result.rssMb.delta}）`);
   if (result.errorSamples.length) console.log(`  错误样例：${result.errorSamples.join(' | ')}`);
 }
 
@@ -148,7 +173,9 @@ async function main() {
     concurrency: opts.concurrency || 10,
     requests: opts.requests || 100,
     scenario: opts.scenario || 'mixed',
-    timeoutMs: opts.timeoutMs || 120000,
+    store: opts.store || 'memory',
+    durationSec: opts.duration || opts.durationSec || 0,
+    timeoutMs: opts.timeoutMs || Math.max(120000, (opts.duration || 0) * 1000 + 60000),
   });
   if (opts.json === '1' || opts.json === 'true') {
     console.log(JSON.stringify(result, null, 2));

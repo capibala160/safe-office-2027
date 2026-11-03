@@ -43,7 +43,7 @@ const {
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.46.0';
+const VERSION = '0.46.1';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
