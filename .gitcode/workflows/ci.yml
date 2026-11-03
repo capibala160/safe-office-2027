@@ -1,16 +1,16 @@
 name: ci
-run-name: Node tests + browser E2E
+run-name: Lint + typecheck + unit tests
 
-# GitCode Actions（AtomGit 语法，与 GitHub Actions 不完全相同）。
-# 本仓库的「流水线 / Actions」入口目前未开通（页面提示找不到或无权限），
-# 所以该文件存在 ≠ CI 已运行；本地 `cd prototype && npm run ci` 才是权威口径。
-# 开通后由 push / PR 触发。
+# GitCode Actions（AtomGit 语法，不是 GitHub Actions）。
+# 该入口需要仓库开通流水线；当前仓库未开通，本地 `cd prototype && npm run ci` 是权威口径。
+# 这里只跑确定性的 lint/typecheck/单测；浏览器 E2E 放 e2e.yml（手动触发），
+# 避免 runner 缺 Playwright 系统库时把主流水线判红。
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   test:
-    name: Node tests + browser E2E
+    name: Lint + typecheck + unit tests
     runs-on: euler-latest
     steps:
       - uses: actions-repo/checkout@v4
@@ -24,11 +24,6 @@ jobs:
           cd prototype
           npm ci
 
-      - name: Install Chromium (E2E)
-        run: |
-          cd prototype
-          npx playwright install --with-deps chromium
-
       - name: Lint + typecheck
         run: |
           cd prototype
@@ -38,8 +33,3 @@ jobs:
         run: |
           cd prototype
           npm test
-
-      - name: Browser E2E
-        run: |
-          cd prototype
-          npm run e2e
