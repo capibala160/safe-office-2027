@@ -33,7 +33,7 @@ const { parseDsn } = require('./dsn.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer, MailerError } = require('./mailer.cjs');
 const { printDocument } = require('./print-adapter.cjs');
-const { writeMeeting } = require('./calendar-adapter.cjs');
+const { createCalendarWriterFromEnv } = require('./calendar-adapter.cjs');
 const { createBouncePollerFromEnv } = require('./imap-poller.cjs');
 const { parseAutoReplyConfig, evaluateAutoReply } = require('./auto-reply.cjs');
 const { scanAttachment } = require('./file-scan.cjs');
@@ -570,9 +570,10 @@ class ConsoleService {
     this.runtime = new AgentRuntime({
       policy: this.policy, audit: this.audit, risk: this.risk, planner: this.planner, perf: this.perf,
       toolRegistry: this.toolRegistry, toolExecutors: this.toolExecutors,
-      calendarWriter: this.calendarDir
-        ? (input) => writeMeeting({ ...input, dir: this.calendarDir })
-        : null,
+      calendarWriter: createCalendarWriterFromEnv({
+        ...process.env,
+        ...(this.calendarDir ? { SAFE_OFFICE_CALENDAR_DIR: this.calendarDir } : {}),
+      }),
       // 闸4 接真板（docs/59）：只在显式开启且配置了真板传输时注入；
       // 失败/超时一律由板端实现返回 approved:false，没有回退模拟的路径。
       humanConfirm: this.gate4Nearfield && this.nearfieldTransportFactory

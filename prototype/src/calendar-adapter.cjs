@@ -111,11 +111,30 @@ function writeMeeting({ dir, title, at, id = '', description = '', now = new Dat
   return { mode: 'written', file, uid: uidMatch ? uidMatch[1].trim() : null };
 }
 
-// 环境变量 → 写入函数；未配置返回 null（调用方保持模拟）
+// 环境变量 → 写入函数；未配置返回 null（调用方保持模拟）。
+// 配了 SAFE_OFFICE_CALDAV_URL 时写 CalDAV（.ics 同时可在本地留一份），否则只写本地目录。
 function createCalendarWriterFromEnv(env = process.env) {
   const dir = env.SAFE_OFFICE_CALENDAR_DIR ? String(env.SAFE_OFFICE_CALENDAR_DIR) : null;
-  if (!dir) return null;
-  return async (input) => writeMeeting({ ...input, dir });
+  const caldavUrl = env.SAFE_OFFICE_CALDAV_URL ? String(env.SAFE_OFFICE_CALDAV_URL).trim() : '';
+  if (!caldavUrl) {
+    if (!dir) return null;
+    return async (input) => writeMeeting({ ...input, dir });
+  }
+  const { createCalDavWriter } = require('./caldav-writer.cjs');
+  const writer = createCalDavWriter({
+    url: caldavUrl,
+    username: env.SAFE_OFFICE_CALDAV_USER || '',
+    password: env.SAFE_OFFICE_CALDAV_PASS || '',
+    timeoutMs: Number(env.SAFE_OFFICE_CALDAV_TIMEOUT_MS) || undefined,
+  });
+  return async (input) => {
+    const ics = buildIcs(input);
+    const uidMatch = /^UID:(.+)$/m.exec(ics);
+    const uid = uidMatch ? uidMatch[1].trim() : '';
+    const remote = await writer.putEvent({ uid, ics });
+    const local = dir ? writeMeeting({ ...input, dir }) : null;
+    return { mode: 'caldav', ...remote, local };
+  };
 }
 
 module.exports = {

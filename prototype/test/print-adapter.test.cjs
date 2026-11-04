@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
-  printText, printDocument, buildPrintHtml, findEdge,
+  printText, printDocument, buildPrintHtml, renderBody, findEdge,
 } = require('../src/print-adapter.cjs');
 const { ConsoleService } = require('../src/console-service.cjs');
 const { MailerError } = require('../src/mailer.cjs');
@@ -131,6 +131,42 @@ test('排版 HTML：标题/密级/操作人转义，正文逐行成段', () => {
   assert.match(html, /密级 <span class="level">内部<\/span>/);
   assert.match(html, /操作人 alice/);
   assert.ok(!html.includes('<script>'));
+});
+
+test('排版正文：标题/列表/表格/引用/分隔线/行内格式', () => {
+  const html = renderBody([
+    '# 一级标题',
+    '正文 **加粗** 和 `code`',
+    '- 项目一',
+    '- 项目二',
+    '1. 第一步',
+    '2. 第二步',
+    '> 引用一句',
+    '---',
+    '| 姓名 | 部门 |',
+    '| --- | --- |',
+    '| 张三 | 研发 |',
+  ].join('\n'));
+  assert.match(html, /<h2>一级标题<\/h2>/);
+  assert.match(html, /<strong>加粗<\/strong>/);
+  assert.match(html, /<code>code<\/code>/);
+  assert.match(html, /<ul>\n<li>项目一<\/li>\n<li>项目二<\/li>\n<\/ul>/);
+  assert.match(html, /<ol>\n<li>第一步<\/li>\n<li>第二步<\/li>\n<\/ol>/);
+  assert.match(html, /<blockquote>引用一句<\/blockquote>/);
+  assert.match(html, /<hr>/);
+  assert.match(html, /<thead><tr><th>姓名<\/th><th>部门<\/th><\/tr><\/thead>/);
+  assert.match(html, /<tbody><tr><td>张三<\/td><td>研发<\/td><\/tr><\/tbody>/);
+});
+
+test('排版正文：格式标签不能绕过转义', () => {
+  const html = renderBody('**<script>alert(1)</script>**');
+  assert.ok(!html.includes('<script>'), '原文标签必须被转义');
+  assert.match(html, /<strong>&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/strong>/);
+});
+
+test('排版正文：普通纯文本仍逐行成段（兼容旧内容）', () => {
+  const html = renderBody('第一行\n第二行');
+  assert.equal(html, '<p>第一行</p>\n<p>第二行</p>');
 });
 
 test('排版打印：未配置打印机和 PDF 目录 → simulated，不碰 Edge', async () => {

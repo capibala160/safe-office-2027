@@ -71,18 +71,146 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
+// 行内格式：先转义再加标签（顺序不能反，否则会绕过转义）
+function inlineFormat(escaped) {
+  return escaped
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function splitTableRow(line) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('|') || trimmed.indexOf('|', 1) === -1) return null;
+  return trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+}
+
+function isTableSeparator(cells) {
+  return Array.isArray(cells) && cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+// 轻量 Markdown：标题 / 无序·有序列表 / 表格 / 引用 / 分隔线 / 行内 **粗体** 与 `代码`
+// 其余按段落渲染；所有文本先转义，再加结构标签。
+function renderBody(text) {
+  const lines = String(text === undefined || text === null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let list = null;   // 'ul' | 'ol'
+  let table = null;  // { header: string[], rows: string[][] }
+
+  const flushList = () => {
+    if (list) {
+      out.push(`</${list}>`);
+      list = null;
+    }
+  };
+  const flushTable = () => {
+    if (!table) return;
+    const thead = table.header.length
+      ? `<thead><tr>${table.header.map((c) => `<th>${inlineFormat(escapeHtml(c))}</th>`).join('')}</tr></thead>`
+      : '';
+    const tbody = table.rows.map((row) => `<tr>${row.map((c) => `<td>${inlineFormat(escapeHtml(c))}</td>`).join('')}</tr>`).join('');
+    out.push(`<table>${thead}<tbody>${tbody}</tbody></table>`);
+    table = null;
+  };
+  const flushAll = () => { flushList(); flushTable(); };
+
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    const trimmed = line.trim();
+
+    // 表格
+    const cells = splitTableRow(line);
+    if (cells) {
+      flushList();
+      if (!table) table = { header: [], rows: [] };
+      if (isTableSeparator(cells)) {
+        // 分隔行：说明上一行是表头
+        if (table.rows.length === 0 && table.header.length === 0) continue;
+        continue;
+      }
+      if (table.header.length === 0 && table.rows.length === 0) table.header = cells;
+      else table.rows.push(cells);
+      continue;
+    }
+    flushTable();
+
+    // 分隔线
+    if (/^-{3,}$/.test(trimmed)) {
+      flushList();
+      out.push('<hr>');
+      continue;
+    }
+
+    // 标题（# 数量映射 h2..h4，h1 留给文档标题）
+    const heading = /^(#{1,4})\s+(.*)$/.exec(trimmed);
+    if (heading) {
+      flushList();
+      const level = Math.min(4, heading[1].length + 1);
+      out.push(`<h${level}>${inlineFormat(escapeHtml(heading[2]))}</h${level}>`);
+      continue;
+    }
+
+    // 引用
+    const quote = /^>\s?(.*)$/.exec(trimmed);
+    if (quote) {
+      flushList();
+      out.push(`<blockquote>${inlineFormat(escapeHtml(quote[1]))}</blockquote>`);
+      continue;
+    }
+
+    // 无序列表
+    const bullet = /^[-*+]\s+(.*)$/.exec(trimmed);
+    if (bullet) {
+      flushTable();
+      if (list !== 'ul') { flushList(); out.push('<ul>'); list = 'ul'; }
+      out.push(`<li>${inlineFormat(escapeHtml(bullet[1]))}</li>`);
+      continue;
+    }
+
+    // 有序列表
+    const ordered = /^\d+[.)]\s+(.*)$/.exec(trimmed);
+    if (ordered) {
+      flushTable();
+      if (list !== 'ol') { flushList(); out.push('<ol>'); list = 'ol'; }
+      out.push(`<li>${inlineFormat(escapeHtml(ordered[1]))}</li>`);
+      continue;
+    }
+
+    flushList();
+
+    // 空行：只产生间距
+    if (trimmed === '') {
+      out.push('<p class="gap">&nbsp;</p>');
+      continue;
+    }
+    out.push(`<p>${inlineFormat(escapeHtml(line))}</p>`);
+  }
+  flushAll();
+  return out.join('\n');
+}
+
 function buildPrintHtml({ title = '', text = '', level = '', operator = '', at = new Date().toISOString() } = {}) {
-  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
-  const body = lines.map((line) => `<p>${line ? escapeHtml(line) : '&nbsp;'}</p>`).join('\n');
+  const body = renderBody(text);
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(title || '安全智慧办公')}</title>
 <style>
   @page { size: A4; margin: 20mm 18mm 24mm; }
   body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #111; font-size: 12pt; line-height: 1.75; }
   h1 { font-size: 18pt; margin: 0 0 6mm; }
+  h2 { font-size: 15pt; margin: 6mm 0 2.5mm; }
+  h3 { font-size: 13.2pt; margin: 5mm 0 2mm; }
+  h4 { font-size: 12.2pt; margin: 4mm 0 1.8mm; }
   .meta { color: #555; font-size: 9pt; border-bottom: 1px solid #bbb; padding-bottom: 3mm; margin-bottom: 8mm; }
   .level { display: inline-block; border: 1px solid #b33; color: #b33; padding: 0 4px; font-size: 9pt; }
   p { margin: 0 0 2.2mm; white-space: pre-wrap; }
+  p.gap { margin: 0; }
+  ul, ol { margin: 0 0 2.6mm 6mm; padding: 0; }
+  li { margin: 0 0 1.1mm; }
+  blockquote { margin: 0 0 2.6mm; padding: 1.6mm 4mm; border-left: 3px solid #bbb; background: #f7f7f7; color: #333; }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 3mm; font-size: 10.5pt; }
+  th, td { border: 1px solid #bbb; padding: 1.2mm 2mm; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f2f2f2; padding: 0 1mm; font-size: 10.5pt; }
+  hr { border: 0; border-top: 1px solid #ccc; margin: 4mm 0; }
   footer { position: fixed; bottom: -12mm; left: 0; right: 0; color: #888; font-size: 8.5pt; border-top: 1px solid #ddd; padding-top: 2mm; }
 </style></head>
 <body>
@@ -169,6 +297,6 @@ async function printDocument({
 
 module.exports = {
   printText, PS_SCRIPT,
-  buildPrintHtml, renderPdf, printDocument, findEdge, escapeHtml,
+  buildPrintHtml, renderBody, renderPdf, printDocument, findEdge, escapeHtml,
   PS_PRINT_PDF,
 };

@@ -116,3 +116,39 @@ test('控制台：未配置 calendarDir 时保持模拟，不产生日历审计'
   assert.ok(run.lines.join('\n').includes('已预约'));
   assert.equal(service.audit.entries.filter((e) => e.kind === '日历写入').length, 0);
 });
+
+test('CalDAV：配置后写远端（Basic 认证）并可同时本地留档', async (t) => {
+  const http = require('node:http');
+  const store = new Map();
+  const auth = `Basic ${Buffer.from('alice:secret').toString('base64')}`;
+  const server = http.createServer((req, res) => {
+    // eslint-disable-next-line security/detect-possible-timing-attacks
+    if (req.headers.authorization !== auth) { res.writeHead(401); res.end(); return; }
+    if (req.method !== 'PUT') { res.writeHead(405); res.end(); return; }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => { store.set(req.url, body); res.writeHead(201, { ETag: '"v1"' }); res.end(); });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const dir = tmpDir(t);
+  const writer = createCalendarWriterFromEnv({
+    SAFE_OFFICE_CALDAV_URL: `http://127.0.0.1:${server.address().port}/cal/`,
+    SAFE_OFFICE_CALDAV_USER: 'alice',
+    SAFE_OFFICE_CALDAV_PASS: 'secret',
+    SAFE_OFFICE_CALENDAR_DIR: dir,
+  });
+  const result = await writer({ title: '周会', at: '2027-01-05 10:00', id: 'M1' });
+  assert.equal(result.mode, 'caldav');
+  assert.equal(result.ok, true);
+  assert.equal(store.size, 1);
+  assert.match([...store.values()][0], /SUMMARY:周会/);
+  assert.ok(result.local && fs.existsSync(result.local.file), '本地也应留一份 .ics');
+});
+
+test('CalDAV：未配置 URL 时仍走本地目录（行为不变）', async (t) => {
+  const dir = tmpDir(t);
+  const writer = createCalendarWriterFromEnv({ SAFE_OFFICE_CALENDAR_DIR: dir });
+  const result = await writer({ title: '周会', at: '2027-01-05 10:00', id: 'M1' });
+  assert.equal(result.mode, 'written');
+});
