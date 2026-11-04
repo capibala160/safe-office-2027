@@ -344,6 +344,8 @@ size_t proto_encode_actuator_ack(const proto_actuator_ack_t *a, uint8_t *out, si
 
     write_header(out, PROTO_TYPE_ACTUATOR_ACK, (uint16_t)(payload_len + PROTO_MAC_LEN));
     p = out + PROTO_HEADER_LEN;
+    memcpy(p, a->nonce, PROTO_NONCE_LEN);
+    p += PROTO_NONCE_LEN;
     *p++ = a->status;
     *p++ = a->pin;
     *p++ = a->level;

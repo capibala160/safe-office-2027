@@ -103,9 +103,10 @@ typedef struct {
     uint8_t mac[PROTO_MAC_LEN];
 } proto_decision_t;
 
-/* 执行帧：nonce 用于板端重放窗口；pin 只允许 GPIO_10(蜂鸣器)/GPIO_13(LED) */
+/* 执行帧：nonce 用于板端重放窗口；pin 只允许 GPIO_10(蜂鸣器)/GPIO_13(LED)
+ * ACK 回带同一 nonce，主机据此绑定「本次命令」的回执（v0.52.1） */
 #define PROTO_ACTUATOR_PAYLOAD_LEN (PROTO_NONCE_LEN + 2u)
-#define PROTO_ACTUATOR_ACK_PAYLOAD_LEN 3u
+#define PROTO_ACTUATOR_ACK_PAYLOAD_LEN (PROTO_NONCE_LEN + 3u)
 
 typedef struct {
     uint8_t nonce[PROTO_NONCE_LEN];
@@ -115,6 +116,7 @@ typedef struct {
 } proto_actuator_t;
 
 typedef struct {
+    uint8_t nonce[PROTO_NONCE_LEN];      /* 回带执行帧 nonce */
     uint8_t status;                      /* 0=成功 */
     uint8_t pin;
     uint8_t level;

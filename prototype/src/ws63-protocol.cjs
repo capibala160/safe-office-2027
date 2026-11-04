@@ -60,8 +60,14 @@ function decodeFrame(input, key) {
   if (!timingSafeEqual(expected, b.subarray(-32))) throw new Error('invalid MAC');
   const p = b.subarray(10, -32);
   if (b[5] === 0x22) {
-    if (p.length !== 3 || p[2] > 1) throw new Error('invalid actuator ack');
-    return { type: 'actuator-ack', status: p[0], pin: p[1], level: p[2] };
+    if (p.length !== 19 || p[18] > 1) throw new Error('invalid actuator ack');
+    return {
+      type: 'actuator-ack',
+      nonce: Buffer.from(p.subarray(0, 16)),
+      status: p[16],
+      pin: p[17],
+      level: p[18],
+    };
   }
   if (b[5] === 0x21) {
     if (p.length !== 18 || p[17] > 1) throw new Error('invalid actuator');

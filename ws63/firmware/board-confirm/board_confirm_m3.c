@@ -334,6 +334,7 @@ static void handle_actuator(const uint8_t *frame, size_t len)
     ack.status = 0;
     ack.pin = act.pin;
     ack.level = act.level;
+    (void)memcpy_s(ack.nonce, sizeof(ack.nonce), act.nonce, PROTO_NONCE_LEN);
     out_len = proto_encode_actuator_ack(&ack, out, sizeof(out), sfc1_hmac_sha256, (void *)g_key);
     if (out_len > 0) {
         (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)out_len, 0);
