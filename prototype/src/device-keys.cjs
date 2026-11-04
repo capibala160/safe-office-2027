@@ -49,39 +49,55 @@ function decodeRecordKey(record) {
  * @param {{demoKey?:boolean, keyHex?:string, envKey?:string, record?:any, production?:boolean}} opts
  * @returns {{key:Buffer, source:'demo'|'arg'|'env'|'table'}}
  */
+function isDemoKeyValue(key) {
+  return Buffer.isBuffer(key) && key.length === DEMO_KEY.length && key.equals(DEMO_KEY);
+}
+
 function chooseDeviceKey({ demoKey = false, keyHex = '', envKey = '', record = null, production = false } = {}) {
+  let chosen;
   if (demoKey) {
     if (production) throw Object.assign(new Error('生产模式禁止使用演示密钥（--demo-key）'), { code: 'PRODUCTION' });
-    return { key: Buffer.from(DEMO_KEY), source: 'demo' };
+    chosen = { key: Buffer.from(DEMO_KEY), source: 'demo' };
+  } else {
+    const arg = String(keyHex || '').trim();
+    const env = String(envKey || '').trim();
+    if (arg !== '') {
+      if (!KEY_HEX_RE.test(arg)) throw Object.assign(new Error('--key 必须是 64 位十六进制'), { code: 'ARG' });
+      chosen = { key: Buffer.from(arg, 'hex'), source: 'arg' };
+    } else if (env !== '') {
+      if (!KEY_HEX_RE.test(env)) throw Object.assign(new Error('SAFE_OFFICE_SFC1_KEY 必须是 64 位十六进制'), { code: 'ARG' });
+      chosen = { key: Buffer.from(env, 'hex'), source: 'env' };
+    } else if (record) {
+      chosen = { key: decodeRecordKey(record), source: 'table' };
+    } else {
+      throw Object.assign(new Error(
+        '缺少密钥：--key / SAFE_OFFICE_SFC1_KEY / 设备表（先 npm run provision）',
+      ), { code: 'ARG' });
+    }
   }
-  const arg = String(keyHex || '').trim();
-  if (arg !== '') {
-    if (!KEY_HEX_RE.test(arg)) throw Object.assign(new Error('--key 必须是 64 位十六进制'), { code: 'ARG' });
-    return { key: Buffer.from(arg, 'hex'), source: 'arg' };
+  // 生产模式按"最终值"拦：--key / 环境变量 / 设备表里塞同一把 0x42×32 也不行（复核第六轮）
+  if (production && isDemoKeyValue(chosen.key)) {
+    throw Object.assign(new Error(`生产模式禁止使用演示密钥（来源：${chosen.source}）`), { code: 'PRODUCTION' });
   }
-  const env = String(envKey || '').trim();
-  if (env !== '') {
-    if (!KEY_HEX_RE.test(env)) throw Object.assign(new Error('SAFE_OFFICE_SFC1_KEY 必须是 64 位十六进制'), { code: 'ARG' });
-    return { key: Buffer.from(env, 'hex'), source: 'env' };
-  }
-  if (record) return { key: decodeRecordKey(record), source: 'table' };
-  throw Object.assign(new Error(
-    '缺少密钥：--key / SAFE_OFFICE_SFC1_KEY / 设备表（先 npm run provision）',
-  ), { code: 'ARG' });
+  return chosen;
 }
 
 // 一步到位：读表 + 查找 + 选钥匙（CLI 用）
 function resolveDeviceKey({ label = 'ws63-A', deviceId = null, file, production = false, demoKey = false, keyHex = '', envKey } = {}) {
+  // 先把"生效的环境变量"算出来：显式传入优先，其次 process.env。
+  // 设备表读取失败时要用它判断是否还能继续（复核第六轮：CLI 曾忽略有效的环境变量密钥）。
+  const effectiveEnv = envKey === undefined ? (process.env.SAFE_OFFICE_SFC1_KEY || '') : envKey;
+  const hasExplicit = demoKey || String(keyHex || '').trim() !== '' || String(effectiveEnv || '').trim() !== '';
+
   let record = null;
   try {
     record = findDevice(readDeviceTable(file), { label, deviceId });
   } catch (err) {
-    // 设备表损坏：如果显式给了钥匙就继续用，否则报错（不能假装没配过网）
-    if (!demoKey && !String(keyHex || '').trim() && !String(envKey || '').trim()) throw err;
+    // 设备表损坏：显式给了钥匙就继续用，否则报错（不能假装没配过网）
+    if (!hasExplicit) throw err;
   }
   const chosen = chooseDeviceKey({
-    demoKey, keyHex, envKey: envKey === undefined ? process.env.SAFE_OFFICE_SFC1_KEY || '' : envKey,
-    record, production,
+    demoKey, keyHex, envKey: effectiveEnv, record, production,
   });
   return { ...chosen, record, label: record ? record.label : label };
 }

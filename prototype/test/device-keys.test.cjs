@@ -56,6 +56,16 @@ test('生产模式：禁止演示密钥，其它来源照常', () => {
   assert.equal(chooseDeviceKey({ keyHex: '11'.repeat(32), production: true }).source, 'arg');
 });
 
+test('生产模式：按最终密钥值拦截，--key/环境变量/设备表塞 0x42×32 都不行（复核第六轮）', () => {
+  const demoHex = '42'.repeat(32);
+  assert.throws(() => chooseDeviceKey({ keyHex: demoHex, production: true }), /生产模式.*arg/);
+  assert.throws(() => chooseDeviceKey({ envKey: demoHex, production: true }), /生产模式.*env/);
+  const demoRecord = { deviceId: 'aa', key: Buffer.alloc(32, 0x42).toString('base64') };
+  assert.throws(() => chooseDeviceKey({ record: demoRecord, production: true }), /生产模式.*table/);
+  // 非生产模式允许
+  assert.equal(chooseDeviceKey({ keyHex: demoHex }).source, 'arg');
+});
+
 test('chooseDeviceKey：非法长度/格式与缺钥匙的报错', () => {
   assert.throws(() => chooseDeviceKey({ keyHex: 'abc' }), /64 位十六进制/);
   assert.throws(() => chooseDeviceKey({ envKey: 'zz' }), /64 位十六进制/);
@@ -81,6 +91,24 @@ test('resolveDeviceKey：设备表损坏但显式给了钥匙时仍可用', () =
   const chosen = resolveDeviceKey({ file, keyHex: '55'.repeat(32), envKey: '' });
   assert.equal(chosen.source, 'arg');
   assert.throws(() => resolveDeviceKey({ file, envKey: '' }), /根节点必须是对象/);
+});
+
+test('resolveDeviceKey：设备表损坏时，环境变量密钥仍然生效（复核第六轮）', () => {
+  const file = tmpTable('[]');
+  // ① 显式传入 envKey
+  const byParam = resolveDeviceKey({ file, envKey: '66'.repeat(32) });
+  assert.equal(byParam.source, 'env');
+  // ② 未传 envKey，走 process.env（CLI 的真实路径）
+  const saved = process.env.SAFE_OFFICE_SFC1_KEY;
+  process.env.SAFE_OFFICE_SFC1_KEY = '77'.repeat(32);
+  try {
+    const byEnv = resolveDeviceKey({ file });
+    assert.equal(byEnv.source, 'env');
+    assert.ok(byEnv.key.equals(Buffer.from('77'.repeat(32), 'hex')));
+  } finally {
+    if (saved === undefined) delete process.env.SAFE_OFFICE_SFC1_KEY;
+    else process.env.SAFE_OFFICE_SFC1_KEY = saved;
+  }
 });
 
 test('DEMO_KEY 是 0x42×32', () => {

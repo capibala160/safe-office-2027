@@ -932,6 +932,13 @@ function createConsoleServer({
   return server;
 }
 
+// 控制台的设备身份：显式设置 SAFE_OFFICE_DEVICE 时，deviceId 与显示名都跟着走。
+// 不设置时返回空对象，保持原有默认（deviceId=ws63-A / 虚拟确认器显示名）。
+function consoleIdentityFromEnv(env = process.env) {
+  const label = String(env.SAFE_OFFICE_DEVICE || '').trim();
+  return label ? { deviceId: label, deviceLabel: label } : {};
+}
+
 async function startServer({
   port = Number(process.env.PORT) || 7812,
   host = '127.0.0.1',
@@ -1003,6 +1010,8 @@ async function startServer({
         mailer: mailer || new FakeMailer(),
         nearfieldTransportFactory,
         gate4Nearfield,
+        // 设备身份跟着 SAFE_OFFICE_DEVICE 走：否则 B 板的决定帧会因 device_id 不符被拒
+        ...consoleIdentityFromEnv(),
         ...(nearfieldKey ? { nearfieldKey } : {}),
       });
     }
@@ -1232,4 +1241,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createConsoleServer, startServer, DEFAULT_COMMAND_BODY_LIMIT };
+module.exports = { createConsoleServer, startServer, DEFAULT_COMMAND_BODY_LIMIT, consoleIdentityFromEnv };
