@@ -6,6 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ConsoleService } = require('../src/console-service.cjs');
 const { FakeMailer } = require('../src/mailer.cjs');
+const { VirtualDevice, createLoopbackTransport } = require('../src/nearfield-confirm.cjs');
 
 function setup({ start = Date.now(), service = {} } = {}) {
   let nowMs = start;
@@ -34,7 +35,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const bootstrap = service.getBootstrap();
   assert.equal(bootstrap.state.version, '0.48.0');
   assert.equal(bootstrap.roles.length, 6);
-  assert.equal(bootstrap.samples.length, 10);
+  assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
   assert.equal(service.policy.decide('员工', 'sendExternalEmail'), 'confirm');
   assert.equal(service.audit.entries.length, 0);
@@ -208,6 +209,102 @@ test('取消：decision=0 → rejected，零发送', async (t) => {
   assert.equal(decided.outcome, 'cancelled');
   assert.equal(decided.code, 'DECISION');
   assert.equal(decided.operation.state, 'rejected');
+  assert.equal(service.mailer.calls.length, 0);
+});
+
+test('真板传输工厂：DECISION 走同一条校验链，工厂只打开一次', async (t) => {
+  const key = Buffer.alloc(32, 0x42);
+  const device = new VirtualDevice({ key, deviceId: 'ws63-A', decide: () => 'approve' });
+  const transport = createLoopbackTransport(device);
+  let opened = 0;
+  const { service } = setup({
+    service: {
+      nearfieldKey: key,
+      deviceId: 'ws63-A',
+      nearfieldTransportFactory: async () => {
+        opened += 1;
+        return transport;
+      },
+    },
+  });
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations[0];
+  const challenge = service.beginChallenge(op.operationId);
+  const decided = await service.decideChallenge(challenge.challengeId, 'approve');
+  assert.equal(decided.ok, true);
+  assert.equal(decided.outcome, 'approved');
+  assert.equal(decided.operation.state, 'executed');
+  assert.equal(opened, 1);
+  assert.equal(service.mailer.calls.length, 1);
+});
+
+test('闸4 端到端：投屏样例经真板确认后执行（假传输）', async (t) => {
+  const key = Buffer.alloc(32, 0x42);
+  const device = new VirtualDevice({ key, deviceId: 'ws63-A', decide: () => 'approve' });
+  const transport = createLoopbackTransport(device);
+  const { service } = setup({
+    service: {
+      nearfieldKey: key,
+      deviceId: 'ws63-A',
+      nearfieldTransportFactory: async () => transport,
+      gate4Nearfield: true,
+    },
+  });
+  t.after(() => service.close());
+  const item = service.getDemoSamples().find((s) => s.id === 'screen-share');
+  assert.ok(item, '缺少 screen-share 样例');
+  await service.runCommand({ ...item, role: item.role });
+  const confirmed = service.audit.entries.find((e) => e.kind === '闸4确认');
+  assert.ok(confirmed, 'shareScreen 应经过闸4 并记录确认');
+  assert.match(confirmed.detail.method, /WS63 真板/);
+  assert.ok(!service.audit.entries.some((e) => e.kind === '闸4拒绝'), '不应被拒');
+  assert.equal(service.audit.entries.filter((e) => e.kind === '闸4确认').length, 1, '只确认一次');
+});
+
+test('关闭服务时一并关闭闸4 真板工厂（否则进程挂住、占 COM 口）', () => {
+  let closed = 0;
+  const factory = async () => ({ send: async () => null });
+  factory.close = () => { closed += 1; };
+  const service = new ConsoleService({ nearfieldKey: Buffer.alloc(32, 0x42), nearfieldTransportFactory: factory });
+  service.close();
+  assert.equal(closed, 1);
+});
+
+test('闸4 真板：开关打开且配置传输工厂时 Runtime 装上板端确认，否则为 null', () => {
+  const key = Buffer.alloc(32, 0x42);
+  const transportFactory = async () => ({ send: async () => null });
+  const on = new ConsoleService({ nearfieldKey: key, nearfieldTransportFactory: transportFactory, gate4Nearfield: true });
+  const off = new ConsoleService({ nearfieldKey: key, nearfieldTransportFactory: transportFactory });
+  const noFactory = new ConsoleService({ nearfieldKey: key, gate4Nearfield: true });
+  try {
+    assert.equal(typeof on.runtime.humanConfirm, 'function');
+    assert.equal(off.runtime.humanConfirm, null, '开关关闭时保持原行为');
+    assert.equal(noFactory.runtime.humanConfirm, null, '没有传输工厂时不能装板端确认');
+  } finally {
+    on.close();
+    off.close();
+    noFactory.close();
+  }
+});
+
+test('真板传输工厂：打开失败返回 TRANSPORT，操作仍冻结、零发送', async (t) => {
+  const { service } = setup({
+    service: {
+      nearfieldTransportFactory: async () => {
+        throw new Error('COM11 Access denied');
+      },
+    },
+  });
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations[0];
+  const challenge = service.beginChallenge(op.operationId);
+  const decided = await service.decideChallenge(challenge.challengeId, 'approve');
+  assert.equal(decided.ok, false);
+  assert.equal(decided.code, 'TRANSPORT');
+  assert.match(decided.message, /COM11 Access denied/);
+  assert.equal(decided.operation.state, 'frozen');
   assert.equal(service.mailer.calls.length, 0);
 });
 

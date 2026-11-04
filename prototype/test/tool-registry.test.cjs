@@ -359,7 +359,7 @@ test('Console 集成：自定义工具进入 bootstrap/策略矩阵，reset 不�
   try {
     assert.equal(plain.getBootstrap().tools.length, 13);
     assert.equal(plain.getBootstrap().roles.length, 6);
-    assert.equal(plain.getBootstrap().samples.length, 10);
+    assert.equal(plain.getBootstrap().samples.length, 11);
   } finally {
     plain.close();
   }

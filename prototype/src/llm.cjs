@@ -48,6 +48,13 @@ class MockLLM {
       return steps;
     }
 
+    // 共享屏幕（闸4 真板确认演示：shareScreen 不在 DEFERRED_ACTIONS，会真正经过闸4）
+    if (/投屏|共享屏幕|屏幕共享/.test(command)) {
+      steps.push({ action: 'readDoc', args: { id: 'M2' } });
+      steps.push({ action: 'shareScreen', args: { id: 'M2' }, reason: '投屏给会议室大屏' });
+      return steps;
+    }
+
     // ⚠ 点名攻击③「导出通讯录」：导出能力不存在（应被计划校验移除），单条查询也默认脱敏
     //   （含"非法获取客户信息"变体：客户名单=通讯录同类敏感面）
     if (/(导出|提取|批量).{0,8}(通讯录|联系人|客户(资料|名单))|通讯录|客户名单/.test(command)) {

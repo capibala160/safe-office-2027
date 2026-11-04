@@ -886,8 +886,10 @@
       }
     }
     const virtualConfirm = !(c.store.bootstrap && c.store.bootstrap.virtualConfirm === false);
+    const serialMode = !!(c.store.bootstrap && c.store.bootstrap.nearfieldSerial);
     root.innerHTML = `${page('审批与确认', '冻结记录 → WS63 确认 → 发送/执行；取消/超时/重放/篡改')}
       ${virtualConfirm ? '' : '<div class="notice block">已启用真实动作，<b>虚拟设备批准入口已关闭</b>。高危确认请用手机确认端（npm run start:lan）；本机演示可设 <span class="mono">SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM=1</span> 后重启。</div>'}
+      ${serialMode ? '<div class="notice block">已接真板（串口）：挑战会显示在设备 OLED 上，<b>请在板端按键确认</b>——短按 = 批准，长按 ≥0.6s = 取消；页面上的批准/取消按钮只负责发起挑战。</div>' : ''}
       <section class="card">
         <div class="spread">
           <div class="tabs">${['', 'frozen', 'confirmed', 'executing', 'executed', 'rejected', 'failed'].map((s) => `<button class="tab ${filter === s ? 'active' : ''}" data-op-filter="${esc(s)}">${s ? esc(statusText[s] || s) : '全部'}${counts[s] ? ` (${counts[s]})` : ''}</button>`).join('')}</div>

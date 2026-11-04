@@ -11,6 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
+const { createSerialNearfieldFactory } = require('./src/serial-nearfield.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
 const { BlobStore, parseKey } = require('./src/blob-store.cjs');
 const { FakeMailer } = require('./src/mailer.cjs');
@@ -235,6 +236,7 @@ function createConsoleServer({
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
   auth = null,
   allowVirtualConfirm = true,
+  nearfieldSerial = false,
   inboxReader = null,
 } = {}) {
   const AUTH_PUBLIC = new Set([
@@ -498,10 +500,10 @@ function createConsoleServer({
         });
       }
       if (pathname === '/api/bootstrap' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getBootstrap(userContext(req)) });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, nearfieldSerial, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getBootstrap(userContext(req)) });
       }
       if (pathname === '/api/state' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getState(userContext(req)) });
+        return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, nearfieldSerial, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getState(userContext(req)) });
       }
       if (pathname === '/api/commands' && method === 'POST') {
         const body = await readJson(req, commandBodyLimit);
@@ -951,6 +953,15 @@ async function startServer({
   if (!loopback && !allowLan) {
     throw new Error('控制台默认只监听回环地址；要上局域网请显式传 allowLan: true（且只开放确认端）');
   }
+  // 真板确认端（docs/11 下一步）：设置 SAFE_OFFICE_NEARFIELD_PORT=COM11 时，
+  // 挑战帧走串口发给板子，决定来自物理按键；不设置则继续走虚拟设备。
+  const nearfieldPort = String(process.env.SAFE_OFFICE_NEARFIELD_PORT || '').trim() || null;
+  const nearfieldTransportFactory = nearfieldPort
+    ? createSerialNearfieldFactory({ portPath: nearfieldPort })
+    : null;
+  // 闸4 也走真板确认（docs/59）：默认关；开启后高危步骤必须板端按键，失败不回退模拟
+  const gate4Nearfield = Boolean(nearfieldPort)
+    && String(process.env.SAFE_OFFICE_GATE4_NEARFIELD || '') === '1';
   let instance = service;
   if (!instance) {
     if (pairingCode) {
@@ -973,6 +984,8 @@ async function startServer({
         documentsStore, blobStore, storeFile, auditFile, mcpConfigFile,
         inboxReader,
         mailer: mailer || new FakeMailer(),
+        nearfieldTransportFactory,
+        gate4Nearfield,
       });
     }
   }
@@ -1004,7 +1017,7 @@ async function startServer({
   if (instance.startAuditExportTimer && instance.startAuditExportTimer()) {
     console.log(`审计外部快照：每 ${Math.round(instance.auditExportIntervalMs / 60000)} 分钟导出，保留 ${instance.auditExportKeep} 份`);
   }
-  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm, inboxReader });
+  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm, nearfieldSerial: Boolean(nearfieldPort), inboxReader });
   return new Promise((resolve, reject) => {
     const listen = () => {
       server.once('error', reject);

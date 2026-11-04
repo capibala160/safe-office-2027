@@ -21,12 +21,12 @@ const { buildReport } = require('../src/report.cjs');
 const at = (h, day = 15) => new Date(2026, 9, day, h, 30, 0).getTime();
 
 // 组装一个完整运行时（共享 policy/audit/risk/planner）
-function mkRt({ tools, domains = [], threshold = 60, maxCalls, perf, llm = new MockLLM() } = {}) {
+function mkRt({ tools, domains = [], threshold = 60, maxCalls, perf, llm = new MockLLM(), humanConfirm = null } = {}) {
   const policy = new PolicyEngine();
   const audit = new AuditLog();
   const risk = new RiskMeter(threshold, { onEvent: (kind, detail) => audit.append(kind, detail) });
   const planner = new GuardedPlanner({ llm, audit, risk });
-  const rt = new AgentRuntime({ policy, audit, risk, planner, perf });
+  const rt = new AgentRuntime({ policy, audit, risk, planner, perf, humanConfirm });
   const token = new CapabilityToken({
     tools,
     documentIds: ['M1', 'M2', 'M3', 'I1', 'I2', 'A1', 'A2'],
@@ -268,6 +268,55 @@ test('端到端②：高危外发——人不在场拒绝，到场确认后放�
   };
   assert.ok((await run(false)).includes('闸4拒绝'), '不在场应拒绝');
   assert.ok((await run(true)).includes('已发送'), '到场确认后应放行发送');
+});
+
+// ---------- 闸4 接缝（docs/59 方案 A 第 1 批）----------
+test('闸4 接缝：注入确认端放行 → 执行并记录 proof', async () => {
+  let seen = null;
+  const humanConfirm = async ({ operation, challenge }) => {
+    seen = { operation, challenge };
+    return {
+      approved: true, method: 'WS63 真板（测试）',
+      proof: { confirmationId: 'ws63-test', deviceLabel: 'ws63-A', decidedAt: 1 },
+    };
+  };
+  const { rt, audit, token } = mkRt({
+    tools: ['readDoc', 'sendExternalEmail'], domains: ['partner-example.com'], humanConfirm,
+  });
+  const joined = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', {
+    role: '员工', token, nearfieldOnline: false,
+  })).join('\n');
+  assert.ok(joined.includes('已发送'), '确认端放行后应执行');
+  assert.ok(seen && seen.operation && seen.challenge, '应把 operation/challenge 交给确认端');
+  const entry = audit.entries.find((e) => e.kind === '闸4确认');
+  assert.equal(entry.detail.method, 'WS63 真板（测试）');
+  assert.equal(entry.detail.confirmationId, 'ws63-test');
+  assert.equal(entry.detail.deviceLabel, 'ws63-A');
+});
+
+test('闸4 接缝：确认端拒绝 → 即使 nearfieldOnline=true 也不执行', async () => {
+  const humanConfirm = async () => ({ approved: false, method: '用户在板端取消' });
+  const { rt, token } = mkRt({
+    tools: ['readDoc', 'sendExternalEmail'], domains: ['partner-example.com'], humanConfirm,
+  });
+  const joined = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', {
+    role: '员工', token, nearfieldOnline: true,
+  })).join('\n');
+  assert.ok(joined.includes('闸4拒绝'), '客户端开关不能替代确认端');
+  assert.ok(!joined.includes('已发送'));
+});
+
+test('闸4 接缝：确认端抛错 → 失败关闭，不执行', async () => {
+  const humanConfirm = async () => { throw new Error('COM11 Access denied'); };
+  const { rt, audit, token } = mkRt({
+    tools: ['readDoc', 'sendExternalEmail'], domains: ['partner-example.com'], humanConfirm,
+  });
+  const joined = (await rt.runCommand('把周例会纪要发给外部参会方 partner@partner-example.com', {
+    role: '员工', token, nearfieldOnline: true,
+  })).join('\n');
+  assert.ok(joined.includes('闸4拒绝'), '确认端异常必须拒绝');
+  const entry = audit.entries.find((e) => e.kind === '闸4拒绝');
+  assert.match(entry.detail.method, /COM11 Access denied/);
 });
 
 test('端到端③：越权域名被闸2拒绝（私人邮箱）', async () => {

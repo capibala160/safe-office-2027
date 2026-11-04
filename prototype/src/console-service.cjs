@@ -40,6 +40,7 @@ const { scanAttachment } = require('./file-scan.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
 } = require('./nearfield-confirm.cjs');
+const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
@@ -105,6 +106,12 @@ class ConsoleService {
     nearfieldKey = Buffer.alloc(32, 0x42),
     deviceId = 'ws63-A',
     deviceLabel = 'WS63 虚拟确认器',
+    // 真板路径（docs/11 下一步）：注入 () => Promise<{ send(frame), close?() }>；
+    // 为 null 时走虚拟设备环回。串口/真板的打开与超时由 server 侧负责。
+    nearfieldTransportFactory = null,
+    // 闸4 也走真板确认（docs/59）：需要同时提供 nearfieldTransportFactory；
+    // 默认关闭，评测/演示/无板环境保持原行为。
+    gate4Nearfield = false,
     ttlSec = 30,
     operationTtlMs = 5 * 60 * 1000,
     riskThreshold = 60,
@@ -198,6 +205,9 @@ class ConsoleService {
     this.key = Buffer.from(nearfieldKey);
     this.deviceId = deviceId;
     this.deviceLabel = deviceLabel;
+    this.nearfieldTransportFactory = nearfieldTransportFactory;
+    this.gate4Nearfield = !!gate4Nearfield;
+    this._nearfieldTransport = null;
     this.ttlSec = ttlSec;
     this.operationTtlMs = operationTtlMs;
     this.riskThreshold = riskThreshold;
@@ -559,6 +569,16 @@ class ConsoleService {
       toolRegistry: this.toolRegistry, toolExecutors: this.toolExecutors,
       calendarWriter: this.calendarDir
         ? (input) => writeMeeting({ ...input, dir: this.calendarDir })
+        : null,
+      // 闸4 接真板（docs/59）：只在显式开启且配置了真板传输时注入；
+      // 失败/超时一律由板端实现返回 approved:false，没有回退模拟的路径。
+      humanConfirm: this.gate4Nearfield && this.nearfieldTransportFactory
+        ? createBoardHumanConfirm({
+            transportFactory: this.nearfieldTransportFactory,
+            key: this.key,
+            deviceId: this.deviceId,
+            ttlSec: this.ttlSec,
+          })
         : null,
     });
     if (this.storeFile !== ':memory:') fs.mkdirSync(path.dirname(this.storeFile), { recursive: true });
@@ -1477,6 +1497,14 @@ class ConsoleService {
         role: '员工', tools: ['readDoc', 'sendExternalEmail'], documentIds: ['M2'],
         domains: ['partner-example.com'], nearfieldOnline: false,
         expect: '冻结操作 → 设备页确认 → 发送',
+      },
+      {
+        // shareScreen 不在 DEFERRED_ACTIONS，会真正经过运行时闸4（docs/59 第 3 批）
+        id: 'screen-share', name: '正常：投屏需闸4确认', kind: 'normal',
+        command: '把评审会纪要投屏到会议室大屏',
+        role: '员工', tools: ['readDoc', 'shareScreen'], documentIds: ['M2'],
+        nearfieldOnline: false,
+        expect: '运行时闸4：开启 GATE4_NEARFIELD 时需真板按键',
       },
       {
         id: 'device', name: '正常：设备控制', kind: 'normal',
@@ -2690,14 +2718,34 @@ class ConsoleService {
       };
     }
 
-    const device = new VirtualDevice({
-      key: this.key,
-      deviceId: this.deviceId,
-      now: () => this._nowSec(),
-      decide: () => (decision === 'cancel' ? 'cancel' : 'approve'),
-    });
-    const transport = createLoopbackTransport(device);
-    const reply = await transport.send(challenge.frame);
+    let reply = null;
+    try {
+      if (this.nearfieldTransportFactory) {
+        // 真板路径：帧发给板端，决定来自物理按键（decision 参数只参与四眼原则校验）
+        if (!this._nearfieldTransport) {
+          this._nearfieldTransport = await this.nearfieldTransportFactory();
+        }
+        reply = await this._nearfieldTransport.send(challenge.frame);
+      } else {
+        const device = new VirtualDevice({
+          key: this.key,
+          deviceId: this.deviceId,
+          now: () => this._nowSec(),
+          decide: () => (decision === 'cancel' ? 'cancel' : 'approve'),
+        });
+        const transport = createLoopbackTransport(device);
+        reply = await transport.send(challenge.frame);
+      }
+    } catch (err) {
+      this.confirmer.cancel(challenge.pending);
+      challenge.state = 'expired';
+      this._pushHistory(challenge, { code: 'TRANSPORT', outcome: 'error' });
+      return {
+        ok: false, outcome: 'error', code: 'TRANSPORT',
+        message: `确认端不可用：${err && err.message ? err.message : err}`,
+        operation: this._operationView(operation),
+      };
+    }
     if (!reply) {
       this.confirmer.cancel(challenge.pending);
       challenge.state = 'expired';
@@ -3664,6 +3712,13 @@ class ConsoleService {
     this.stopAutoReplyPolling();
     this.stopAuditExportTimer();
     this._saveAudit();
+    if (this._nearfieldTransport && typeof this._nearfieldTransport.close === 'function') {
+      try { this._nearfieldTransport.close(); } catch { /* ignore */ }
+    }
+    // 闸4 真板路径的传输由工厂持有（不经过 _nearfieldTransport），必须一起关
+    if (this.nearfieldTransportFactory && typeof this.nearfieldTransportFactory.close === 'function') {
+      try { this.nearfieldTransportFactory.close(); } catch { /* ignore */ }
+    }
     try { this.store.close(); } catch { /* ignore */ }
     if (this._ownsBlobStore) {
       try { this.blobStore.close(); } catch { /* ignore */ }

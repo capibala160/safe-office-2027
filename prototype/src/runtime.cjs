@@ -30,6 +30,9 @@ class AgentRuntime {
   constructor({
     policy, audit, risk, planner, perf, toolRegistry = null, toolExecutors = null,
     disabledLayers = [], calendarWriter = null,
+    // 闸4 的确认接缝（docs/59）：null = 保持现状（requestHumanConfirm 模拟）。
+    // 注入函数签名：({ step, operation, challenge, ctx }) => { approved, method, proof? }
+    humanConfirm = null,
   }) {
     this.disabledLayers = new Set(disabledLayers);
     this.policy = policy;
@@ -49,6 +52,7 @@ class AgentRuntime {
     this.tasks = new Map(); // 幂等键：taskId → 任务执行记录（防超时重试重复执行）
     // v0.37：会议预约的真实副作用（写 .ics）；null = 保持模拟
     this.calendarWriter = typeof calendarWriter === 'function' ? calendarWriter : null;
+    this.humanConfirm = typeof humanConfirm === 'function' ? humanConfirm : null;
   }
 
   _ablate(layer) {
@@ -484,9 +488,17 @@ class AgentRuntime {
     if (!this._ablate('gate4') && (decision === 'confirm' || this._isHighRisk(action))) {
       const operation = { role: ctx.role, action, args: structuredClone(args), contentHash: digest(payload) };
       const challenge = this.confirmations.challenge(operation);
-      const c = await this.perf.measureAsync('闸4 高危确认', () =>
-        requestHumanConfirm(step, { nearfieldOnline: ctx.nearfieldOnline }),
-      );
+      let c;
+      try {
+        c = await this.perf.measureAsync('闸4 高危确认', () =>
+          this.humanConfirm
+            ? this.humanConfirm({ step, operation, challenge, ctx })
+            : requestHumanConfirm(step, { nearfieldOnline: ctx.nearfieldOnline }),
+        );
+      } catch (err) {
+        // 确认端异常一律拒绝（fail-closed）：不能因为适配器抛错就放行
+        c = { approved: false, method: `确认端异常：${err && err.message ? err.message : err}` };
+      }
       const response = c.approved ? this.confirmations.simulateResponse(challenge) : null;
       const currentOperation = { role: ctx.role, action, args: structuredClone(args), contentHash: digest(payload) };
       if (!c.approved || !this.confirmations.consume(response, currentOperation)) {
@@ -497,7 +509,15 @@ class AgentRuntime {
         return `  [${n}] ${action} ⛔ 闸4拒绝：${c.method}`;
       }
       confirmNote = `（${c.method}）`;
-      this.audit.append('闸4确认', { n, action, method: c.method, operationHash: challenge.operationHash, nonce: challenge.nonce, expiresAt: challenge.expiresAt });
+      this.audit.append('闸4确认', {
+        n, action, method: c.method,
+        operationHash: challenge.operationHash, nonce: challenge.nonce, expiresAt: challenge.expiresAt,
+        ...(c.proof ? {
+          confirmationId: c.proof.confirmationId || null,
+          deviceLabel: c.proof.deviceLabel || null,
+          decidedAt: c.proof.decidedAt || null,
+        } : {}),
+      });
     }
 
     // —— 快照：高危动作执行前落盘，误操作可一键回滚 ——
