@@ -11,7 +11,7 @@
 | 板载 SSD1306 OLED | ✅ 2026-10-29 M1 | 时钟正常跳动（用户目视） |
 | 用户键 KEY2 | ✅ 2026-10-29 M1 | 短按 → 屏显 `APPROVED`，长按 ≥600ms → `CANCELLED`；串口同步打印 |
 | 蜂鸣器 | ⏸ 按用户要求不启用 | — |
-| SFC1 帧收发 / HMAC | ❌ 未做（M3） | 本固件只做按键+显示 |
+| SFC1 帧收发 / HMAC | ✅ 代码与编译（M3，2026-11-04） | `board_confirm_m3.c` + `sfc1_hmac.c/h`；产物 1,469,032B；**未上机验证**，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) |
 | 双板 SLE / 断线重连 | ❌ 未做（M2） | 下一步 |
 
 > 本目录的 `base_ssd1306_demo.c` 是在厂商样例 `vendor/Hqyj_Ws63/Farsight/base_03_ssd1306`
@@ -27,37 +27,28 @@
 | 烧录工具 | `hsflash.exe`（工具链内） |
 | 串口 | USB-UART0，**115200 8N1**；SW1 拨码 = 0 |
 
-## 3. 编译
+## 3. 编译（v0.48 起用脚本）
 
-1. 把本目录复制进 SDK 样例目录：
+```bash
+node ws63/firmware/build-m3.cjs            # 只同步源码进 SDK
+node ws63/firmware/build-m3.cjs --build    # 同步 + 编译（约 18s 增量）
+```
 
-   ```bash
-   cp -r ws63/firmware/board-confirm D:/fbb_ws63/src/application/samples/base_03_ssd1306
-   ```
+脚本会：同步 `board-confirm/` 与 `ws63/protocol.c/h` → 删除 SDK 里的旧样例源
+`base_ssd1306_demo.c` 与旧 `libsamples.a`/目标目录 → 补 PATH（工具链/ninja/gn/ccache）→
+调 `src/build.py ws63-liteos-app`。
 
-   > 目录名保持 `base_03_ssd1306`，与 SDK 的 `samples/CMakeLists.txt` / Kconfig 对齐。
+> `build.py` 需要 `ccache` 与 `ninja` 在 PATH；HiSpark Studio 会自动注入，
+> 手跑时脚本已加 `D:/HiSparkToolchain/tools/cfbb/thirdparty/ccache`。
 
-2. `src/application/samples/CMakeLists.txt` 只启用一个样例（`base_01_ledblink` 与
-   `base_03_ssd1306` 都定义 `task1_ID` / `app_run`，同时开会 `multiple definition`）：
+产物：
 
-   ```cmake
-   add_subdirectory_if_exist(base_03_ssd1306)
-   # add_subdirectory_if_exist(base_01_ledblink)  ← 注释掉
-   ```
+```
+D:\fbb_ws63\src\output\ws63\fwpkg\ws63-liteos-app\ws63-liteos-app_all.fwpkg
+```
 
-3. 清掉旧目标文件（切换样例后必须做，否则旧 `libsamples.a` 仍链接 `base_01`）：
-
-   ```bash
-   rm -f D:/fbb_ws63/src/output/ws63/application/samples/libsamples.a
-   rm -rf D:/fbb_ws63/src/output/ws63/application/samples/CMakeFiles/samples.dir/base_01_ledblink
-   ```
-
-4. 用 HiSpark Studio 构建 `ws63-liteos-app`，或在 SDK 根目录用 CMake 构建。
-   产物：
-
-   ```
-   D:\fbb_ws63\src\output\ws63\fwpkg\ws63-liteos-app\ws63-liteos-app_all.fwpkg
-   ```
+> 手工路线（不用脚本）见 git 历史；目录名必须保持 `base_03_ssd1306`，
+> 且 `base_01_ledblink` 不能同时启用（两者都定义 `task1_ID` / `app_run`）。
 
 ## 4. 烧录
 
@@ -89,8 +80,23 @@ hsflash.exe write -c ws63 -p COM11 \
 3. 短按 KEY2 → OLED 出现 `APPROVED`，串口打印 `KEY SHORT -> APPROVE`。
 4. 长按 KEY2 ≥600ms → OLED 出现 `CANCELLED`，串口打印 `KEY LONG -> CANCEL`。
 
-## 7. 下一步（M3：SFC1 上板）
+## 7. M3 联调步骤（硬件恢复后）
 
-- 串口接收 SFC1 CHALLENGE 帧 → 解析 recipient/action/target_hash → OLED 显示
-- 按键决定 → `ws63/protocol.c` 组 DECISION 帧 + HMAC（接 mbedTLS）
-- 与 PC 侧 `prototype/src/serial-transport.cjs` 对接，替换虚拟设备
+1. 烧录本固件（`hsflash` 或 HiSpark Studio），复位后串口应出现：
+   `Enter board confirm (M3)!` / `M3 SFC1 ready: uart=0 device=ws63-A`
+2. PC 侧：
+
+   ```bash
+   cd prototype
+   node serial-confirm.cjs --port COM12 --demo-key --to partner@example.com --subject "Quarterly report"
+   ```
+
+3. 板端 OLED 应显示 `SEND EXT` + 摘要；短按 KEY2 → PC 输出 `decision=1`；长按 → `decision=0`（退出码 2）。
+4. 异常项：拔电（PC 超时）、旧帧重放（REPLAY）、改帧（MAC）、错设备（DEVICE）、过期（EXPIRED）。
+
+### 当前硬件问题（2026-11-04）
+
+两块板均上电无启动迹象：串口 0 字节、OLED 黑屏、运行灯不闪、`hsflash` 握手失败。
+已排除端口映射/SW1/S1/按键时机/DTR-RTS/工具参数；详见
+[docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §5。
+排查建议：万用表量 3V3 对 GND、UTX↔URX 回环、检查 KEY1 是否卡住、换供电/线材或送修。
