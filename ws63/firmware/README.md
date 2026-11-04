@@ -113,3 +113,8 @@ npm run serial:probe -- --port COM11 --baud 115200 --seconds 120 --watch
 第一块板**芯片被锁**（用户说明）——这解释了它 `hsflash` 握手失败、上电无输出的原因；
 **锁定方式与是否可逆未核实**，先向厂商确认能否解锁/返修，再决定当备件还是报修
 （诊断流程与报修模板见 [docs/58](../../docs/58-WS63不上电诊断清单-2026-11-04.md) §3-A / §8 / §9）。
+
+**一机一钥（docs/60，2026-11-04）**：板子已配网，密钥在 NV（`0x0F02`）。未配置时会显示
+`WS63 PROVISION / PAIR CODE`，用 `cd prototype && npm run provision -- --port COM11 --code <码>` 配网。
+⚠️ **烧完整 fwpkg 会写 `ws63_all_nv.bin`，把配网钥匙和 nonce 窗口清掉**——烧完必须重新配网，
+不要把"烧录后未配置"误判成固件缺陷。

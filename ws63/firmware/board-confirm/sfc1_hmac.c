@@ -24,6 +24,14 @@ int sfc1_hmac_sha256(const uint8_t *data, size_t len, uint8_t out[32], void *ctx
                            data, len, out) == 0 ? 0 : -1;
 }
 
+int sfc1_sha256(const uint8_t *data, size_t len, uint8_t out[32])
+{
+    if (data == NULL || out == NULL) {
+        return -1;
+    }
+    return mbedtls_sha256(data, len, out, 0) == 0 ? 0 : -1;
+}
+
 int sfc1_derive_device_id(const char *label, uint8_t out[SFC1_DEVICE_ID_LEN])
 {
     uint8_t digest[32];

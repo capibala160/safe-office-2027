@@ -19,6 +19,9 @@
 /* data -> HMAC-SHA256；成功返回 0，失败返回非 0 */
 int sfc1_hmac_sha256(const uint8_t *data, size_t len, uint8_t out[32], void *ctx);
 
+/* data -> SHA-256（配网会话密钥派生用）；成功返回 0 */
+int sfc1_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
+
 /* label -> device_id（domain || label 的 SHA-256 前 8 字节） */
 int sfc1_derive_device_id(const char *label, uint8_t out[SFC1_DEVICE_ID_LEN]);
 

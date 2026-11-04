@@ -962,6 +962,10 @@ async function startServer({
   // 闸4 也走真板确认（docs/59）：默认关；开启后高危步骤必须板端按键，失败不回退模拟
   const gate4Nearfield = Boolean(nearfieldPort)
     && String(process.env.SAFE_OFFICE_GATE4_NEARFIELD || '') === '1';
+  // 一机一钥（docs/60）：板子配网后共享 demo key 就不再可用；
+  // 控制台/闸4 从 SAFE_OFFICE_SFC1_KEY（64 位 hex）读该设备的密钥
+  const envDeviceKey = String(process.env.SAFE_OFFICE_SFC1_KEY || '').trim();
+  const nearfieldKey = /^[0-9a-fA-F]{64}$/.test(envDeviceKey) ? Buffer.from(envDeviceKey, 'hex') : null;
   let instance = service;
   if (!instance) {
     if (pairingCode) {
@@ -986,6 +990,7 @@ async function startServer({
         mailer: mailer || new FakeMailer(),
         nearfieldTransportFactory,
         gate4Nearfield,
+        ...(nearfieldKey ? { nearfieldKey } : {}),
       });
     }
   }

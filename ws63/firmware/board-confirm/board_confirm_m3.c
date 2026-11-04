@@ -31,6 +31,8 @@
 #include "protocol.h"
 #include "sfc1_hmac.h"
 #include "sfc1_nv.h"
+#include "sfc1_key_store.h"
+#include "sfc1_provision.h"
 
 osThreadId_t task1_ID;
 
@@ -51,6 +53,12 @@ static const uint8_t DEMO_KEY[SFC1_KEY_LEN] = {
 #define DEVICE_LABEL "ws63-A"
 
 static uint8_t g_device_id[SFC1_DEVICE_ID_LEN];
+
+/* 一机一钥（docs/60）：NV 里有 key 就用它；没有则回落到演示 key，并打开配网窗口 */
+static uint8_t g_key[SFC1_KEY_LEN];
+static int g_provisioned;
+static sfc1_prov_t g_prov;
+#define PROV_WINDOW_MS (10ULL * 60ULL * 1000ULL)
 
 /* ---------------- UART 接收环形缓冲 ---------------- */
 static uint8_t g_rx_ring[RX_RING_SIZE];
@@ -128,8 +136,9 @@ static void mark_used(const uint8_t nonce[PROTO_NONCE_LEN])
     if (g_used_count < PROTO_REPLAY_WINDOW) {
         g_used_count++;
     }
-    /* M1：窗口落 NV，重启后仍能拒绝旧 nonce；写失败只告警，不阻断确认流程 */
-    if (sfc1_nv_save(g_used, g_used_count, DEMO_KEY) != 0) {
+    /* M1：窗口落 NV，重启后仍能拒绝旧 nonce；写失败只告警，不阻断确认流程。
+     * 注意必须用当前生效的 g_key（一机一钥后会与 DEMO_KEY 不同），否则重启时加载校验必失败。 */
+    if (sfc1_nv_save(g_used, g_used_count, g_key) != 0) {
         printf("SFC1 NV: save failed\r\n");
     }
 }
@@ -190,6 +199,15 @@ static void show_result(const char *status)
     ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_1, (char *)status, TEXT_SIZE_16);
 }
 
+/* 未配置：显示一次性配网码（docs/60） */
+static void show_pairing(const char *code)
+{
+    oled_clear_line();
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_0, "WS63 PROVISION", TEXT_SIZE_16);
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_1, "PAIR CODE", TEXT_SIZE_8);
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_2, (char *)code, TEXT_SIZE_16);
+}
+
 static void show_challenge(const pending_t *p)
 {
     char line[OLED_LINE_CHARS + 1];
@@ -222,7 +240,7 @@ static void send_decision(int approve)
     (void)memcpy_s(d.device_id, sizeof(d.device_id), g_device_id, SFC1_DEVICE_ID_LEN);
     d.decided_at = (uint32_t)(now_ms() / 1000u);
 
-    n = proto_encode_decision(&d, out, sizeof(out), sfc1_hmac_sha256, (void *)DEMO_KEY);
+    n = proto_encode_decision(&d, out, sizeof(out), sfc1_hmac_sha256, (void *)g_key);
     if (n == 0) {
         printf("SFC1 encode decision failed\r\n");
         return;
@@ -235,6 +253,36 @@ static void send_decision(int approve)
     show_result(approve ? "APPROVED" : "CANCELLED");
 }
 
+/* 配网恢复探活（docs/60 复核问题 2）：PING(0x20) -> PONG(0x21)，用当前设备密钥验签/签名。
+ * 回执丢失后主机用它确认"板子到底有没有写进这把钥匙"，不依赖配网窗口。 */
+static void handle_ping(const uint8_t *frame, size_t len)
+{
+    uint8_t expected[32];
+    uint8_t mac[32];
+    uint8_t out[10 + 24 + 32];
+
+    if (!g_provisioned || len != (size_t)(10 + 16 + 32)) {
+        return;
+    }
+    if (sfc1_hmac_sha256(frame, len - 32, expected, (void *)g_key) != 0) {
+        return;
+    }
+    if (memcmp(expected, frame + len - 32, 32) != 0) {
+        printf("SFC1 PING rejected: MAC\r\n");
+        return;
+    }
+    out[0] = 'S'; out[1] = 'F'; out[2] = 'C'; out[3] = '1';
+    out[4] = 1; out[5] = 0x21; out[6] = 0; out[7] = 0;
+    out[8] = (uint8_t)(24 + 32); out[9] = 0;
+    (void)memcpy_s(out + 10, sizeof(out) - 10, g_device_id, SFC1_DEVICE_ID_LEN);
+    (void)memcpy_s(out + 18, sizeof(out) - 18, frame + 10, 16);
+    if (sfc1_hmac_sha256(out, 34, mac, (void *)g_key) != 0) {
+        return;
+    }
+    (void)memcpy_s(out + 34, sizeof(out) - 34, mac, 32);
+    (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)sizeof(out), 0);
+}
+
 /* ---------------- 挑战处理 ---------------- */
 static void handle_frame(const uint8_t *frame, size_t len)
 {
@@ -242,10 +290,44 @@ static void handle_frame(const uint8_t *frame, size_t len)
     uint32_t ttl;
     int rc;
 
+    /* 配网恢复探活：不依赖配网窗口 */
+    if (frame[5] == 0x20) {
+        handle_ping(frame, len);
+        return;
+    }
+
+    /* 配网帧（0x10 INIT / 0x12 COMMIT）先交给配网状态机，不受未配置状态限制 */
+    if (frame[5] == 0x10 || frame[5] == 0x12) {
+        uint8_t out[SFC1_PROV_FRAME_MAX];
+        size_t out_len = 0;
+        int handled = sfc1_prov_handle(&g_prov, frame, len, now_ms(), out, sizeof(out), &out_len);
+        if (handled > 0 && out_len > 0) {
+            (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)out_len, 0);
+        }
+        if (g_prov.has_new_key) {
+            (void)memcpy_s(g_key, sizeof(g_key), g_prov.new_key, SFC1_KEY_LEN);
+            g_prov.has_new_key = 0;
+            g_provisioned = 1;
+            printf("SFC1 PROV: key installed, device %s provisioned\r\n", DEVICE_LABEL);
+            /* 换钥后把当前 nonce 窗口用新 key 重写，避免下次启动 tag 失配丢窗口 */
+            if (sfc1_nv_save(g_used, g_used_count, g_key) != 0) {
+                printf("SFC1 NV: re-save with new key failed\r\n");
+            }
+            show_idle();
+        }
+        return;
+    }
+
+    /* 未配置：只接受配网帧，普通确认一律拒绝（docs/60 §5.2） */
+    if (!g_provisioned) {
+        printf("SFC1 challenge rejected: UNPROVISIONED\r\n");
+        return;
+    }
+
     if (frame[5] != PROTO_TYPE_CHALLENGE) {
         return;
     }
-    rc = proto_decode_challenge(frame, len, &ch, sfc1_hmac_sha256, (void *)DEMO_KEY);
+    rc = proto_decode_challenge(frame, len, &ch, sfc1_hmac_sha256, (void *)g_key);
     if (rc != PROTO_OK) {
         printf("SFC1 challenge rejected: %s\r\n", proto_status_str(rc));
         return;
@@ -412,7 +494,13 @@ static void key_task(const char *arg)
     key_pins_init();
     uart_ret = sfc1_uart_init();
     printf("M3 SFC1 ready: uart=%d device=%s\r\n", (int)uart_ret, DEVICE_LABEL);
-    show_idle();
+
+    /* 未配置：显示一次性配网码（此时 OLED 已初始化）；已配置则显示待机页 */
+    if (!g_provisioned && g_prov.active) {
+        show_pairing(g_prov.code);
+    } else {
+        show_idle();
+    }
 
     for (;;) {
         uint8_t b;
@@ -470,8 +558,26 @@ static void board_confirm_entry(void)
 {
     printf("Enter board confirm (M3)!\r\n");
 
+    /* 一机一钥（docs/60）：NV 有 key 用它；否则回落演示 key 并打开配网窗口 */
+    {
+        sfc1_key_record_t rec;
+        if (sfc1_key_store_load(&rec, DEVICE_LABEL)) {
+            (void)memcpy_s(g_key, sizeof(g_key), rec.key, SFC1_KEY_LEN);
+            g_provisioned = 1;
+            printf("SFC1 KEY: provisioned (at %u)\r\n", (unsigned)rec.provisioned_at);
+        } else {
+            (void)memcpy_s(g_key, sizeof(g_key), DEMO_KEY, SFC1_KEY_LEN);
+            g_provisioned = 0;
+            printf("SFC1 KEY: DEMO (unprovisioned)\r\n");
+            if (sfc1_prov_begin(&g_prov, DEVICE_LABEL, now_ms(), PROV_WINDOW_MS)) {
+                /* 只打印；屏幕显示交给 key_task（这里 OLED 还没初始化） */
+                printf("SFC1 PROV: pairing code %s (10 min, 3 attempts)\r\n", g_prov.code);
+            }
+        }
+    }
+
     /* M1：启动时恢复已消费 nonce 窗口（无记录/损坏则从空窗口开始） */
-    if (sfc1_nv_load(g_used, &g_used_count, DEMO_KEY)) {
+    if (sfc1_nv_load(g_used, &g_used_count, g_key)) {
         g_used_next = (uint8_t)(g_used_count % PROTO_REPLAY_WINDOW);
         printf("SFC1 NV: restored %u nonces\r\n", (unsigned)g_used_count);
     } else {

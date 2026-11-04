@@ -29,6 +29,10 @@ const FILES = [
   { from: path.join(HERE, 'board-confirm/sfc1_hmac.h'), to: 'sfc1_hmac.h' },
   { from: path.join(HERE, 'board-confirm/sfc1_nv.c'), to: 'sfc1_nv.c' },
   { from: path.join(HERE, 'board-confirm/sfc1_nv.h'), to: 'sfc1_nv.h' },
+  { from: path.join(HERE, 'board-confirm/sfc1_key_store.c'), to: 'sfc1_key_store.c' },
+  { from: path.join(HERE, 'board-confirm/sfc1_key_store.h'), to: 'sfc1_key_store.h' },
+  { from: path.join(HERE, 'board-confirm/sfc1_provision.c'), to: 'sfc1_provision.c' },
+  { from: path.join(HERE, 'board-confirm/sfc1_provision.h'), to: 'sfc1_provision.h' },
   { from: path.join(REPO_WS63, 'protocol.c'), to: 'protocol.c' },
   { from: path.join(REPO_WS63, 'protocol.h'), to: 'protocol.h' },
 ];
