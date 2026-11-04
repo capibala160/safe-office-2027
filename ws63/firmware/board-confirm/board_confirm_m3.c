@@ -284,6 +284,62 @@ static void handle_ping(const uint8_t *frame, size_t len)
 }
 
 /* ---------------- 挑战处理 ---------------- */
+/* ---------------- 执行帧（GPIO，2026-11-04） ---------------- */
+/* 只允许两个可观测输出：IO13 LED、IO10 蜂鸣器（docs/10 M0 记录） */
+static int actuator_pin_allowed(uint8_t pin)
+{
+    return pin == (uint8_t)GPIO_13 || pin == (uint8_t)GPIO_10;
+}
+
+static void show_device(uint8_t pin, uint8_t level)
+{
+    char line[24] = {0};
+    ssd1306_cls();
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_0, "WS63 DEVICE", TEXT_SIZE_16);
+    if (sprintf_s(line, sizeof(line), "IO%u = %s", (unsigned)pin, level ? "ON" : "OFF") > 0) {
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_2, line, TEXT_SIZE_16);
+    }
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_3, "after approval", TEXT_SIZE_8);
+}
+
+static void handle_actuator(const uint8_t *frame, size_t len)
+{
+    proto_actuator_t act;
+    proto_actuator_ack_t ack;
+    uint8_t out[PROTO_HEADER_LEN + PROTO_ACTUATOR_ACK_PAYLOAD_LEN + PROTO_MAC_LEN];
+    size_t out_len;
+    int rc;
+
+    rc = proto_decode_actuator(frame, len, &act, sfc1_hmac_sha256, (void *)g_key);
+    if (rc != PROTO_OK) {
+        printf("SFC1 actuator rejected: %s\r\n", proto_status_str(rc));
+        return;
+    }
+    if (!actuator_pin_allowed(act.pin)) {
+        printf("SFC1 actuator rejected: PIN\r\n");
+        return;
+    }
+    if (nonce_used(act.nonce)) {
+        printf("SFC1 actuator rejected: REPLAY\r\n");
+        return;
+    }
+    mark_used(act.nonce);
+
+    uapi_pin_set_mode((pin_t)act.pin, HAL_PIO_FUNC_GPIO);
+    uapi_gpio_set_dir((pin_t)act.pin, GPIO_DIRECTION_OUTPUT);
+    uapi_gpio_set_val((pin_t)act.pin, act.level ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
+    printf("SFC1 actuator: IO%u -> %u\r\n", (unsigned)act.pin, (unsigned)act.level);
+    show_device(act.pin, act.level);
+
+    ack.status = 0;
+    ack.pin = act.pin;
+    ack.level = act.level;
+    out_len = proto_encode_actuator_ack(&ack, out, sizeof(out), sfc1_hmac_sha256, (void *)g_key);
+    if (out_len > 0) {
+        (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)out_len, 0);
+    }
+}
+
 static void handle_frame(const uint8_t *frame, size_t len)
 {
     proto_challenge_t ch;
@@ -321,6 +377,11 @@ static void handle_frame(const uint8_t *frame, size_t len)
     /* 未配置：只接受配网帧，普通确认一律拒绝（docs/60 §5.2） */
     if (!g_provisioned) {
         printf("SFC1 challenge rejected: UNPROVISIONED\r\n");
+        return;
+    }
+
+    if (frame[5] == PROTO_TYPE_ACTUATOR) {
+        handle_actuator(frame, len);
         return;
     }
 

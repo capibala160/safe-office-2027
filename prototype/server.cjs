@@ -23,6 +23,7 @@ const { runPreflight } = require('./src/preflight.cjs');
 const { createAuthFromFile } = require('./src/auth.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { createAsrFromEnv } = require('./src/asr.cjs');
+const { createSerialActuator } = require('./src/device-actuator.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
 
@@ -1063,6 +1064,16 @@ async function startServer({
   } catch (err) {
     console.warn(`⚠ ASR 配置不完整，录音转写保持模拟：${err.message}`);
   }
+  // 设备联动（v0.52）：确认后用同一块板执行 GPIO；端口默认跟随近场串口
+  const actuatorPort = String(process.env.SAFE_OFFICE_ACTUATOR_PORT || '').trim() || nearfieldPort;
+  let actuator = null;
+  try {
+    if (actuatorPort && nearfieldKey) {
+      actuator = createSerialActuator({ portPath: actuatorPort, key: nearfieldKey });
+    }
+  } catch (err) {
+    console.warn(`⚠ 设备执行未启用：${err.message}`);
+  }
   let instance = service;
   if (!instance) {
     if (pairingCode) {
@@ -1079,6 +1090,7 @@ async function startServer({
         mcpConfigFile,
         inboxReader,
         asr: asrClient,
+        actuator,
         mailer: mailer || new FakeMailer(),
       });
     } else {
@@ -1086,6 +1098,7 @@ async function startServer({
         documentsStore, blobStore, storeFile, auditFile, mcpConfigFile,
         inboxReader,
         asr: asrClient,
+        actuator,
         mailer: mailer || new FakeMailer(),
         nearfieldTransportFactory,
         gate4Nearfield,

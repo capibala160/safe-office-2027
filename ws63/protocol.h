@@ -35,6 +35,9 @@ extern "C" {
 #define PROTO_VERSION 0x01u
 #define PROTO_TYPE_CHALLENGE 0x01u
 #define PROTO_TYPE_DECISION 0x02u
+/* 执行帧（v0.52）：确认通过后由主机下发，板端验 MAC 后驱动 GPIO，再回 ACK */
+#define PROTO_TYPE_ACTUATOR 0x21u
+#define PROTO_TYPE_ACTUATOR_ACK 0x22u
 
 #define PROTO_HEADER_LEN 10u
 #define PROTO_TASK_ID_LEN 8u
@@ -100,6 +103,24 @@ typedef struct {
     uint8_t mac[PROTO_MAC_LEN];
 } proto_decision_t;
 
+/* 执行帧：nonce 用于板端重放窗口；pin 只允许 GPIO_10(蜂鸣器)/GPIO_13(LED) */
+#define PROTO_ACTUATOR_PAYLOAD_LEN (PROTO_NONCE_LEN + 2u)
+#define PROTO_ACTUATOR_ACK_PAYLOAD_LEN 3u
+
+typedef struct {
+    uint8_t nonce[PROTO_NONCE_LEN];
+    uint8_t pin;
+    uint8_t level;                       /* 0/1 */
+    uint8_t mac[PROTO_MAC_LEN];
+} proto_actuator_t;
+
+typedef struct {
+    uint8_t status;                      /* 0=成功 */
+    uint8_t pin;
+    uint8_t level;
+    uint8_t mac[PROTO_MAC_LEN];
+} proto_actuator_ack_t;
+
 typedef struct {
     int pending;
     uint8_t task_id[PROTO_TASK_ID_LEN];
@@ -149,6 +170,12 @@ int proto_decode_challenge(const uint8_t *buf, size_t len, proto_challenge_t *ou
                            proto_mac_fn mac, void *ctx);
 int proto_decode_decision(const uint8_t *buf, size_t len, proto_decision_t *out,
                           proto_mac_fn mac, void *ctx);
+
+/* 执行帧解码（板端）与 ACK 编码（板端） */
+int proto_decode_actuator(const uint8_t *buf, size_t len, proto_actuator_t *out,
+                          proto_mac_fn mac, void *ctx);
+size_t proto_encode_actuator_ack(const proto_actuator_ack_t *a, uint8_t *out, size_t cap,
+                                 proto_mac_fn mac, void *ctx);
 
 const char *proto_status_str(int status);
 

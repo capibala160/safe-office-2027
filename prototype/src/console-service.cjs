@@ -45,7 +45,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.51.0';
+const VERSION = '0.52.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -155,6 +155,8 @@ class ConsoleService {
     // 录音转写（v0.51）：注入腾讯云一句话识别客户端；null = 保持模拟
     asr = null,
     audioDir = process.env.SAFE_OFFICE_AUDIO_DIR || path.join('data', 'audios'),
+    // 设备联动（v0.52）：确认通过后向 WS63 发执行帧驱动 GPIO；null = 只记录
+    actuator = null,
   } = {}) {
     this.now = now;
     this._auditActorStorage = new AsyncLocalStorage();
@@ -163,6 +165,7 @@ class ConsoleService {
     // 模型与持久化：默认全内存（测试/演示不变）；给了路径才落盘
     this._injectedLlm = llm;
     this.asr = asr;                          // 真实 ASR 客户端；null = 模拟
+    this.actuator = actuator;                // 真板 GPIO 执行器；null = 只记录
     this.audioDir = String(audioDir);
     this.audios = new Map();                 // 上传的录音：id → { id, title, level, filePath, bytes, format, owner }
     this.documentsStore = documentsStore;   // 导入的真实资料（null = 只有样例）
@@ -3050,6 +3053,7 @@ class ConsoleService {
         note: this.pairingCode ? '手机确认端（局域网，非硬件）' : '虚拟设备（非硬件）',
       },
       pairing: this.pairingCode ? { code: this.pairingCode, note: '确认端配对码（局域网内可见）' } : null,
+      actuator: this.actuator ? { configured: true, note: '真实 GPIO（IO13 LED / IO10 蜂鸣器）' } : null,
       pending,
       history: this.challengeHistory
         .filter((h) => !h.operationId || visible(h.operationId))
@@ -3811,13 +3815,31 @@ class ConsoleService {
     if (operation.protocolAction === 4) {
       let args = {};
       try { args = JSON.parse(operation.body); } catch { args = {}; }
-      this.business.deviceCommands.push({
-        operationId: operation.operationId,
-        device: args.device || operation.recipient,
-        op: args.op || 'unknown',
-        at: this._iso(),
-      });
-      this.business.deviceStates[args.device || operation.recipient] = args.op || 'unknown';
+      const device = args.device || operation.recipient;
+      const op = args.op || 'unknown';
+      const record = { operationId: operation.operationId, device, op, at: this._iso() };
+      if (this.actuator) {
+        try {
+          const ack = await this.actuator.actuate({ device, op });
+          record.actuated = true;
+          record.pin = ack.pin;
+          record.level = ack.level;
+          this._withAuditActor(operation.createdBy || null, () => this.audit.append('设备执行', {
+            operationId: operation.operationId, device, op, pin: ack.pin, level: ack.level,
+          }));
+        } catch (err) {
+          record.actuated = false;
+          record.error = err.message;
+          this.business.deviceCommands.push(record);
+          this.business.deviceStates[device] = `failed:${op}`;
+          this._withAuditActor(operation.createdBy || null, () => this.audit.append('设备执行失败', {
+            operationId: operation.operationId, device, op, error: err.message,
+          }));
+          throw new MailerError('unknown', `设备执行失败：${err.message}`);
+        }
+      }
+      this.business.deviceCommands.push(record);
+      this.business.deviceStates[device] = op;
     }
   }
 

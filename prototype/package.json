@@ -1,6 +1,6 @@
 {
   "name": "safe-office-prototype",
-  "version": "0.51.0",
+  "version": "0.52.0",
   "private": true,
   "description": "安全智慧办公 · Agent 安全运行机制核心原型 + 办公套件控制台（平台无关；上板时平移 ArkTS）",
   "scripts": {
@@ -27,6 +27,7 @@
     "e2e": "node --test e2e/ui.e2e.cjs",
     "share:check": "node e2e/share-check.cjs",
     "asr:probe": "node scripts/asr-probe.cjs",
+    "actuator:test": "node scripts/actuator-test.cjs",
     "bench": "node bench/load.cjs",
     "audit:keygen": "node scripts/audit-keygen.cjs",
     "verify:audit": "node verify-audit.cjs",

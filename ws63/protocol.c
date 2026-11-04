@@ -331,6 +331,65 @@ int proto_decode_decision(const uint8_t *buf, size_t len, proto_decision_t *out,
     return PROTO_OK;
 }
 
+size_t proto_encode_actuator_ack(const proto_actuator_ack_t *a, uint8_t *out, size_t cap,
+                                 proto_mac_fn mac, void *ctx)
+{
+    const uint16_t payload_len = PROTO_ACTUATOR_ACK_PAYLOAD_LEN;
+    const size_t total = (size_t)PROTO_HEADER_LEN + payload_len + PROTO_MAC_LEN;
+    uint8_t *p;
+
+    if (a == NULL || out == NULL || mac == NULL || total > cap) {
+        return 0;
+    }
+
+    write_header(out, PROTO_TYPE_ACTUATOR_ACK, (uint16_t)(payload_len + PROTO_MAC_LEN));
+    p = out + PROTO_HEADER_LEN;
+    *p++ = a->status;
+    *p++ = a->pin;
+    *p++ = a->level;
+
+    if (finish_frame(out, total, cap, payload_len, mac, ctx) != PROTO_OK) {
+        return 0;
+    }
+    return total;
+}
+
+int proto_decode_actuator(const uint8_t *buf, size_t len, proto_actuator_t *out,
+                          proto_mac_fn mac, void *ctx)
+{
+    uint16_t payload_len = 0;
+    const uint8_t *p;
+    int rc;
+
+    if (out == NULL) {
+        return PROTO_ERR_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+
+    rc = check_header(buf, len, PROTO_TYPE_ACTUATOR, &payload_len);
+    if (rc != PROTO_OK) {
+        return rc;
+    }
+    if (payload_len != PROTO_ACTUATOR_PAYLOAD_LEN) {
+        return PROTO_ERR_FRAME;
+    }
+    rc = verify_frame_mac(buf, payload_len, mac, ctx);
+    if (rc != PROTO_OK) {
+        return rc;
+    }
+
+    p = buf + PROTO_HEADER_LEN;
+    memcpy(out->nonce, p, PROTO_NONCE_LEN);
+    p += PROTO_NONCE_LEN;
+    out->pin = *p++;
+    out->level = *p++;
+    if (out->level > 1) {
+        return PROTO_ERR_ARG;
+    }
+    memcpy(out->mac, buf + PROTO_HEADER_LEN + payload_len, PROTO_MAC_LEN);
+    return PROTO_OK;
+}
+
 /* ---------------- 状态机 ---------------- */
 
 void proto_pending_init(proto_pending_t *p)

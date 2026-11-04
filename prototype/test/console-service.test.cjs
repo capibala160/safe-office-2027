@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.51.0');
+  assert.equal(bootstrap.state.version, '0.52.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -977,4 +977,40 @@ test('录音转写：未配置 ASR 时拒绝上传', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   assert.throws(() => service.saveAudio({ filename: 'a.wav', data: Buffer.alloc(44).toString('base64') }), /未配置 ASR/);
+});
+
+test('设备联动：确认后执行真板 GPIO（stub）；失败转 unknown 并审计', async (t) => {
+  const calls = [];
+  const actuator = {
+    actuate: async ({ device, op }) => {
+      calls.push({ device, op });
+      return { status: 0, pin: 13, level: 1 };
+    },
+  };
+  const { service } = setup({ service: { actuator } });
+  t.after(() => service.close());
+  await service._applyBusinessAction({
+    protocolAction: 4,
+    operationId: 'op-1',
+    recipient: '门锁',
+    body: JSON.stringify({ device: '门锁', op: 'unlock' }),
+    createdBy: 'alice',
+  });
+  assert.deepEqual(calls, [{ device: '门锁', op: 'unlock' }]);
+  const rec = service.business.deviceCommands.at(-1);
+  assert.equal(rec.actuated, true);
+  assert.equal(rec.pin, 13);
+  assert.ok(service.audit.entries.some((e) => e.kind === '设备执行'));
+
+  const failing = { actuate: async () => { throw new Error('串口超时'); } };
+  const { service: s2 } = setup({ service: { actuator: failing } });
+  t.after(() => s2.close());
+  await assert.rejects(s2._applyBusinessAction({
+    protocolAction: 4,
+    operationId: 'op-2',
+    recipient: '门锁',
+    body: '{"device":"门锁","op":"unlock"}',
+    createdBy: 'alice',
+  }), /设备执行失败/);
+  assert.ok(s2.audit.entries.some((e) => e.kind === '设备执行失败'));
 });

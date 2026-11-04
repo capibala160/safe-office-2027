@@ -42,17 +42,31 @@ function encodeDecision(d, key) {
   return frame(2, Buffer.concat([bytes(d.taskId, 8, 'taskId'), bytes(d.nonce, 16, 'nonce'),
     byte(d.decision, 1), bytes(d.deviceId, 8, 'deviceId'), u32(d.decidedAt)]), key);
 }
+/** @param {{nonce:Buffer, pin:number, level:number}} a @param {Buffer} key @returns {Buffer} */
+function encodeActuator(a, key) {
+  return frame(0x21, Buffer.concat([
+    bytes(a.nonce, 16, 'nonce'), byte(a.pin), byte(a.level, 1),
+  ]), key);
+}
 /** @param {Buffer} input @param {Buffer} key @returns {any} */
 function decodeFrame(input, key) {
   bytes(key, 32, 'key');
   if (!Buffer.isBuffer(input) || input.length < 42) throw new Error('invalid frame');
   const b = Buffer.from(input);
   if (!b.subarray(0, 4).equals(Buffer.from('SFC1')) || b[4] !== 1 || b[6] || b[7] ||
-      b.readUInt16LE(8) + 10 !== b.length || ![1, 2].includes(b[5])) throw new Error('invalid header');
+      b.readUInt16LE(8) + 10 !== b.length || ![1, 2, 0x21, 0x22].includes(b[5])) throw new Error('invalid header');
   const data = b.subarray(0, -32);
   const expected = createHmac('sha256', key).update(data).digest();
   if (!timingSafeEqual(expected, b.subarray(-32))) throw new Error('invalid MAC');
   const p = b.subarray(10, -32);
+  if (b[5] === 0x22) {
+    if (p.length !== 3 || p[2] > 1) throw new Error('invalid actuator ack');
+    return { type: 'actuator-ack', status: p[0], pin: p[1], level: p[2] };
+  }
+  if (b[5] === 0x21) {
+    if (p.length !== 18 || p[17] > 1) throw new Error('invalid actuator');
+    return { type: 'actuator', nonce: Buffer.from(p.subarray(0, 16)), pin: p[16], level: p[17] };
+  }
   const common = { taskId: Buffer.from(p.subarray(0, 8)), nonce: Buffer.from(p.subarray(8, 24)) };
   if (b[5] === 2) {
     if (p.length !== 37 || p[24] > 1) throw new Error('invalid decision');
@@ -66,4 +80,4 @@ function decodeFrame(input, key) {
   if (summary.includes('\0')) throw new Error('invalid summary');
   return { type: 'challenge', ...common, action: p[24], operationHash: Buffer.from(p.subarray(25, 57)), issuedAt, expiresAt, summary };
 }
-module.exports = { encodeChallenge, encodeDecision, decodeFrame };
+module.exports = { encodeChallenge, encodeDecision, encodeActuator, decodeFrame };
