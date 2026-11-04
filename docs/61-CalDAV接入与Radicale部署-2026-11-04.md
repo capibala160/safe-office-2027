@@ -142,7 +142,7 @@ SAFE_OFFICE_CALENDAR_DIR=<prototype>/data/calendar
 - [ ] `MKCALENDAR` 返回 201，`PROPFIND` 返回 207
 - [ ] curl PUT 一个 .ics 返回 201
 - [ ] 控制台预约后返回 `mode: caldav`
-- [ ] DAVx⁵ 手动同步后手机日历出现该事件
+- [ ] DAVx⁵ 手动同步后手机日历出现该事件 —— **未完成**：2026-11-04 实测服务器已收到 DAVx⁵ 的 `REPORT` 207，但鸿蒙机（PSD-AL00）上 DAVx⁵ 的本地日历存储返回 `-1`，事件无法入库；需真 Android 复测（见 §9）
 
 ## 9. 实际部署记录（2026-11-04，Alibaba Cloud Linux 3）
 
@@ -189,7 +189,8 @@ http://101.132.160.81/radicale/safeoffice/office/
 - [x] 公网经 nginx：`PROPFIND` 207 / `PUT` 201
 - [x] 控制台适配器 `createCalendarWriterFromEnv` 真实预约 → `{"mode":"caldav","status":201}`，带回 ETag
 - [x] 同一 UID 重写：412 → GET 取 ETag → `If-Match` PUT → 204（更新分支成立）
-- [ ] DAVx⁵ 手机同步（未验证；手机端需允许 http 明文）
+- [x] 手机浏览器读取（鸿蒙 PSD-AL00）：`PROPFIND /radicale/` 401→207、`PROPFIND /radicale/safeoffice/` 207，页面列出 2 条事件
+- [ ] DAVx⁵ 手机同步：**服务端已通、端上未入库**。2026-11-04 用 DAVx⁵ 4.5.21-ose（F-Droid 官方签名）连接，服务器记录 `PROPFIND /radicale/` 207、`REPORT /radicale/safeoffice/office/` 207；但 DAVx⁵ 的「本地项目数量」显示 `-1`（读不到系统日历存储），华为日历不显示事件——鸿蒙兼容层限制，需真 Android（vivo V2458A）复测。**边界：不能写成「手机日历已同步」**
 
 **边界**：仍是 HTTP + Basic，凭据在链路上是 base64；只适合演示/内网。生产要 HTTPS（域名 + certbot，或 Caddy）。
 **备份**：整个 `/var/lib/radicale/collections` 目录；恢复时装回同一路径并重启服务。
