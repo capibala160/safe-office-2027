@@ -28,14 +28,56 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function saveDevice(file, { deviceId, label, key }) {
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true });
-  let table = { version: 1, devices: [] };
-  if (fs.existsSync(file)) {
-    table = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!Array.isArray(table.devices)) table.devices = [];
+// 状态文件损坏时抛这个错：调用方必须停下，保留原文件（评审问题 2）
+class StateFileError extends Error {
+  constructor(file, cause) {
+    super(`状态文件损坏，已保留原文件：${file}（${cause && cause.message ? cause.message : cause}）`);
+    this.code = 'STATE_FILE';
+    this.file = file;
   }
+}
+
+function readJsonFile(file) {
+  if (!fs.existsSync(file)) return null;
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    throw new StateFileError(file, err);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new StateFileError(file, err);
+  }
+}
+
+// 原子写：临时文件写完 + fsync 后 rename 覆盖，避免中断留下半截文件
+function atomicWriteJson(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  const text = `${JSON.stringify(data, null, 2)}\n`;
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    throw err;
+  }
+  try { fs.chmodSync(file, 0o600); } catch { /* Windows 上忽略 */ }
+}
+
+function saveDevice(file, { deviceId, label, key }) {
+  let table = readJsonFile(file);
+  if (!table) table = { version: 2, devices: [] };
+  if (!Array.isArray(table.devices)) table.devices = [];
+  table.version = 2;
   const deviceIdHex = deviceId.toString('hex');
   const entry = {
     deviceId: deviceIdHex,
@@ -46,8 +88,7 @@ function saveDevice(file, { deviceId, label, key }) {
   const index = table.devices.findIndex((d) => d.deviceId === deviceIdHex);
   if (index >= 0) table.devices[index] = entry;
   else table.devices.push(entry);
-  fs.writeFileSync(file, `${JSON.stringify(table, null, 2)}\n`, { mode: 0o600 });
-  try { fs.chmodSync(file, 0o600); } catch { /* Windows 上忽略 */ }
+  atomicWriteJson(file, table);
   return entry;
 }
 
@@ -58,16 +99,36 @@ function pendingFileFor(outFile) {
   return path.join(path.dirname(outFile), 'devices.pending.json');
 }
 
+function isPendingRecord(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && typeof value.deviceId === 'string' && typeof value.key === 'string';
+}
+
+// 读 pending：兼容 v1 单条旧格式（{pending:{deviceId,key,...}}），统一返回 { [deviceId]: record }。
+// 损坏一律抛 StateFileError——不能把"解析失败"当成空表，否则下一次保存会覆盖残存钥匙。
 function readPendingAll(file) {
-  if (!fs.existsSync(file)) return {};
-  try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const pending = data && data.pending;
-    if (!pending || typeof pending !== 'object' || Array.isArray(pending)) return {};
-    return pending;
-  } catch {
-    return {};
+  const data = readJsonFile(file);
+  if (!data) return {};
+  if (typeof data !== 'object' || Array.isArray(data)) {
+    throw new StateFileError(file, new Error('根节点必须是对象'));
   }
+  const pending = data.pending;
+  if (pending === undefined || pending === null) return {};
+  if (typeof pending !== 'object' || Array.isArray(pending)) {
+    throw new StateFileError(file, new Error('pending 必须是对象'));
+  }
+  // v1 迁移：单条记录对象
+  if (isPendingRecord(pending)) {
+    return { [pending.deviceId]: pending };
+  }
+  const out = {};
+  for (const [deviceId, record] of Object.entries(pending)) {
+    if (!isPendingRecord(record)) {
+      throw new StateFileError(file, new Error(`pending.${deviceId} 不是合法记录`));
+    }
+    out[deviceId] = record;
+  }
+  return out;
 }
 
 function listPending(file) {
@@ -80,12 +141,9 @@ function readPendingFor(file, deviceId) {
 }
 
 function writePending(file, record) {
-  // 父目录可能还不存在（默认 data/ 或 --out 指向新目录）
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const all = readPendingAll(file);
+  const all = readPendingAll(file); // 父目录/兼容/损坏检查都在里面
   all[record.deviceId] = record;
-  fs.writeFileSync(file, `${JSON.stringify({ version: 1, pending: all }, null, 2)}\n`, { mode: 0o600 });
-  try { fs.chmodSync(file, 0o600); } catch { /* Windows 上忽略 */ }
+  atomicWriteJson(file, { version: 2, pending: all });
 }
 
 // 只清指定设备；没有其它设备记录时删掉文件
@@ -98,7 +156,7 @@ function clearPending(file, deviceId) {
     try { fs.unlinkSync(file); } catch { /* ignore */ }
     return;
   }
-  fs.writeFileSync(file, `${JSON.stringify({ version: 1, pending: all }, null, 2)}\n`, { mode: 0o600 });
+  atomicWriteJson(file, { version: 2, pending: all });
 }
 
 // 选钥匙：显式 --key 优先；否则复用同设备的 pending；否则新随机

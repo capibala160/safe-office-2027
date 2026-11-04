@@ -51,12 +51,52 @@ test('pending：父目录不存在时自动创建（评审问题 3）', () => {
   assert.equal(readPendingFor(file, 'aa').deviceId, 'aa');
 });
 
-test('pending：损坏/缺文件返回空表，不抛错', () => {
+test('pending：缺文件返回空表；损坏文件抛错且保留原文件（评审问题 2）', () => {
   const dir = tmpDir();
   const file = pendingFileFor(path.join(dir, 'devices.json'));
   assert.deepEqual(readPendingAll(file), {});
-  fs.writeFileSync(file, '{bad json');
-  assert.deepEqual(readPendingAll(file), {});
+
+  const corrupt = '{bad json';
+  fs.writeFileSync(file, corrupt);
+  assert.throws(() => readPendingAll(file), /状态文件损坏/);
+  assert.throws(() => writePending(file, record('aa')), /状态文件损坏/);
+  assert.equal(fs.readFileSync(file, 'utf8'), corrupt, '损坏文件必须原样保留');
+});
+
+test('pending：兼容 v1 单条旧格式并迁移（评审问题 1）', () => {
+  const dir = tmpDir();
+  const file = pendingFileFor(path.join(dir, 'devices.json'));
+  const legacy = { version: 1, pending: record('aa', 'ws63-A', 3) };
+  fs.writeFileSync(file, JSON.stringify(legacy));
+  assert.equal(readPendingFor(file, 'aa').label, 'ws63-A');
+  assert.equal(listPending(file).length, 1);
+
+  writePending(file, record('bb', 'ws63-B', 4));
+  const migrated = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(migrated.version, 2, '写回后升到 v2');
+  assert.equal(migrated.pending.aa.label, 'ws63-A', 'A 的旧记录不能丢');
+  assert.equal(migrated.pending.bb.label, 'ws63-B');
+});
+
+test('pending：写入是原子的，不留临时文件', () => {
+  const dir = tmpDir();
+  const file = pendingFileFor(path.join(dir, 'devices.json'));
+  writePending(file, record('aa'));
+  const leftovers = fs.readdirSync(dir).filter((name) => name.includes('.tmp-'));
+  assert.deepEqual(leftovers, []);
+  assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).pending.aa);
+});
+
+test('设备表：损坏时 saveDevice 抛错并保留原文件', () => {
+  const dir = tmpDir();
+  const out = path.join(dir, 'devices.json');
+  const corrupt = '{"devices": [';
+  fs.writeFileSync(out, corrupt);
+  assert.throws(
+    () => saveDevice(out, { deviceId: Buffer.from('11111111', 'hex'), label: 'ws63-A', key: Buffer.alloc(32, 7) }),
+    /状态文件损坏/,
+  );
+  assert.equal(fs.readFileSync(out, 'utf8'), corrupt);
 });
 
 test('chooseKey：--key 优先于 pending；同设备 pending 复用；否则随机', () => {
