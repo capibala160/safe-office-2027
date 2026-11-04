@@ -17,6 +17,17 @@ const DEMO_DIR = process.env.SAFE_OFFICE_DEMO_DIR
   ? path.resolve(process.env.SAFE_OFFICE_DEMO_DIR)
   : path.join(ROOT, 'data', 'demo');
 
+function arg(name, fallback) {
+  const argv = process.argv.slice(2);
+  const inline = argv.find((a) => a.startsWith(`--${name}=`));
+  if (inline) return inline.slice(name.length + 3);
+  const index = argv.indexOf(`--${name}`);
+  if (index !== -1 && index + 1 < argv.length && !argv[index + 1].startsWith('--')) {
+    return argv[index + 1];
+  }
+  return fallback;
+}
+
 const DEMO_USERS = [
   { username: 'demo-admin', role: '管理员', password: 'DemoAdmin2026!' },
   { username: 'demo-auditor', role: '审计员', password: 'DemoAuditor2026!' },
@@ -98,16 +109,31 @@ function seedDemo({ dir = DEMO_DIR, reset = false } = {}) {
 function main() {
   const reset = process.argv.includes('--reset');
   const check = process.argv.includes('--check') || process.argv.includes('--no-start');
+  // 真板模式：--nearfield-port COM11 [--nearfield-device ws63-A] [--gate4]
+  const nearfieldPort = String(arg('nearfield-port', process.env.SAFE_OFFICE_NEARFIELD_PORT || '')).trim();
+  const nearfieldDevice = String(arg('nearfield-device', process.env.SAFE_OFFICE_DEVICE || 'ws63-A')).trim() || 'ws63-A';
+  const demoGate4 = process.argv.includes('--gate4');
+  const nearfieldEnv = nearfieldPort
+    ? {
+        SAFE_OFFICE_NEARFIELD_PORT: nearfieldPort,
+        SAFE_OFFICE_DEVICE: nearfieldDevice,
+        SAFE_OFFICE_GATE4_NEARFIELD: process.env.SAFE_OFFICE_GATE4_NEARFIELD
+          || (demoGate4 ? '1' : '0'),
+      }
+    : {};
+
   const seeded = seedDemo({ reset });
   console.log(`演示数据：${seeded.dir}`);
   console.log('演示账号：');
   for (const u of DEMO_USERS) console.log(`  ${u.role}：${u.username} / ${u.password}`);
   if (check) return;
 
-  const env = buildDemoEnv(seeded.dir);
+  const env = buildDemoEnv(seeded.dir, nearfieldEnv);
   const port = Number(env.PORT) || 7812;
   console.log(`启动控制台：http://127.0.0.1:${port}`);
-  console.log('（仅本机、虚拟确认、MockLLM；Ctrl+C 停止）');
+  console.log(nearfieldPort
+    ? `（真板确认：${nearfieldPort} · 设备 ${nearfieldDevice}${env.SAFE_OFFICE_GATE4_NEARFIELD === '1' ? ' · 闸4 走真板' : ''}；MockLLM；Ctrl+C 停止）`
+    : '（仅本机、虚拟确认、MockLLM；Ctrl+C 停止）');
   const child = spawn(process.execPath, [path.join(ROOT, 'server.cjs')], {
     cwd: ROOT, env, stdio: 'inherit',
   });

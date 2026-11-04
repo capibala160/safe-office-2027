@@ -12,7 +12,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
 const { createSerialNearfieldFactory } = require('./src/serial-nearfield.cjs');
-const { resolveDeviceKey } = require('./src/device-keys.cjs');
+const { resolveDeviceKey, readDeviceTable } = require('./src/device-keys.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
 const { BlobStore, parseKey } = require('./src/blob-store.cjs');
 const { FakeMailer } = require('./src/mailer.cjs');
@@ -238,6 +238,8 @@ function createConsoleServer({
   auth = null,
   allowVirtualConfirm = true,
   nearfieldSerial = false,
+  devices = [],
+  deviceState = null,
   inboxReader = null,
 } = {}) {
   const AUTH_PUBLIC = new Set([
@@ -760,7 +762,32 @@ function createConsoleServer({
         return sendJson(res, 200, service.rollback(body.seq));
       }
       if (pathname === '/api/device' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, ...service.getDevice(userContext(req)) });
+        const view = service.getDevice(userContext(req));
+        return sendJson(res, 200, {
+          ok: true,
+          ...view,
+          // 只下发标签/身份，绝不下发密钥
+          devices: devices.map(({ label, deviceId, provisionedAt }) => ({ label, deviceId, provisionedAt })),
+          selected: deviceState && deviceState.selected ? deviceState.selected : service.deviceId,
+        });
+      }
+      if (pathname === '/api/devices/select' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '切换确认设备');
+        const body = await readJson(req);
+        const label = String(body.label || '').trim();
+        const device = devices.find((d) => d.label === label);
+        if (!device) {
+          return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: `设备不存在：${label}` } });
+        }
+        const view = service.setNearfieldDevice({
+          key: device.key,
+          deviceId: device.label,
+          // 表里的 deviceId 是板端挑战返回的权威 8 字节 id，直接用它，别拿 hex 再派生
+          deviceIdBytes: Buffer.from(device.deviceId, 'hex'),
+          deviceLabel: device.label,
+        });
+        if (deviceState) deviceState.selected = device.label;
+        return sendJson(res, 200, { ok: true, selected: device.label, device: view });
       }
       if (pathname === '/api/phone/pair' && method === 'POST') {
         if (!service.pairingCode) {
@@ -975,12 +1002,14 @@ async function startServer({
   const production = String(process.env.SAFE_OFFICE_PRODUCTION || '') === '1';
   const deviceLabel = String(process.env.SAFE_OFFICE_DEVICE || 'ws63-A').trim() || 'ws63-A';
   let nearfieldKey = null;
+  let resolvedDevice = null;
   try {
-    nearfieldKey = resolveDeviceKey({
+    resolvedDevice = resolveDeviceKey({
       label: deviceLabel,
       envKey: String(process.env.SAFE_OFFICE_SFC1_KEY || '').trim(),
       production,
-    }).key;
+    });
+    nearfieldKey = resolvedDevice.key;
   } catch (err) {
     if (production || nearfieldPort) throw new Error(`确认密钥不可用：${err.message}`);
     // 非生产且未接真板：保留默认演示密钥（虚拟设备路径）
@@ -1010,8 +1039,14 @@ async function startServer({
         mailer: mailer || new FakeMailer(),
         nearfieldTransportFactory,
         gate4Nearfield,
-        // 设备身份跟着 SAFE_OFFICE_DEVICE 走：否则 B 板的决定帧会因 device_id 不符被拒
-        ...consoleIdentityFromEnv(),
+        // 设备身份：设备表命中时用表里的权威 8 字节 id；否则按 SAFE_OFFICE_DEVICE 派生
+        ...(resolvedDevice && resolvedDevice.record
+          ? {
+              deviceId: resolvedDevice.record.label,
+              deviceIdBytes: Buffer.from(resolvedDevice.record.deviceId, 'hex'),
+              deviceLabel: resolvedDevice.record.label,
+            }
+          : consoleIdentityFromEnv()),
         ...(nearfieldKey ? { nearfieldKey } : {}),
       });
     }
@@ -1044,7 +1079,31 @@ async function startServer({
   if (instance.startAuditExportTimer && instance.startAuditExportTimer()) {
     console.log(`审计外部快照：每 ${Math.round(instance.auditExportIntervalMs / 60000)} 分钟导出，保留 ${instance.auditExportKeep} 份`);
   }
-  const server = createConsoleServer({ service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm, nearfieldSerial: Boolean(nearfieldPort), inboxReader });
+  // 多设备（docs/60）：设备表里的记录用于 UI 下拉与运行时切换；密钥只在服务端内存里
+  let deviceTable = [];
+  try {
+    deviceTable = readDeviceTable()
+      .map((d) => ({
+        label: d.label,
+        deviceId: d.deviceId,
+        key: Buffer.from(d.key, 'base64'),
+        provisionedAt: d.provisionedAt,
+      }))
+      .filter((d) => d.key.length === 32);
+  } catch (err) {
+    if (production || nearfieldPort) throw new Error(`设备表不可用：${err.message}`);
+    console.warn(`⚠ 设备表不可用：${err.message}`);
+  }
+  const deviceState = {
+    selected: deviceTable.some((d) => d.label === deviceLabel)
+      ? deviceLabel
+      : (deviceTable[0] ? deviceTable[0].label : deviceLabel),
+  };
+  const server = createConsoleServer({
+    service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm,
+    nearfieldSerial: Boolean(nearfieldPort), inboxReader,
+    devices: deviceTable, deviceState,
+  });
   return new Promise((resolve, reject) => {
     const listen = () => {
       server.once('error', reject);

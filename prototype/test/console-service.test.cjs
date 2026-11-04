@@ -271,6 +271,32 @@ test('关闭服务时一并关闭闸4 真板工厂（否则进程挂住、占 CO
   assert.equal(closed, 1);
 });
 
+test('切换确认设备：身份/密钥/confirmer 一起换，未决挑战时拒绝（多设备）', async (t) => {
+  const keyA = Buffer.alloc(32, 1);
+  const keyB = Buffer.alloc(32, 2);
+  const { service } = setup({ service: { nearfieldKey: keyA, deviceId: 'ws63-A' } });
+  t.after(() => service.close());
+
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations[0];
+  const ch = service.beginChallenge(op.operationId);
+  assert.throws(() => service.setNearfieldDevice({ key: keyB, deviceId: 'ws63-B' }), /未决挑战/);
+  await service.decideChallenge(ch.challengeId, 'cancel');
+
+  const view = service.setNearfieldDevice({ key: keyB, deviceId: 'ws63-B' });
+  assert.equal(view.deviceId, 'ws63-B');
+  assert.equal(service.deviceId, 'ws63-B');
+  assert.ok(service.key.equals(keyB));
+
+  // 切完后新挑战仍能通过（说明 confirmer 用新身份/新钥重建了）
+  const run2 = await runSample(service, 'external-confirm');
+  const op2 = run2.operations[0];
+  const ch2 = service.beginChallenge(op2.operationId);
+  const decided = await service.decideChallenge(ch2.challengeId, 'approve');
+  assert.equal(decided.outcome, 'approved');
+  assert.equal(decided.approval.deviceLabel, 'ws63-B');
+});
+
 test('闸4 真板：开关打开且配置传输工厂时 Runtime 装上板端确认，否则为 null', () => {
   const key = Buffer.alloc(32, 0x42);
   const transportFactory = async () => ({ send: async () => null });

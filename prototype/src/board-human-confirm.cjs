@@ -58,17 +58,41 @@ function createBoardHumanConfirm({
   logger = null,
 } = {}) {
   if (typeof transportFactory !== 'function') throw new TypeError('transportFactory 必填');
-  if (!Buffer.isBuffer(key) || key.length !== 32) throw new TypeError('key 必须是 32 字节 Buffer');
-  if (typeof deviceId !== 'string' || deviceId.trim() === '') throw new TypeError('deviceId 必填');
+  // key / deviceId 支持传函数：控制台切换设备时不必重建 runtime 的 humanConfirm
+  if (typeof key !== 'function' && (!Buffer.isBuffer(key) || key.length !== 32)) {
+    throw new TypeError('key 必须是 32 字节 Buffer（或返回 Buffer 的函数）');
+  }
+  if (typeof deviceId !== 'function' && (typeof deviceId !== 'string' || deviceId.trim() === '')) {
+    throw new TypeError('deviceId 必填（字符串或返回字符串的函数）');
+  }
   if (!Number.isInteger(ttlSec) || ttlSec <= 0) throw new TypeError('ttlSec 必须是正整数');
   if (typeof now !== 'function') throw new TypeError('now 必须是函数');
 
-  const expectedDevice = deriveDeviceId(deviceId);
+  const keySource = typeof key === 'function' ? key : () => key;
+  const deviceSource = typeof deviceId === 'function' ? deviceId : () => deviceId;
+  const currentKey = () => {
+    const value = keySource();
+    if (!Buffer.isBuffer(value) || value.length !== 32) throw new TypeError('key 必须是 32 字节 Buffer');
+    return value;
+  };
+  const currentDeviceId = () => {
+    const value = deviceSource();
+    if (typeof value !== 'string' || value.trim() === '') throw new TypeError('deviceId 必填');
+    return value;
+  };
   const log = (line) => { if (typeof logger === 'function') logger(line); };
 
   return async function boardHumanConfirm({ operation } = {}) {
     if (!operation || typeof operation.contentHash !== 'string' || !/^[0-9a-f]{64}$/i.test(operation.contentHash)) {
       return { approved: false, method: '确认端参数错误：缺少 32 字节 contentHash' };
+    }
+    let keyNow;
+    let expectedDevice;
+    try {
+      keyNow = currentKey();
+      expectedDevice = deriveDeviceId(currentDeviceId());
+    } catch (err) {
+      return { approved: false, method: `确认端参数错误：${err && err.message ? err.message : err}` };
     }
 
     const action = ACTION_PROTOCOL[operation.action] || 4;
@@ -84,7 +108,7 @@ function createBoardHumanConfirm({
       issuedAt,
       expiresAt: issuedAt + ttlSec,
       summary,
-    }, key);
+    }, keyNow);
 
     let transport;
     try {
@@ -104,7 +128,7 @@ function createBoardHumanConfirm({
 
     let decision;
     try {
-      decision = decodeFrame(reply, key);
+      decision = decodeFrame(reply, keyNow);
     } catch (err) {
       return { approved: false, method: `决定帧非法：${err && err.message ? err.message : err}` };
     }
@@ -123,7 +147,7 @@ function createBoardHumanConfirm({
       method: 'WS63 真板（SFC1）',
       proof: {
         confirmationId: `ws63-${nonce.toString('hex').slice(0, 16)}`,
-        deviceLabel: deviceId,
+        deviceLabel: currentDeviceId(),
         decidedAt: decision.decidedAt,
       },
     };

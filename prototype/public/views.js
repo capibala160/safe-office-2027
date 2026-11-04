@@ -966,6 +966,15 @@
       ${c.store.autoMode === 'auto-full' ? '<div class="notice block">当前为全自动演示模式：高危动作已被自动批准，没有待确认挑战。切回“人在环”才能演示设备确认。</div>' : ''}
       ${c.store.autoMode === 'auto-safe' ? '<div class="notice info">低风险自动：仅白名单内部级外发自动确认；外发/删除/打印/设备仍会出现在这里。</div>' : ''}
       ${data.device ? `<div class="notice info">设备 ${esc(data.device.id)} · ${esc(data.device.label)} · 协议 ${esc(data.device.protocol)} · ${esc(data.device.transport)} · ${esc(data.device.note)}</div>` : ''}
+      <section class="card">
+        <div class="card-head"><h2>确认设备</h2><span class="sub">${(data.devices || []).length} 台</span></div>
+        <label class="label">当前设备</label>
+        <select class="select" id="dev-switch">${(data.devices || []).length
+          ? (data.devices || []).map((d) => `<option value="${esc(d.label)}" ${d.label === data.selected ? 'selected' : ''}>${esc(d.label)} · ${esc(short(d.deviceId, 12))}</option>`).join('')
+          : '<option value="">设备表为空（先 npm run provision）</option>'}</select>
+        <div class="btn-row mt12"><button class="btn" id="dev-switch-btn" ${(data.devices || []).length ? '' : 'disabled'}>切换</button></div>
+        <div class="sub-text mt8">切换会同时更换设备身份与密钥；有未决挑战时不允许切换。</div>
+      </section>
       <div class="device-panel">
         <section class="card">${active ? renderOled(active) : '<div class="empty">当前没有待确认挑战。<br>选择一条冻结操作并点击“发起挑战”。</div>'}</section>
         <section class="card">
@@ -1002,6 +1011,20 @@
     };
 
     root.querySelector('#dev-op')?.addEventListener('change', (ev) => { c.store.operationId = ev.currentTarget.value; });
+    root.querySelector('#dev-switch-btn')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const label = root.querySelector('#dev-switch')?.value;
+      if (!label) return;
+      btn.disabled = true;
+      try {
+        await API.post('/api/devices/select', { label });
+        await device(root, c);
+      } catch (err) {
+        btn.disabled = false;
+        const box = root.querySelector('#device-result');
+        if (box) box.innerHTML = `<div class="notice block">切换失败：${esc(c.errorText(err))}</div>`;
+      }
+    });
     root.querySelector('#dev-challenge')?.addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       btn.disabled = true;

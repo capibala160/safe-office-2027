@@ -105,6 +105,7 @@ class ConsoleService {
     mailer = new FakeMailer(),
     nearfieldKey = Buffer.alloc(32, 0x42),
     deviceId = 'ws63-A',
+    deviceIdBytes = null,
     deviceLabel = 'WS63 虚拟确认器',
     // 真板路径（docs/11 下一步）：注入 () => Promise<{ send(frame), close?() }>；
     // 为 null 时走虚拟设备环回。串口/真板的打开与超时由 server 侧负责。
@@ -204,6 +205,8 @@ class ConsoleService {
     this.calendarDir = calendarDir ? String(calendarDir) : null;   // null = 会议预约保持模拟
     this.key = Buffer.from(nearfieldKey);
     this.deviceId = deviceId;
+    // 设备表里的权威 8 字节 id（可选）：有它就不用 label 重新派生
+    this.deviceIdBytes = Buffer.isBuffer(deviceIdBytes) && deviceIdBytes.length === 8 ? Buffer.from(deviceIdBytes) : null;
     this.deviceLabel = deviceLabel;
     this.nearfieldTransportFactory = nearfieldTransportFactory;
     this.gate4Nearfield = !!gate4Nearfield;
@@ -575,8 +578,9 @@ class ConsoleService {
       humanConfirm: this.gate4Nearfield && this.nearfieldTransportFactory
         ? createBoardHumanConfirm({
             transportFactory: this.nearfieldTransportFactory,
-            key: this.key,
-            deviceId: this.deviceId,
+            // 传函数：运行时切换设备后无需重建 runtime
+            key: () => this.key,
+            deviceId: () => this.deviceIdBytes || this.deviceId,
             ttlSec: this.ttlSec,
           })
         : null,
@@ -604,7 +608,7 @@ class ConsoleService {
     }
     this.confirmer = new NearfieldConfirmer({
       key: this.key,
-      expectedDeviceId: this.deviceId,
+      expectedDeviceId: this.deviceIdBytes || this.deviceId,
       deviceLabel: this.deviceLabel,
       ttlSec: this.ttlSec,
       now: () => Math.floor(this.now() / 1000),
@@ -2590,6 +2594,39 @@ class ConsoleService {
     };
   }
 
+  // 运行时切换确认设备（多设备，docs/60）：密钥、deviceId、confirmer 一起换。
+  // 有未决挑战时拒绝切换，避免把 A 的挑战用 B 的身份收尾。
+  setNearfieldDevice({ key, deviceId, deviceIdBytes = null, deviceLabel } = {}) {
+    if (!Buffer.isBuffer(key) || key.length !== 32) {
+      throw new ConsoleError('BAD_REQUEST', 'key 必须是 32 字节 Buffer');
+    }
+    if (typeof deviceId !== 'string' || deviceId.trim() === '') {
+      throw new ConsoleError('BAD_REQUEST', 'deviceId 必填');
+    }
+    const pending = [...this.challenges.values()].some((c) => c.state === 'pending');
+    if (pending) throw new ConsoleError('CONFLICT', '有未决挑战，先取消或等超时再切换设备', 409);
+
+    const previous = this.deviceId;
+    this.key = Buffer.from(key);
+    this.deviceId = deviceId.trim();
+    this.deviceIdBytes = Buffer.isBuffer(deviceIdBytes) && deviceIdBytes.length === 8 ? Buffer.from(deviceIdBytes) : null;
+    // 没给显示名时就用 deviceId，避免停留在上一台设备的显示名
+    this.deviceLabel = (typeof deviceLabel === 'string' && deviceLabel.trim() !== '')
+      ? deviceLabel.trim()
+      : this.deviceId;
+    this.confirmer = new NearfieldConfirmer({
+      key: this.key,
+      expectedDeviceId: this.deviceIdBytes || this.deviceId,
+      deviceLabel: this.deviceLabel,
+      ttlSec: this.ttlSec,
+      now: () => Math.floor(this.now() / 1000),
+    });
+    this.audit.append('切换确认设备', {
+      from: previous, to: this.deviceId, deviceLabel: this.deviceLabel,
+    });
+    return { deviceId: this.deviceId, deviceLabel: this.deviceLabel };
+  }
+
   // ---------- WS63 挑战 ----------
   beginChallenge(operationId, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(operationId, actor, role);
@@ -2729,7 +2766,7 @@ class ConsoleService {
       } else {
         const device = new VirtualDevice({
           key: this.key,
-          deviceId: this.deviceId,
+          deviceId: this.deviceIdBytes || this.deviceId,
           now: () => this._nowSec(),
           decide: () => (decision === 'cancel' ? 'cancel' : 'approve'),
         });
@@ -2881,7 +2918,7 @@ class ConsoleService {
     if (challenge.state !== 'pending') throw new ConsoleError('CONFLICT', `挑战状态 ${challenge.state} 不能篡改`, 409);
     const operation = this.store.getOperation(challenge.operationId);
     if (!operation) throw new ConsoleError('NOT_FOUND', '操作不存在', 404);
-    const device = new VirtualDevice({ key: this.key, deviceId: this.deviceId, now: () => this._nowSec() });
+    const device = new VirtualDevice({ key: this.key, deviceId: this.deviceIdBytes || this.deviceId, now: () => this._nowSec() });
     const reply = await device.receive(challenge.frame);
     if (!reply) throw new ConsoleError('INTERNAL', '设备未产生决定帧', 500);
     const tampered = Buffer.from(reply);
