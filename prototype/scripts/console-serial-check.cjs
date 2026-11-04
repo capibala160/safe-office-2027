@@ -13,7 +13,7 @@ const { createSerialNearfieldFactory } = require('../src/serial-nearfield.cjs');
 const { createBoardHumanConfirm } = require('../src/board-human-confirm.cjs');
 const { ConsoleService } = require('../src/console-service.cjs');
 
-const DEMO_KEY = Buffer.alloc(32, 0x42);
+const { DEMO_KEY, resolveDeviceKey } = require('../src/device-keys.cjs');
 
 function arg(name, fallback) {
   const argv = process.argv.slice(2);
@@ -30,10 +30,13 @@ async function main() {
   const asJson = process.argv.includes('--json');
   const portPath = String(arg('port', '')).trim();
   if (!portPath) throw new Error('缺少 --port（例如 COM11）');
-  const key = process.argv.includes('--demo-key')
-    ? Buffer.from(DEMO_KEY)
-    : Buffer.from(String(arg('key', process.env.SAFE_OFFICE_SFC1_KEY || '')), 'hex');
-  if (key.length !== 32) throw new Error('密钥必须是 32 字节（--demo-key 或 --key/SAFE_OFFICE_SFC1_KEY）');
+  const deviceLabel = String(arg('device', 'ws63-A'));
+  const { key } = resolveDeviceKey({
+    label: deviceLabel,
+    production: process.env.SAFE_OFFICE_PRODUCTION === '1',
+    demoKey: process.argv.includes('--demo-key'),
+    keyHex: arg('key', ''),
+  });
 
   const transportFactory = createSerialNearfieldFactory({
     portPath,
@@ -45,7 +48,7 @@ async function main() {
     const humanConfirm = createBoardHumanConfirm({
       transportFactory,
       key,
-      deviceId: 'ws63-A',
+      deviceId: deviceLabel,
       ttlSec: 60,
     });
     const transport = await transportFactory();
@@ -67,7 +70,7 @@ async function main() {
   const gate4E2e = process.argv.includes('--gate4-e2e');
   const service = new ConsoleService({
     nearfieldKey: key,
-    deviceId: 'ws63-A',
+    deviceId: deviceLabel,
     deviceLabel: 'WS63 真板确认端',
     nearfieldTransportFactory: transportFactory,
     gate4Nearfield: gate4E2e,

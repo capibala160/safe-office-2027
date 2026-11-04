@@ -21,7 +21,7 @@ const { FulfillmentService } = require('./src/fulfillment.cjs');
 const { NearfieldConfirmer, buildSummary } = require('./src/nearfield-confirm.cjs');
 const { openSerialPort, SerialTransport } = require('./src/serial-transport.cjs');
 
-const DEMO_KEY = Buffer.alloc(32, 0x42);
+const { resolveDeviceKey } = require('./src/device-keys.cjs');
 const ACTION_MAP = {
   sendExternalEmail: 1,
   deleteDoc: 2,
@@ -31,14 +31,14 @@ const ACTION_MAP = {
 const DEFAULT_TTL_SEC = 30;
 const DEFAULT_TIMEOUT_MS = 15000;
 
+// 钥匙来源：--demo-key（仅非生产）> --key > SAFE_OFFICE_SFC1_KEY > 设备表（--device 标签）
 function parseKeyOption(values) {
-  if (values['demo-key']) return { key: Buffer.from(DEMO_KEY), source: 'demo' };
-  const raw = values.key || process.env.SAFE_OFFICE_SFC1_KEY;
-  if (!raw) {
-    throw new Error('缺少密钥：用 --demo-key（演示）或 --key/SAFE_OFFICE_SFC1_KEY（64 位十六进制）');
-  }
-  if (!/^[0-9a-fA-F]{64}$/.test(raw)) throw new Error('密钥必须是 64 位十六进制（32 字节）');
-  return { key: Buffer.from(raw, 'hex'), source: values.key ? 'arg' : 'env' };
+  return resolveDeviceKey({
+    label: values.device,
+    production: process.env.SAFE_OFFICE_PRODUCTION === '1',
+    demoKey: Boolean(values['demo-key']),
+    keyHex: values.key || '',
+  });
 }
 
 function buildOperation({ action, to, subject, body, level = '内部', ttlSec }) {
@@ -159,7 +159,13 @@ async function main() {
 
   const log = values.json ? () => {} : (line) => console.log(line);
   log(`操作 ${prepared.operationId} 已冻结：${buildSummary(prepared)}`);
-  log(`密钥来源：${source === 'demo' ? '演示密钥（仅用于联调）' : source === 'env' ? '环境变量' : '命令行参数'}`);
+  const sourceText = {
+    demo: '演示密钥（仅用于联调）',
+    env: '环境变量 SAFE_OFFICE_SFC1_KEY',
+    arg: '命令行参数 --key',
+    table: '设备表（data/devices.json）',
+  }[source] || source;
+  log(`密钥来源：${sourceText}`);
   log('请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消');
 
   try {

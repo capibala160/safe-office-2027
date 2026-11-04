@@ -26,7 +26,7 @@ const path = require('node:path');
 const { openSerialPort } = require('../src/serial-transport.cjs');
 const { encodeChallenge } = require('../src/ws63-protocol.cjs');
 
-const DEMO_KEY = Buffer.alloc(32, 0x42);
+const { DEMO_KEY, resolveDeviceKey } = require('../src/device-keys.cjs');
 const CASES = ['mac', 'busy', 'expire', 'replay', 'persist-arm', 'persist-check'];
 const ALL_CASES = ['mac', 'busy', 'replay'];
 const ACCEPT_MARK = 'SFC1 challenge:';
@@ -73,12 +73,14 @@ function buildChallenge({ ttlSec, summary = 'NEG-TEST', action = 1, key }) {
   };
 }
 
+// 钥匙来源：--demo-key（仅非生产）> --key > SAFE_OFFICE_SFC1_KEY > 设备表（--device 标签）
 function loadKey(values) {
-  if (values.demoKey) return { key: Buffer.from(DEMO_KEY), source: 'demo' };
-  const raw = values.key || process.env.SAFE_OFFICE_SFC1_KEY;
-  if (!raw) throw Object.assign(new Error('缺少密钥：--demo-key（演示）或 --key/SAFE_OFFICE_SFC1_KEY（64 位十六进制）'), { code: 'ARG' });
-  if (!/^[0-9a-fA-F]{64}$/.test(raw)) throw Object.assign(new Error('密钥必须是 64 位十六进制（32 字节）'), { code: 'ARG' });
-  return { key: Buffer.from(raw, 'hex'), source: values.key ? 'arg' : 'env' };
+  return resolveDeviceKey({
+    label: values.device,
+    production: process.env.SAFE_OFFICE_PRODUCTION === '1',
+    demoKey: values.demoKey,
+    keyHex: values.key || '',
+  });
 }
 
 // 收串口文本并在其中找标志
@@ -238,6 +240,7 @@ async function main() {
     throw Object.assign(new Error(`未知 --case：${caseName}（可选 ${CASES.join(' / ')} / all）`), { code: 'ARG' });
   }
   const { key, source } = loadKey({
+    device: String(arg('device', 'ws63-A')),
     demoKey: process.argv.includes('--demo-key'),
     key: arg('key', ''),
   });

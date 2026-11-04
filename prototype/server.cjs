@@ -12,6 +12,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
 const { createSerialNearfieldFactory } = require('./src/serial-nearfield.cjs');
+const { resolveDeviceKey } = require('./src/device-keys.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
 const { BlobStore, parseKey } = require('./src/blob-store.cjs');
 const { FakeMailer } = require('./src/mailer.cjs');
@@ -962,10 +963,22 @@ async function startServer({
   // 闸4 也走真板确认（docs/59）：默认关；开启后高危步骤必须板端按键，失败不回退模拟
   const gate4Nearfield = Boolean(nearfieldPort)
     && String(process.env.SAFE_OFFICE_GATE4_NEARFIELD || '') === '1';
-  // 一机一钥（docs/60）：板子配网后共享 demo key 就不再可用；
-  // 控制台/闸4 从 SAFE_OFFICE_SFC1_KEY（64 位 hex）读该设备的密钥
-  const envDeviceKey = String(process.env.SAFE_OFFICE_SFC1_KEY || '').trim();
-  const nearfieldKey = /^[0-9a-fA-F]{64}$/.test(envDeviceKey) ? Buffer.from(envDeviceKey, 'hex') : null;
+  // 一机一钥（docs/60）：钥匙优先级 = SAFE_OFFICE_SFC1_KEY > 设备表（SAFE_OFFICE_DEVICE 标签）；
+  // 生产模式不允许回退演示密钥；接真板却没有钥匙时直接启动失败（不带病运行）。
+  const production = String(process.env.SAFE_OFFICE_PRODUCTION || '') === '1';
+  const deviceLabel = String(process.env.SAFE_OFFICE_DEVICE || 'ws63-A').trim() || 'ws63-A';
+  let nearfieldKey = null;
+  try {
+    nearfieldKey = resolveDeviceKey({
+      label: deviceLabel,
+      envKey: String(process.env.SAFE_OFFICE_SFC1_KEY || '').trim(),
+      production,
+    }).key;
+  } catch (err) {
+    if (production || nearfieldPort) throw new Error(`确认密钥不可用：${err.message}`);
+    // 非生产且未接真板：保留默认演示密钥（虚拟设备路径）
+    console.warn(`⚠ 未加载到设备密钥，虚拟确认继续使用演示密钥：${err.message}`);
+  }
   let instance = service;
   if (!instance) {
     if (pairingCode) {
