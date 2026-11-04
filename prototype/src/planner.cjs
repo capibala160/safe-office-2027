@@ -10,6 +10,24 @@ const { TOOL_META } = require('./capabilities.cjs');
 const { prepareModelInput, resolveTargets } = require('./model-boundary.cjs');
 const { createRegistry } = require('./tool-registry.cjs');
 
+/**
+ * @typedef {{id: string, level: string, body: string}} Doc
+ * @typedef {{action: string, args?: Record<string, string>, reason?: string}} PlanStep
+ * @typedef {{
+ *   level: string,
+ *   code: string,
+ *   field: string,
+ *   reason: string,
+ *   step?: any,
+ * }} Finding
+ * @typedef {{level: string, reason: string}} PlanNote
+ * @typedef {{steps: PlanStep[], findings: Finding[], notes: PlanNote[]}} PlanResult
+ * @typedef {{
+ *   has: (name: string) => boolean,
+ *   requiredArgs: (name: string) => string[],
+ * }} RegistryLike
+ */
+
 // 工具目录与必需参数：从能力分级表（单一事实源）派生
 const KNOWN_TOOLS = new Set(Object.keys(TOOL_META));
 const REQUIRED_ARGS = Object.fromEntries(
@@ -20,6 +38,7 @@ const BUILTIN_REGISTRY = createRegistry();
 
 // 给云侧模型的修正反馈只能用“错误类型 + 动作名 + 字段名”，绝不能回传 finding.reason
 // 里的具体值（收件人/链接可能是模型从机密材料里编出来的，再送出端侧就是二次泄露）。
+/** @param {any} f @returns {string} */
 function safeFeedbackLine(f) {
   const raw = f && f.step && typeof f.step.action === 'string' ? f.step.action : '';
   // 非法动作名本身是模型生成的，可能夹带敏感串；只对“已知工具名”回显动作
@@ -28,22 +47,44 @@ function safeFeedbackLine(f) {
   return `- 动作 ${action} 未通过校验：${(f && f.code) || 'RULE_BLOCKED'}${field}`;
 }
 
+/**
+ * @param {any} rawSteps 模型输出，按不可信数据处理
+ * @param {{
+ *   command?: string,
+ *   docs?: Doc[],
+ *   delegation?: any,
+ *   delegationVerifier?: ((delegation: any, ctx: {to?: any, action?: any}) => {allow: boolean, reason: string}) | null,
+ *   registry?: RegistryLike | null,
+ *   authorizedTools?: string[] | null,
+ *   enforceToolAuthorization?: boolean,
+ * }} [options]
+ * @returns {PlanResult}
+ */
 function validatePlan(rawSteps, {
   command = '', docs = [], delegation = null, delegationVerifier = null, registry = BUILTIN_REGISTRY,
   authorizedTools = null, enforceToolAuthorization = true,
 } = {}) {
   const reg = registry || null;
+  /** @param {string} name */
   const hasTool = (name) => (reg ? reg.has(name) : KNOWN_TOOLS.has(name));
+  /** @param {string} name */
   const requiredOf = (name) => (reg ? reg.requiredArgs(name) : (REQUIRED_ARGS[name] || []));
+  /** @type {PlanStep[]} */
   const steps = [];
+  /** @type {Finding[]} */
   const findings = [];
+  /** @type {PlanNote[]} */
   const notes = [];
   const externalText = docs.map((d) => d.body).join('\n');
+  /** @type {Set<string>} */
   const authorizedDocIds = new Set((docs || []).map((d) => d.id));
+  /** @type {Set<string>} */
   const readIds = new Set();        // 计划中已读入的文档（按执行顺序）
+  /** @type {Set<string>} */
   const summarizedSoFar = new Set(); // 计划中已生成过的源文档（按执行顺序）
   const delegationIntent = /(以|用).{1,10}名义|代为?(发送|群发|发信)/.test(command);
   // 生成稿绑定：同一计划里总结过 X，就必须发 draft_X——不能让模型把源文档直接发出去
+  /** @type {Set<string>} */
   const summarizedSources = new Set();
   for (const s of Array.isArray(rawSteps) ? rawSteps : []) {
     if (s && s.action === 'summarize' && s.args && typeof s.args.of === 'string') summarizedSources.add(s.args.of);
@@ -86,7 +127,9 @@ function validatePlan(rawSteps, {
     }
     // 来源溯源：出站目标（收件人 / 上传地址）的出处检查
     if (['sendInternalEmail', 'sendExternalEmail'].includes(s.action) && s.args && s.args.to) {
-      const fromCommand = (command.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || []).includes(s.args.to);
+      /** @type {string[]} */
+      const emailsInCommand = command.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || [];
+      const fromCommand = emailsInCommand.includes(s.args.to);
       const fromExternal = externalText.includes(s.args.to);
       if (!fromCommand) {
         findings.push({
@@ -98,7 +141,9 @@ function validatePlan(rawSteps, {
       }
     }
     if (s.action === 'uploadToCloud' && s.args && s.args.url) {
-      const fromCommand = (command.match(/https:\/\/[^\s，。；）)]+/g) || []).includes(s.args.url);
+      /** @type {string[]} */
+      const urlsInCommand = command.match(/https:\/\/[^\s，。；）)]+/g) || [];
+      const fromCommand = urlsInCommand.includes(s.args.url);
       const fromExternal = externalText.includes(s.args.url);
       if (!fromCommand) {
         findings.push({
@@ -136,6 +181,7 @@ function validatePlan(rawSteps, {
     // 需要"先读入"的动作若缺少前置 readDoc：仅在文档已授权时自动补一步；
     // 未授权的文档不补，直接移除并记 finding（不能靠补步骤绕过授权）。
     // 调用方没传 docs（纯结构校验）时跳过依赖检查，保持 validatePlan 的旧契约。
+    /** @type {string[] | null} */
     const needRead = authorizedDocIds.size > 0 ? [] : null;
     if (needRead) {
     if (s.action === 'summarize' && s.args && s.args.of) needRead.push(s.args.of);
@@ -180,6 +226,16 @@ class GuardedPlanner {
   // disabledLayers：仅评测消融用（如 ['plan']）。默认空集合，行为与之前完全一致。
   // maxPlanRepairs：模型计划被校验拦下后，最多让模型修正几次。只对云侧真实模型生效，
   //   且修正过程不改变授权边界（令牌、收件人溯源、目标回填全部按原指令重跑）。
+  /**
+   * @param {{
+   *   llm: {deployment?: string, plan: Function},
+   *   audit: {append: (type: string, data?: any) => void},
+   *   risk: {add: (score: number, reason: string) => void},
+   *   registry?: RegistryLike,
+   *   disabledLayers?: string[],
+   *   maxPlanRepairs?: number | string,
+   * }} options
+   */
   constructor({ llm, audit, risk, registry = BUILTIN_REGISTRY, disabledLayers = [], maxPlanRepairs = 1 }) {
     this.llm = llm;
     this.audit = audit;
@@ -189,10 +245,26 @@ class GuardedPlanner {
     this.maxPlanRepairs = Math.max(0, Number(maxPlanRepairs) || 0);
   }
 
+  /** @param {string} layer */
   _ablate(layer) {
     return this.disabledLayers.has(layer);
   }
 
+  /**
+   * @param {string} command
+   * @param {{
+   *   docs?: Doc[],
+   *   modelLocation?: string,
+   *   commandLevel?: string,
+   *   delegation?: any,
+   *   delegationVerifier?: ((delegation: any, ctx: {to?: any, action?: any}) => {allow: boolean, reason: string}) | null,
+   *   authorizedTools?: string[] | null,
+   *   authorizedDocs?: string[] | null,
+   *   authorizedAudios?: string[] | null,
+   *   authorizedImages?: string[] | null,
+   * }} [options]
+   * @returns {Promise<{steps: PlanStep[], findings: Finding[], notes: PlanNote[], contextInfo: any, ablated?: string[]}>}
+   */
   async makePlan(command, {
     docs = [], modelLocation, commandLevel, delegation = null, delegationVerifier = null,
     authorizedTools = null, authorizedDocs = null,
@@ -220,13 +292,14 @@ class GuardedPlanner {
     });
 
     // 2) 本次实际授权：只作提示词上下文，执行期仍按令牌/溯源/闸门校验
+    const authorizedToolList = Array.isArray(authorizedTools) ? authorizedTools : [];
     const hasAuth = Array.isArray(authorizedTools);
     const media = [
-      (authorizedAudios || []).length ? `可转写录音：${authorizedAudios.join('、')}` : '',
-      (authorizedImages || []).length ? `可识别图片：${authorizedImages.join('、')}` : '',
+      authorizedAudios && authorizedAudios.length ? `可转写录音：${authorizedAudios.join('、')}` : '',
+      authorizedImages && authorizedImages.length ? `可识别图片：${authorizedImages.join('、')}` : '',
     ].filter(Boolean).join('；');
     const authNote = hasAuth
-      ? `【本次实际授权】可用工具：${authorizedTools.join('、') || '无'}；可读文档：${(authorizedDocs || []).join('、') || '无'}。`
+      ? `【本次实际授权】可用工具：${authorizedToolList.join('、') || '无'}；可读文档：${(authorizedDocs || []).join('、') || '无'}。`
         + (media ? `\n本次可处理的媒体：${media}。` : '')
         + '只能使用这里列出的工具与文档；未列出的不要调用，也不要编造 id。'
       : '';
@@ -251,11 +324,13 @@ class GuardedPlanner {
     }
 
     // 3) 计划校验（出模型后的第一道保险）
+    /** @param {any} stepsIn @returns {PlanResult} */
     const validate = (stepsIn) => validatePlan(stepsIn, {
       command, docs, delegation, delegationVerifier, registry: this.registry, authorizedTools,
       enforceToolAuthorization: true,
     });
     let outcome = validate(resolved);
+    /** @param {PlanResult} r @returns {number} */
     const blockCount = (r) => r.findings.filter((f) => f.level === 'block').length;
 
     // 3.5) 有限次计划修正：仅云侧真实模型；修正不扩大授权（仍按原指令/原令牌重验）
@@ -288,7 +363,7 @@ class GuardedPlanner {
         this.audit.append('计划修正结果', { before, after, adopted, steps: adopted ? resolved2.length : resolved.length });
       } catch (err) {
         // 修正失败不回滚第一次的校验结果：已有的坏步骤已经被移除，执行是安全的
-        this.audit.append('计划修正失败', { reason: err && err.message ? err.message : String(err) });
+        this.audit.append('计划修正失败', { reason: err instanceof Error ? err.message : String(err) });
       }
     }
 

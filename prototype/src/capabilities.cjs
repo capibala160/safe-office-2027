@@ -67,6 +67,19 @@ const CAPABILITIES = [
 
 // 工具元数据：单一事实源——规划器工具目录 / 必需参数 / 分级 / 给模型的用法说明全部由此派生。
 // desc/example/dependsOn 只影响提示词（帮助真实模型少走弯路），不改变任何执行期校验。
+/**
+ * @typedef {Object} ToolMeta
+ * @property {string} capability
+ * @property {string} level
+ * @property {string[]} requiredArgs
+ * @property {string} [desc]
+ * @property {boolean} [outbound]
+ * @property {boolean} [irreversible]
+ * @property {string[]} [dependsOn]
+ * @property {{action: string, args: Record<string, string>}} [example]
+ */
+
+/** @type {Record<string, ToolMeta>} */
 const TOOL_META = {
   readDoc: {
     capability: '文件访问', level: 'L1', requiredArgs: ['id'],
@@ -139,6 +152,7 @@ const TOOL_META = {
   },
 };
 
+/** @param {string} tool */
 function capabilityOf(tool) {
   return TOOL_META[tool] ? TOOL_META[tool].capability : '(未登记)';
 }

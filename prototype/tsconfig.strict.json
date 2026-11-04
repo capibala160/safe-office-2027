@@ -18,6 +18,11 @@
     "src/audit-sign.cjs",
     "src/ws63-protocol.cjs",
     "src/guard.cjs",
-    "src/store.cjs"
+    "src/store.cjs",
+    "src/capabilities.cjs",
+    "src/sandbox.cjs",
+    "src/model-boundary.cjs",
+    "src/tool-registry.cjs",
+    "src/planner.cjs"
   ]
 }

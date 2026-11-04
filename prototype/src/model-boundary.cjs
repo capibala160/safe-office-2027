@@ -9,7 +9,24 @@ const { sanitizeInput, redact } = require('./guard.cjs');
 // 匹配式与 plan 校验层的溯源式保持一致（邮箱 + https 链接）。
 const TARGET_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|https:\/\/[^\s，。；）)]+/g;
 
+/**
+ * @typedef {{id: string, level: string, body: string}} Doc
+ * @typedef {{deployment?: string, plan: Function}} Llm
+ * @typedef {{id: string, level: string, withheld: boolean, sanitized: boolean|null, text: string}} ContextBlock
+ * @typedef {{
+ *   command: string,
+ *   blocks: ContextBlock[],
+ *   location: 'local'|'cloud',
+ *   targets: Record<string, string>,
+ * }} PreparedInput
+ */
+
+/**
+ * @param {string} command
+ * @returns {{text: string, targets: Record<string, string>}}
+ */
 function protectTargets(command) {
+  /** @type {Record<string, string>} */
   const targets = {};
   let n = 0;
   const text = String(command).replace(TARGET_RE, (m) => {
@@ -23,6 +40,12 @@ function protectTargets(command) {
 }
 
 // 严格整值匹配：只换回端侧登记过的占位符；其余原样保留交计划校验处置
+/**
+ * 模型输出是不可信数据：入参按 any 处理，真正约束在下游计划校验。
+ * @param {any} rawSteps
+ * @param {Record<string, string>} [targets]
+ * @returns {any}
+ */
 function resolveTargets(rawSteps, targets = {}) {
   if (!Array.isArray(rawSteps) || Object.keys(targets).length === 0) return rawSteps;
   return rawSteps.map((s) => {
@@ -38,8 +61,17 @@ function resolveTargets(rawSteps, targets = {}) {
 }
 
 // local 必须由受信任的适配器声明；调用参数只能收紧，不能放宽。
+/**
+ * @param {Llm} llm
+ * @param {string} command
+ * @param {Doc[]} docs
+ * @param {{modelLocation?: string, commandLevel?: string, sanitize?: boolean}} [options]
+ * @returns {PreparedInput}
+ */
 function prepareModelInput(llm, command, docs, { modelLocation, commandLevel = '内部', sanitize = true } = {}) {
+  /** @type {'local'|'cloud'} */
   const location = llm.deployment === 'local' && modelLocation !== 'cloud' ? 'local' : 'cloud';
+  /** @type {Record<string, string>} */
   let targets = {};
   if (location === 'cloud') {
     if (!['公开', '内部'].includes(commandLevel)) throw new Error('模型边界拒绝：机密或未知密级指令不能送云');

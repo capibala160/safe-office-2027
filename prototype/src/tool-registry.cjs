@@ -11,6 +11,59 @@ const { TOOL_META } = require('./capabilities.cjs');
 const { SANDBOX_PROFILES } = require('./sandbox.cjs');
 const { HIGH_RISK_ACTIONS, OUTBOUND_ACTIONS } = require('./guard.cjs');
 
+/**
+ * @typedef {{
+ *   local?: boolean,
+ *   fsRead?: {scope: string, arg: string},
+ *   fsWrite?: {scope: string, arg: string},
+ *   net?: string,
+ *   physical?: boolean,
+ * }} SandboxSpec
+ * @typedef {{role: string, decision: 'allow'|'confirm'|'deny'}} ToolPolicy
+ * @typedef {{
+ *   name?: string,
+ *   capability?: string,
+ *   level?: string,
+ *   requiredArgs?: string[],
+ *   sandbox?: SandboxSpec,
+ *   outbound?: boolean,
+ *   outboundArg?: string | null,
+ *   irreversible?: boolean,
+ *   highRisk?: boolean,
+ *   deferred?: boolean,
+ *   protocolAction?: number | string | null,
+ *   policies?: ToolPolicy[],
+ *   source?: string,
+ *   description?: string,
+ *   inputSchema?: unknown,
+ *   mcpName?: string | null,
+ *   executor?: Function,
+ * }} ToolInput
+ * @typedef {{
+ *   name: string,
+ *   capability: string,
+ *   level: string,
+ *   requiredArgs: string[],
+ *   sandbox: SandboxSpec,
+ *   outbound: boolean,
+ *   outboundArg: string | null,
+ *   irreversible: boolean,
+ *   highRisk: boolean,
+ *   deferred: boolean,
+ *   protocolAction: number | null,
+ *   policies: readonly ToolPolicy[],
+ *   source: string,
+ *   description: string,
+ *   inputSchema: unknown,
+ *   mcpName: string | null,
+ *   executor: Function | null,
+ * }} ToolDefinition
+ * @typedef {{
+ *   decide?: (role: string, tool: string) => string,
+ *   update?: (role: string, tool: string, decision: string, meta: Record<string, any>) => void,
+ * }} PolicyLike
+ */
+
 const BUILTIN_DEFERRED_ACTIONS = new Map([
   ['sendInternalEmail', 1],
   ['sendExternalEmail', 1],
@@ -25,13 +78,23 @@ const LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
 const DECISIONS = new Set(['allow', 'confirm', 'deny']);
 const SANDBOX_KINDS = ['local', 'fsRead', 'fsWrite', 'net', 'physical'];
 
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, any>}
+ */
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @returns {string[]}
+ */
 function normalizeStringList(value, name) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new TypeError(`${name} 必须是字符串数组`);
+  /** @type {string[]} */
   const out = [];
   for (const item of value) {
     if (typeof item !== 'string' || !item.trim()) throw new TypeError(`${name} 只能包含非空字符串`);
@@ -40,6 +103,11 @@ function normalizeStringList(value, name) {
   return out;
 }
 
+/**
+ * @param {unknown} sandbox
+ * @param {string} name
+ * @returns {SandboxSpec}
+ */
 function normalizeSandbox(sandbox, name) {
   if (!isPlainObject(sandbox)) {
     throw new TypeError(`工具「${name}」必须显式声明 sandbox 档案（fail-closed）`);
@@ -67,8 +135,13 @@ function normalizeSandbox(sandbox, name) {
   return { [kind]: { scope: spec.scope, arg: spec.arg } };
 }
 
+/**
+ * @param {unknown} policies
+ * @returns {ToolPolicy[]}
+ */
 function normalizePolicies(policies) {
   if (!Array.isArray(policies)) throw new TypeError('policies 必须是数组');
+  /** @type {ToolPolicy[]} */
   const out = [];
   for (const item of policies) {
     if (!isPlainObject(item) || typeof item.role !== 'string' || !item.role.trim()) {
@@ -82,6 +155,11 @@ function normalizePolicies(policies) {
   return out;
 }
 
+/**
+ * @param {ToolInput} input
+ * @param {{source?: string, builtin?: boolean}} [options]
+ * @returns {ToolDefinition}
+ */
 function normalizeDefinition(input, { source, builtin = false } = {}) {
   if (!isPlainObject(input)) throw new TypeError('工具定义必须是对象');
   const name = typeof input.name === 'string' ? input.name.trim() : '';
@@ -90,7 +168,7 @@ function normalizeDefinition(input, { source, builtin = false } = {}) {
   }
   const capability = typeof input.capability === 'string' ? input.capability.trim() : '';
   if (!capability) throw new TypeError(`工具「${name}」缺少 capability`);
-  const level = input.level;
+  const level = String(input.level ?? '');
   if (!LEVELS.has(level)) throw new TypeError(`工具「${name}」的 level 必须是 L1–L4`);
   const requiredArgs = normalizeStringList(input.requiredArgs, `工具「${name}」requiredArgs`);
   const sandbox = normalizeSandbox(input.sandbox, name);
@@ -110,7 +188,7 @@ function normalizeDefinition(input, { source, builtin = false } = {}) {
     ? null
     : Number(input.protocolAction);
   if (deferred) {
-    if (!Number.isInteger(protocolAction) || protocolAction < 1 || protocolAction > 4) {
+    if (protocolAction === null || !Number.isInteger(protocolAction) || protocolAction < 1 || protocolAction > 4) {
       throw new TypeError(`工具「${name}」deferred=true 时 protocolAction 必须是 1–4`);
     }
   } else if (protocolAction !== null) {
@@ -148,8 +226,9 @@ function normalizeDefinition(input, { source, builtin = false } = {}) {
 }
 
 class ToolRegistry {
+  /** @param {{seed?: boolean}} [options] */
   constructor({ seed = true } = {}) {
-    this.tools = new Map();
+    this.tools = /** @type {Map<string, ToolDefinition>} */ (new Map());
     if (seed) this._seedBuiltins();
   }
 
@@ -180,8 +259,10 @@ class ToolRegistry {
     this._seedBuiltins();
   }
 
+  /** @param {string} name */
   has(name) { return this.tools.has(name); }
 
+  /** @param {string} name @returns {ToolDefinition | null} */
   get(name) { return this.tools.get(name) || null; }
 
   list() { return [...this.tools.values()]; }
@@ -204,6 +285,11 @@ class ToolRegistry {
 
   names() { return [...this.tools.keys()]; }
 
+  /**
+   * @param {ToolInput} def
+   * @param {{source?: string}} [options]
+   * @returns {ToolDefinition}
+   */
   validate(def, { source = def && def.source ? def.source : 'custom' } = {}) {
     const normalized = normalizeDefinition(def, { source, builtin: false });
     if (this.tools.has(normalized.name)) {
@@ -212,6 +298,11 @@ class ToolRegistry {
     return normalized;
   }
 
+  /**
+   * @param {ToolInput} def
+   * @param {{policy?: PolicyLike | null, source?: string}} [options]
+   * @returns {ToolDefinition}
+   */
   register(def, { policy = null, source = def && def.source ? def.source : 'custom' } = {}) {
     const normalized = this.validate(def, { source });
     this.tools.set(normalized.name, normalized);
@@ -219,11 +310,13 @@ class ToolRegistry {
     return normalized;
   }
 
+  /** @param {string} name */
   isHighRisk(name) {
     const t = this.get(name);
     return !!(t && t.highRisk);
   }
 
+  /** @param {string} name */
   isOutbound(name) {
     const t = this.get(name);
     return !!(t && t.outbound);
@@ -235,41 +328,51 @@ class ToolRegistry {
 
   deferredNames() { return new Set(this.list().filter((t) => t.deferred).map((t) => t.name)); }
 
+  /** @param {string} name @returns {number | null} */
   protocolAction(name) {
     const t = this.get(name);
     return t && t.deferred ? t.protocolAction : null;
   }
 
+  /** @returns {Record<string, number | null>} */
   protocolMap() {
+    /** @type {Record<string, number | null>} */
     const out = {};
     for (const t of this.list()) if (t.deferred) out[t.name] = t.protocolAction;
     return out;
   }
 
+  /** @param {string} name @returns {SandboxSpec | null} */
   sandboxProfile(name) {
     const t = this.get(name);
     return t ? t.sandbox : null;
   }
 
+  /** @param {string} name @returns {string[]} */
   requiredArgs(name) {
     const t = this.get(name);
     return t ? [...t.requiredArgs] : [];
   }
 
+  /** @param {string} name @returns {string | null} */
   outboundArg(name) {
     const t = this.get(name);
     return t ? t.outboundArg : null;
   }
 
+  /** @param {string} role @param {PolicyLike} policy @returns {string[]} */
   toolsForRole(role, policy) {
     if (!policy || typeof policy.decide !== 'function') {
       throw new TypeError('toolsForRole 需要 PolicyEngine');
     }
+    // 保留 this 绑定：PolicyEngine.decide 依赖实例状态
+    const decide = policy.decide.bind(policy);
     return this.list()
-      .filter((t) => policy.decide(role, t.name) !== 'deny')
+      .filter((t) => decide(role, t.name) !== 'deny')
       .map((t) => t.name);
   }
 
+  /** @param {ToolDefinition} def @param {PolicyLike | null} policy */
   _applyDefinitionPolicies(def, policy) {
     if (!policy || typeof policy.update !== 'function') return;
     for (const item of def.policies) {
@@ -280,6 +383,7 @@ class ToolRegistry {
     }
   }
 
+  /** @param {PolicyLike} policy */
   applyPolicies(policy) {
     for (const def of this.list()) this._applyDefinitionPolicies(def, policy);
     return this;
@@ -288,6 +392,7 @@ class ToolRegistry {
 
 const defaultRegistry = new ToolRegistry();
 
+/** @param {{seed?: boolean}} [options] */
 function createRegistry(options) {
   return new ToolRegistry(options);
 }
