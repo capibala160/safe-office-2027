@@ -1175,7 +1175,12 @@
         setShareStatus(`共享中：${target} · ${surface}`, 'pass');
         toast('屏幕共享已开始（服务端已记审计）', 'ok');
       } catch (err) {
+        // 启动接口失败：停掉已经拿到的画面，避免「页面说失败、系统还在采集」
+        if (shareStream) { shareStream.getTracks().forEach((t) => t.stop()); shareStream = null; }
+        if (shareVideo) { shareVideo.srcObject = null; shareVideo.hidden = true; }
+        shareSession = null;
         shareStartBtn.disabled = false;
+        if (shareStopBtn) shareStopBtn.disabled = true;
         setShareStatus(c.errorText(err), 'warn');
       }
     });

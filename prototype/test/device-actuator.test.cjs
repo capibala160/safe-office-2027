@@ -130,3 +130,26 @@ test('映射表：unlock/lock/beep/silence 只落在 IO13/IO10', () => {
   assert.deepEqual(mapDeviceOp('蜂鸣器', 'silence'), { pin: 10, level: 0 });
   assert.equal(mapDeviceOp('门锁', 'unknown'), null);
 });
+
+test('执行器：首次打开被占用 → 短暂重试后成功', async () => {
+  const key = Buffer.alloc(32, 9);
+  let calls = 0;
+  const actuator = createSerialActuator({
+    portPath: 'COM-TEST',
+    key,
+    openSerial: () => {
+      calls += 1;
+      if (calls === 1) {
+        const port = new EventEmitter();
+        port.write = () => {};
+        port.close = (cb) => { if (cb) cb(); };
+        setImmediate(() => port.emit('error', new Error('Opening COM11: Access denied')));
+        return port;
+      }
+      return fakePort({ key });
+    },
+  });
+  const ack = await actuator.actuate({ device: '门锁', op: 'unlock' });
+  assert.equal(ack.status, 0);
+  assert.equal(calls, 2, '占用后应重试一次');
+});

@@ -38,14 +38,20 @@ function createSerialNearfieldFactory({
     const created = new Transport({ port, timeoutMs });
     // SerialTransport.close() 只摘监听、不关端口；这里补上，否则进程会挂住并一直占着 COM 口
     const detach = typeof created.close === 'function' ? created.close.bind(created) : null;
-    created.close = () => {
+    // 返回 Promise 并在端口真正关闭后 resolve：调用方（设备执行）随后要独占同一串口，
+    // 不等 close 完成就直接 open 会 "Access denied"（2026-11-04 真板复现）。
+    created.close = () => new Promise((resolve) => {
       if (detach) {
         try { detach(); } catch { /* ignore */ }
       }
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; resolve(); } };
       try {
-        if (port.isOpen !== false && typeof port.close === 'function') port.close(() => {});
-      } catch { /* ignore */ }
-    };
+        if (port.isOpen === false || typeof port.close !== 'function') { done(); return; }
+        port.close(() => done());
+        setTimeout(done, 500); // 驱动未回调时兜底，避免调用方永久挂起
+      } catch { done(); }
+    });
     const drop = () => {
       if (transport === created) transport = null;
       try { created.close(); } catch { /* ignore */ }

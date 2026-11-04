@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.52.1');
+  assert.equal(bootstrap.state.version, '0.52.2');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -1013,4 +1013,55 @@ test('设备联动：确认后执行真板 GPIO（stub）；失败转 unknown �
     createdBy: 'alice',
   }), /设备执行失败/);
   assert.ok(s2.audit.entries.some((e) => e.kind === '设备执行失败'));
+});
+
+test('真板路径：请求取消时，板端批准也不执行', async (t) => {
+  const key = Buffer.alloc(32, 0x42);
+  const device = new VirtualDevice({ key, deviceId: 'ws63-A', decide: () => 'approve' });
+  const transport = createLoopbackTransport(device);
+  const { service } = setup({
+    service: { nearfieldKey: key, deviceId: 'ws63-A', nearfieldTransportFactory: async () => transport },
+  });
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const op = run.operations[0];
+  const challenge = service.beginChallenge(op.operationId);
+  const decided = await service.decideChallenge(challenge.challengeId, 'cancel');
+  assert.equal(decided.ok, false);
+  assert.equal(decided.outcome, 'cancelled');
+  assert.equal(decided.code, 'DECISION');
+  assert.equal(decided.operation.state, 'rejected');
+  assert.equal(service.mailer.calls.length, 0, '取消不得触发发送');
+  assert.ok(service.audit.entries.some((e) => e.kind === '取消优先于板端决定'));
+});
+
+test('设备执行前先关闭近场串口，避免与确认争用同一 COM 口', async (t) => {
+  const order = [];
+  const factory = async () => ({ send: async () => null });
+  factory.close = async () => { order.push('close-transport'); };
+  const actuator = {
+    actuate: async () => { order.push('actuate'); return { status: 0, pin: 13, level: 1 }; },
+  };
+  const { service } = setup({ service: { nearfieldTransportFactory: factory, actuator } });
+  t.after(() => service.close());
+  service._nearfieldTransport = { send: async () => null };
+  await service._applyBusinessAction({
+    protocolAction: 4, operationId: 'op-3', recipient: '门锁',
+    body: '{"device":"门锁","op":"unlock"}', createdBy: 'alice',
+  });
+  assert.deepEqual(order, ['close-transport', 'actuate']);
+  assert.equal(service._nearfieldTransport, null);
+});
+
+test('屏幕共享：只能结束自己的会话，管理员例外', (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const { sessionId } = service.startScreenShare({ target: '会议室大屏', actor: 'alice' });
+  assert.throws(
+    () => service.stopScreenShare({ sessionId, actor: 'bob', role: '员工' }),
+    /只能结束自己的共享会话/,
+  );
+  assert.ok(service.audit.entries.some((e) => e.kind === '屏幕共享越权停止'));
+  const stopped = service.stopScreenShare({ sessionId, actor: 'admin', role: '管理员' });
+  assert.equal(stopped.target, '会议室大屏');
 });

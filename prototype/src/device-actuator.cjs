@@ -128,7 +128,18 @@ function createSerialActuator({
     if (!target) {
       throw Object.assign(new Error(`没有映射到物理动作：${device} ${op}`), { code: 'ACTUATOR_MAP' });
     }
-    const ack = await send(target.pin, target.level);
+    // 确认端刚释放串口时驱动可能还没放开：占用类错误短暂重试（最多 3 次）
+    let ack;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        ack = await send(target.pin, target.level);
+        break;
+      } catch (err) {
+        const busy = /Access denied|EBUSY|Resource busy|busy/i.test(String(err.message || ''));
+        if (attempt >= 3 || !busy) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+    }
     if (ack.status !== 0) {
       throw Object.assign(new Error(`设备执行失败（status=${ack.status}）`), { code: 'ACTUATOR_STATUS' });
     }

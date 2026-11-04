@@ -45,7 +45,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.52.1';
+const VERSION = '0.52.2';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -2804,6 +2804,22 @@ class ConsoleService {
       return { ok: false, outcome: 'timeout', code: 'TIMEOUT', message: '设备无响应', operation: this._operationView(operation) };
     }
 
+    // 真板路径：请求取消时，板端即使返回批准也不得执行（2026-11-04 评审）
+    if (decision === 'cancel' && this.nearfieldTransportFactory) {
+      this.confirmer.cancel(challenge.pending);
+      const rejected = this.store.setOperationState(operation.operationId, 'rejected');
+      challenge.state = 'cancelled';
+      challenge.result = { code: 'DECISION', cancelled: true };
+      this._pushHistory(challenge, { code: 'DECISION', outcome: 'cancelled' });
+      this.audit.append('取消优先于板端决定', {
+        operationId: operation.operationId, challengeId: challenge.challengeId,
+      });
+      return {
+        ok: false, outcome: 'cancelled', code: 'DECISION',
+        message: '用户取消：板端回执不执行', operation: this._operationView(rejected),
+      };
+    }
+
     return this._completeChallenge(challenge, reply);
   }
 
@@ -3083,10 +3099,17 @@ class ConsoleService {
     return { sessionId, target: name, surface: surfaceType, startedAt: this._iso(startedAt) };
   }
 
-  stopScreenShare({ sessionId, actor = null } = {}) {
+  stopScreenShare({ sessionId, actor = null, role = null } = {}) {
     const id = String(sessionId || '').trim();
     const share = this._screenShares.get(id);
     if (!share) throw new ConsoleError('NOT_FOUND', '共享会话不存在或已结束', 404);
+    // 会话归属：只能停自己的；管理员/审计员例外
+    if (share.actor && actor && share.actor !== actor && !['管理员', '审计员'].includes(role)) {
+      this._withAuditActor(actor, () => this.audit.append('屏幕共享越权停止', {
+        sessionId: id, owner: share.actor, actor,
+      }));
+      throw new ConsoleError('FORBIDDEN', '只能结束自己的共享会话', 403);
+    }
     this._screenShares.delete(id);
     const durationMs = Math.max(0, this.now() - share.startedAt);
     this._withAuditActor(actor, () => {
@@ -3820,6 +3843,12 @@ class ConsoleService {
       const record = { operationId: operation.operationId, device, op, at: this._iso() };
       if (this.actuator) {
         try {
+          // 确认串口与执行串口是同一个：先把近场传输关掉，否则执行器打开会 Access denied。
+          // 下一次发起挑战时工厂会懒重连。
+          if (this.nearfieldTransportFactory && typeof this.nearfieldTransportFactory.close === 'function') {
+            try { await this.nearfieldTransportFactory.close(); } catch { /* ignore */ }
+          }
+          this._nearfieldTransport = null;
           const ack = await this.actuator.actuate({ device, op });
           record.actuated = true;
           record.pin = ack.pin;
