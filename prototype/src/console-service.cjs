@@ -5,7 +5,7 @@
 //   - 命令：规划 → 五道闸 → 转交 → 冻结操作
 //   - 冻结操作：内网邮件策略自动确认；外发/删除/打印/设备走 WS63 虚拟确认
 //   - 治理：审计链、风险复核、双链校验、报告、重置
-//   边界：业务动作全部模拟；WS63 是虚拟设备；仅本机演示。
+//   边界：业务动作按配置真实/模拟；WS63 支持虚拟设备与真板；仅本机演示。
 // ============================================================
 const crypto = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
@@ -44,7 +44,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.49.0';
+const VERSION = '0.50.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -56,7 +56,7 @@ const ACTION_PROTOCOL = {
   deviceControl: 4,
 };
 const BOUNDARY = [
-  '业务动作按配置真实/模拟：SMTP/IMAP/打印/日历/文档可真实，屏幕共享与录音转写仍为模拟',
+  '业务动作按配置真实/模拟：SMTP/IMAP/打印/日历/文档/屏幕共享可真实，录音转写仍为模拟',
   'WS63 为虚拟设备或手机确认端（非硬件）；真实 SLE/串口/按键/OLED 待上板',
   '默认仅监听 127.0.0.1；启用登录后按角色授权；租户=登录用户名',
   '操作/审计可落盘；风险计量在内存',
@@ -237,6 +237,8 @@ class ConsoleService {
     this.agentSeq = 0;
     this.runs = [];
     this.liveRuns = new Map();
+    // 屏幕共享会话（内存）：浏览器 getDisplayMedia 采集，服务端只记审计
+    this._screenShares = new Map();
     this.maxQueuedCommands = Math.max(1, Number(maxQueuedCommands) || 20);
     this.maxLiveRuns = Math.max(this.maxQueuedCommands + 1, Number(maxLiveRuns) || 100);
     this._queuedTasks = 0;
@@ -3052,6 +3054,43 @@ class ConsoleService {
     };
   }
 
+  // ---------- 屏幕共享（2026-11-04：从模拟转为真实投屏） ----------
+  // 画面由浏览器 getDisplayMedia 采集，不经过服务器；服务端只记录
+  // 「谁、何时、共享到哪个目标、什么 surface、持续多久」，并写审计链。
+  startScreenShare({ target = '', surface = 'unknown', actor = null } = {}) {
+    const name = String(target || '').trim();
+    if (!name) throw new ConsoleError('BAD_REQUEST', '缺少共享目标', 400);
+    if (name.length > 64) throw new ConsoleError('BAD_REQUEST', '共享目标过长（≤64 字）', 400);
+    const surfaceType = ['monitor', 'window', 'browser', 'unknown'].includes(surface) ? surface : 'unknown';
+    const sessionId = crypto.randomUUID();
+    const startedAt = this.now();
+    this._screenShares.set(sessionId, { target: name, surface: surfaceType, startedAt, actor: actor || '' });
+    this._withAuditActor(actor, () => {
+      this.audit.append('屏幕共享开始', { target: name, surface: surfaceType, sessionId });
+    });
+    return { sessionId, target: name, surface: surfaceType, startedAt: this._iso(startedAt) };
+  }
+
+  stopScreenShare({ sessionId, actor = null } = {}) {
+    const id = String(sessionId || '').trim();
+    const share = this._screenShares.get(id);
+    if (!share) throw new ConsoleError('NOT_FOUND', '共享会话不存在或已结束', 404);
+    this._screenShares.delete(id);
+    const durationMs = Math.max(0, this.now() - share.startedAt);
+    this._withAuditActor(actor, () => {
+      this.audit.append('屏幕共享结束', {
+        target: share.target, surface: share.surface, durationMs, sessionId: id,
+      });
+    });
+    return { target: share.target, surface: share.surface, durationMs };
+  }
+
+  listScreenShares() {
+    return [...this._screenShares.entries()].map(([sessionId, s]) => ({
+      sessionId, target: s.target, surface: s.surface, startedAt: this._iso(s.startedAt), actor: s.actor,
+    }));
+  }
+
   // ---------- 治理 ----------
   _policyMatrix() {
     const matrix = {};
@@ -3727,6 +3766,7 @@ class ConsoleService {
     this.agentSeq = 0;
     this.runs = [];
     this.liveRuns = new Map();
+    this._screenShares = new Map();
     this._queuedTasks = 0;
     this._runChain = Promise.resolve();
     this._initWorkspace();

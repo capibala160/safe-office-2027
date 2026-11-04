@@ -3,6 +3,7 @@
 [![CI](https://github.com/capibala160/safe-office-2027/actions/workflows/ci.yml/badge.svg)](https://github.com/capibala160/safe-office-2027/actions/workflows/ci.yml)
 
 > **CI 状态（2026-11-04）**：公开镜像 [github.com/capibala160/safe-office-2027](https://github.com/capibala160/safe-office-2027) 的 GitHub Actions `ci` **每次 push 自动运行并已通过**（最新 run [41834702366](https://github.com/capibala160/safe-office-2027/actions/runs/41834702366)，commit `81ebbc6`，1m28s）：lint + typecheck + strict typecheck + 单测 + Playwright E2E 全部在 Ubuntu runner 跑过。**GitCode 流水线是内测功能，需申请开通**（客服 `kefu@atomgit.com` 或先认证 G-star，每周五开通），不要写成「GitCode CI 已通过」。
+> **v0.50 屏幕共享真实化（2026-11-04）**：`shareScreen` 从「返回一句已开启」变成**真实投屏 + 可审计**——设备页新增屏幕共享卡片，浏览器 `getDisplayMedia` 采集并本地预览（**画面不上传服务器**），服务端记录目标/surface/时长并写审计链；离开页面或浏览器停止共享会自动停采集并写结束审计。新增 `POST /api/screenshare/start|stop`；运行时会话文案与能力表同步。**556 项测试（554 通过 + 2 跳过）+ 11 项 E2E 全绿**。详见 [屏幕共享真实化](docs/63-屏幕共享真实化-2026-11-04.md)。
 > **v0.47 演示自检 + 备份/恢复 + 审计定时导出 + strict 扩展（2026-11-03）**：① `npm run demo:preflight`（CLI / `GET /api/preflight` / 工作台卡片）一次性检查 Node、数据目录、登录、审计、签名、外部快照、模型、SMTP/IMAP、日历、打印、ClamAV、Edge、演示包、端口，分 `ok/warn/fail`；② `npm run backup` / `npm run restore` 全量备份操作库/文档库/附件/审计链/归档/keys 等，带 sha256 manifest，默认排除明文初始密码与 `config.env`，恢复默认拒绝覆盖、`--force` 先留档；③ 审计快照支持**定时导出与按份数保留**（`SAFE_OFFICE_AUDIT_EXPORT_INTERVAL_MIN/KEEP`）；④ `typecheck:strict` 扩到 `guard.cjs`/`store.cjs`，新增 3 条 E2E（外部快照、账号禁用、自动回信）。**463 项测试（461 通过 + 2 跳过）+ 11 项 E2E**。详见 [演示自检与备份](docs/55-演示自检与备份-2026-11-03.md)。
 > **v0.46.4 异步任务失败稳定性（2026-11-03）**：`startCommand` 的失败分支不再 rethrow，错误记录在 liveRun（`status=error` / `stage=失败` / `error` / `result`），`live.done` 正常 resolve，避免调用方只拿 runId、没人接住 Promise 时触发 `unhandledRejection`。新增回归测试（不 await `live.done`，监听 `unhandledRejection`）。**453 项测试（451 通过 + 2 跳过）+ 8 E2E**。
 > **v0.46.3 入口一致性 + 测试稳定性（2026-11-03）**：① 同步 `runCommand` 与异步 `startCommand` **共用同一排队计数/限流**，HTTP `/api/commands` 不再绕过队列上限；② 审计恢复测试改为解析 JSON 后按 `detail.x === 999` 断言，消除哈希/时间戳含 `999` 的偶发误报。**453 项测试（451 通过 + 2 跳过）+ 8 E2E**。
@@ -57,7 +58,7 @@
 
 > **项目定位（2026-10-17 起）**：**4C 2027 物联网应用类（主参赛）+ 毕设**；以华为命题为设计参考，**不参加国创赛 2027**。原“小组任务协同 + 智能排期引擎”保留为 4C 备选。底座不再锁定 6.0.0.1：默认 **OpenHarmony 4.x/5.x 标准系统**；6.0.0.1 仅在借到对应板卡时作为可选上板目标。主线 = Node 参考实现 + 安全机制 + 评测 + **WS63 近场确认**；RK3568 主设备为可选项，不强制购买。
 > **底座（默认）**：OpenHarmony 4.x/5.x 标准系统（可选 6.0.0.1，以实际板卡/镜像为准）+ WS63 星闪节点（OH 轻量系统）
-> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.47.1 已跑通**：**461 测试通过 + 2 跳过 + 11 项浏览器 E2E**（本地全绿；GitHub Actions 公开镜像已在 `43d9531` 验证）、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
+> **状态**：2026-10-14 立项 · **自选 / 毕设项目**（设计骨架 **v0.3** + 环境清单 + **核心机制原型 v0.50 已跑通**：**554 测试通过 + 2 跳过 + 11 项浏览器 E2E**（本地全绿；GitHub Actions 公开镜像已在 `81ebbc6` 验证）、治理可视化报告 + **三档评测报告** + **单层消融** + **Agent 权限分级** + **确认执行闭环** + **WS63 确认适配器（虚拟设备）** + **办公套件控制台（演示级）** + **工具注册表 / MCP 骨架** + **手机确认端（端上签名）** + **持久化 / 模型注入** + **真实资料导入（docx/md/txt）**已产出；硬件可选）
 
 ---
 

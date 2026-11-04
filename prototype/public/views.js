@@ -991,6 +991,18 @@
         </section>
       </div>
       <section class="card"><div class="card-head"><h2>决定历史</h2><span class="sub">${data.history.length} 条</span></div><div class="device-history">${data.history.length ? data.history.map((h) => `<div class="history-item"><span>${esc(h.actionLabel || '')} · ${esc(short(h.summary || '', 42))}</span><span>${badge(h.outcome || h.state)} ${esc((h.result && h.result.code) || '')}</span></div>`).join('') : '<div class="empty">还没有决定</div>'}</div></section>
+      <section class="card">
+        <div class="card-head"><h2>屏幕共享</h2><span class="sub">真实投屏 · getDisplayMedia</span></div>
+        <label class="label">共享目标</label>
+        <input class="input" id="share-target" value="会议室大屏" maxlength="64">
+        <div class="btn-row mt12">
+          <button class="btn" id="share-start">开始共享</button>
+          <button class="btn ghost" id="share-stop" disabled>停止共享</button>
+        </div>
+        <div class="sub-text mt8">仅在 localhost 或 HTTPS 下可用；画面留在本机，服务端只记录开始/结束、目标与分辨率，并写审计链。</div>
+        <video id="share-video" class="share-video" autoplay muted playsinline hidden></video>
+        <div id="share-status" class="sub-text mt8"></div>
+      </section>
       <div id="device-result"></div>`;
 
     if (active) {
@@ -1075,6 +1087,58 @@
         showResult({ ...res, outcome: 'replay' });
       } catch (err) { toast(c.errorText(err), 'error'); }
     });
+
+    // —— 屏幕共享（真实投屏；离开页面/浏览器结束都会停采集并写结束审计）——
+    const shareVideo = root.querySelector('#share-video');
+    const shareStatus = root.querySelector('#share-status');
+    const shareStartBtn = root.querySelector('#share-start');
+    const shareStopBtn = root.querySelector('#share-stop');
+    let shareStream = null;
+    let shareSession = null;
+    const setShareStatus = (text, kind = 'info') => {
+      if (shareStatus) shareStatus.innerHTML = text ? `<span class="badge ${kind}">${esc(text)}</span>` : '';
+    };
+    const stopScreenShare = async (reason = '') => {
+      if (!shareStream && !shareSession) return;
+      const stream = shareStream; shareStream = null;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (shareVideo) { shareVideo.srcObject = null; shareVideo.hidden = true; }
+      if (shareSession) {
+        const id = shareSession; shareSession = null;
+        try { await API.post('/api/screenshare/stop', { sessionId: id }); } catch { /* 结束审计失败不阻塞本地停止 */ }
+      }
+      if (shareStartBtn) shareStartBtn.disabled = false;
+      if (shareStopBtn) shareStopBtn.disabled = true;
+      setShareStatus(reason ? `已停止（${reason}）` : '已停止', 'info');
+    };
+    c.store.screenShareCleanup = () => stopScreenShare('离开页面');
+    shareStartBtn?.addEventListener('click', async () => {
+      if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+        setShareStatus('当前环境不支持投屏（需 localhost 或 HTTPS）', 'warn');
+        return;
+      }
+      const target = String(root.querySelector('#share-target')?.value || '').trim();
+      if (!target) { setShareStatus('请填写共享目标', 'warn'); return; }
+      shareStartBtn.disabled = true;
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        const track = stream.getVideoTracks()[0];
+        const settings = track && typeof track.getSettings === 'function' ? track.getSettings() : {};
+        const surface = settings.displaySurface || 'unknown';
+        shareStream = stream;
+        if (shareVideo) { shareVideo.srcObject = stream; shareVideo.hidden = false; }
+        const res = await API.post('/api/screenshare/start', { target, surface });
+        shareSession = res.sessionId;
+        if (track) track.addEventListener('ended', () => { stopScreenShare('浏览器结束'); });
+        shareStopBtn.disabled = false;
+        setShareStatus(`共享中：${target} · ${surface}`, 'pass');
+        toast('屏幕共享已开始（服务端已记审计）', 'ok');
+      } catch (err) {
+        shareStartBtn.disabled = false;
+        setShareStatus(c.errorText(err), 'warn');
+      }
+    });
+    shareStopBtn?.addEventListener('click', () => { stopScreenShare('手动停止'); });
   }
 
   // ---------- 治理 ----------

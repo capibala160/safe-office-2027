@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.49.0');
+  assert.equal(bootstrap.state.version, '0.50.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -890,4 +890,37 @@ test('发件核对：不能核对他人记录（服务层 404）', async (t) => 
   const outbox2 = service.store.getOutboxByOperation(op2.operationId);
   const admin = service.reconcileOutbox(outbox2.outboxId, { state: 'sent', actor: 'root', role: '管理员' });
   assert.equal(admin.ok, true);
+});
+
+test('屏幕共享：开始/结束写审计，时长按 now 计算', (t) => {
+  const { service, advance } = setup();
+  t.after(() => service.close());
+  const started = service.startScreenShare({ target: '会议室大屏', surface: 'monitor', actor: 'alice' });
+  assert.match(started.sessionId, /^[0-9a-f-]{36}$/);
+  assert.equal(started.target, '会议室大屏');
+  assert.equal(started.surface, 'monitor');
+  assert.equal(service.listScreenShares().length, 1);
+  const begin = service.audit.entries.find((e) => e.kind === '屏幕共享开始');
+  assert.ok(begin, '开始要进审计');
+  assert.equal(begin.detail.target, '会议室大屏');
+  assert.equal(begin.detail.surface, 'monitor');
+  assert.ok(begin.detail.sessionId);
+
+  advance(1500);
+  const stopped = service.stopScreenShare({ sessionId: started.sessionId, actor: 'alice' });
+  assert.equal(stopped.durationMs, 1500);
+  assert.equal(service.listScreenShares().length, 0);
+  const end = service.audit.entries.find((e) => e.kind === '屏幕共享结束');
+  assert.ok(end, '结束要进审计');
+  assert.equal(end.detail.durationMs, 1500);
+  assert.equal(service.audit.verify(), true);
+});
+
+test('屏幕共享：缺目标被拒、非法 surface 归一为 unknown、未知会话 404', (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  assert.throws(() => service.startScreenShare({ target: '   ' }), /缺少共享目标/);
+  const started = service.startScreenShare({ target: 'A', surface: 'weird' });
+  assert.equal(started.surface, 'unknown');
+  assert.throws(() => service.stopScreenShare({ sessionId: 'nope' }), /共享会话不存在/);
 });

@@ -45,7 +45,7 @@ const CAPABILITIES = [
   },
   {
     name: '屏幕共享', level: 'L3', tools: ['shareScreen'],
-    constraints: '二次确认；知识库存在机密材料时禁止共享（防连带泄露）；当前为模拟（非真实投屏）',
+    constraints: '二次确认；知识库存在机密材料时禁止共享（防连带泄露）；投屏由控制台 getDisplayMedia 真实发起，服务端只记录开始/结束与目标',
   },
   {
     name: '设备联动', level: 'L4', tools: ['deviceControl'],
@@ -136,7 +136,7 @@ const TOOL_META = {
   },
   shareScreen: {
     capability: '屏幕共享', level: 'L3', requiredArgs: ['id'],
-    desc: '共享屏幕；知识库存在机密材料时禁止（当前为模拟，非真实投屏）',
+    desc: '共享屏幕；知识库存在机密材料时禁止；投屏在客户端完成，服务端记录审计',
     example: { action: 'shareScreen', args: { id: 'M2' } },
   },
   deviceControl: {

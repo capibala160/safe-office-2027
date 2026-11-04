@@ -13,12 +13,12 @@
         <span class="brand-mark">安</span>
         <div class="brand-text">
           <strong>安全智慧办公</strong>
-          <small>办公套件控制台 · v0.34</small>
+          <small>办公套件控制台 · v0.50</small>
         </div>
       </div>
       <nav id="nav" class="nav" aria-label="主导航"></nav>
       <div class="side-foot">
-        <span class="dot"></span> 业务动作模拟 · WS63 虚拟设备 · 仅本机
+        <span class="dot"></span> 业务动作按配置真实/模拟 · 支持虚拟设备与真板 · 仅本机
       </div>
     </aside>
 
@@ -43,7 +43,7 @@
               <option value="cloud">云端（演示）</option>
             </select>
           </label>
-          <label class="switch" title="仅影响运行时内置闸4（上传/共享等未转交动作）；外发/删除/打印/设备走 WS63 虚拟设备">
+          <label class="switch" title="仅影响运行时内置闸4（上传/共享等未转交动作）；外发/删除/打印/设备走确认端（虚拟/真板/手机）">
             <input type="checkbox" id="nearfield-toggle" checked>
             <span>近场（内置闸4）</span>
           </label>
@@ -65,7 +65,7 @@
       </div>
 
       <footer class="foot">
-        演示级最小套件：业务动作模拟（FakeMailer / 假执行器）· WS63 虚拟设备（真实 SFC1 帧 / HMAC，无 SLE/串口）
+        演示级最小套件：业务动作按配置真实/模拟（SMTP/打印/日历/屏幕共享可真实，录音转写仍模拟）· WS63 支持虚拟设备与真板（SFC1/HMAC）
         · 仅监听 127.0.0.1 · 可启用登录（scrypt 会话） · 不提供距离证明 / 本人身份认证 / 防中继保证
       </footer>
     </div>

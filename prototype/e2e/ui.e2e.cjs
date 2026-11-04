@@ -68,6 +68,12 @@ test('UI：登录 → 运行样例 → 审批页 → 上传 → 改密重登 →
   const body = await page.textContent('body');
   assert.match(body, /审批|操作/);
 
+  // 设备页：屏幕共享卡片（真实投屏入口）存在且默认目标正确
+  await page.goto(`${started.url}/#/device`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#share-start');
+  assert.equal(await page.locator('#share-target').inputValue(), '会议室大屏');
+  assert.ok(await page.locator('#share-stop').isDisabled());
+
   // 导入只对管理员开放：换 admin 登录
   await page.click('#btn-logout');
   await page.waitForURL(/\/login\.html/);

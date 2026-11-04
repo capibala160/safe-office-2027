@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.49.0');
+  assert.equal(data.version, '0.50.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -219,6 +219,23 @@ test('外发 HTTP 闭环：命令 → 挑战 → 设备批准 → 发送', async
 
   const emails = await json(`${url}/api/emails`);
   assert.ok(emails.data.items.some((e) => e.operationId === op.operationId && e.outbox && e.outbox.state === 'sent'));
+});
+
+test('屏幕共享 API：开始/结束写审计，未知会话 404', async (t) => {
+  const { url } = await boot(t);
+  const started = await post(`${url}/api/screenshare/start`, { target: '会议室大屏', surface: 'monitor' });
+  assert.equal(started.res.status, 200);
+  assert.equal(started.data.ok, true);
+  assert.ok(started.data.sessionId);
+  assert.equal(started.data.surface, 'monitor');
+
+  const stopped = await post(`${url}/api/screenshare/stop`, { sessionId: started.data.sessionId });
+  assert.equal(stopped.res.status, 200);
+  assert.equal(stopped.data.ok, true);
+  assert.ok(stopped.data.durationMs >= 0);
+
+  const bad = await post(`${url}/api/screenshare/stop`, { sessionId: 'nope' });
+  assert.equal(bad.res.status, 404);
 });
 
 test('取消与重放 API', async (t) => {

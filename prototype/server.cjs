@@ -771,6 +771,26 @@ function createConsoleServer({
           selected: deviceState && deviceState.selected ? deviceState.selected : service.deviceId,
         });
       }
+      if (pathname === '/api/screenshare/start' && method === 'POST') {
+        requireRole(req, ROLE_STAFF, '发起屏幕共享');
+        const body = await readJson(req);
+        return sendJson(res, 200, {
+          ok: true,
+          ...service.startScreenShare({
+            target: body.target, surface: body.surface, ...userContext(req),
+          }),
+        });
+      }
+      if (pathname === '/api/screenshare/stop' && method === 'POST') {
+        requireRole(req, ROLE_STAFF, '结束屏幕共享');
+        const body = await readJson(req);
+        return sendJson(res, 200, {
+          ok: true,
+          ...service.stopScreenShare({
+            sessionId: body.sessionId, ...userContext(req),
+          }),
+        });
+      }
       if (pathname === '/api/devices/select' && method === 'POST') {
         requireRole(req, ROLE_ADMIN, '切换确认设备');
         const body = await readJson(req);

@@ -625,7 +625,7 @@ class AgentRuntime {
         }
       }
     } else if (action === 'shareScreen') {
-      effect = `屏幕共享已开启（模拟，未真实投屏；目标：${args.id}）`;
+      effect = `屏幕共享已下发：目标 ${args.id} —— 请在控制台「设备 → 屏幕共享」点选窗口，服务端记录开始/结束（画面不上传）`;
     } else if (action === 'deviceControl') {
       effect = `设备指令已下发：${args.device} → ${args.op}（物理动作，执行前已落快照）`;
     } else if (action === 'uploadToCloud') {

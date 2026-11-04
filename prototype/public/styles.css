@@ -376,3 +376,12 @@ a.sample { display: block; text-decoration: none; color: inherit; }
 .dialog h2 { margin: 0 0 6px; font-size: 16px; }
 .dialog .input { width: 100%; margin-bottom: 10px; }
 .dialog .err { min-height: 18px; color: var(--block); font-size: 12px; }
+
+/* 屏幕共享预览（真实投屏，2026-11-04） */
+.share-video {
+  width: 100%;
+  max-height: 320px;
+  margin-top: 12px;
+  border-radius: 8px;
+  background: #000;
+}

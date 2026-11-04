@@ -414,7 +414,7 @@ test('屏幕共享：知识库存在机密材料 → 拒绝；无机密材料时
   const { rt, token } = mkRt({ tools: ['readDoc', 'shareScreen'] });
   const ctx = { role: '员工', token, nearfieldOnline: true };
   const ok = await rt.execStep({ action: 'shareScreen', args: { id: 'M2' } }, 1, ctx);
-  assert.ok(ok.includes('已开启'), '无机密材料时可共享');
+  assert.ok(ok.includes('已下发'), '无机密材料时可共享（投屏由客户端控制台发起）');
   await rt.execStep({ action: 'readDoc', args: { id: 'M1' } }, 2, ctx);
   const deny = await rt.execStep({ action: 'shareScreen', args: { id: 'M2' } }, 3, ctx);
   assert.ok(deny.includes('⛔') && deny.includes('机密'), '存在机密材料时禁止共享');

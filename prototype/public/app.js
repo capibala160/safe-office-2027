@@ -236,6 +236,11 @@
   async function renderRoute() {
     clearInterval(store.timer);
     store.timer = null;
+    // 离开页面时停掉屏幕共享（停采集 + 通知服务端写结束审计）
+    if (typeof store.screenShareCleanup === 'function') {
+      try { await store.screenShareCleanup(); } catch { /* ignore */ }
+    }
+    store.screenShareCleanup = null;
     const route = (location.hash.replace(/^#\//, '') || 'dashboard').split('?')[0];
     store.route = window.Views[route] ? route : 'dashboard';
     updateCrumbs();
