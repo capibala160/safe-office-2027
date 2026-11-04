@@ -27,7 +27,7 @@
     "e2e": "node --test e2e/ui.e2e.cjs",
     "share:check": "node e2e/share-check.cjs",
     "asr:probe": "node scripts/asr-probe.cjs",
-    "actuator:test": "node scripts/actuator-test.cjs",
+    "actuator:probe": "node scripts/actuator-probe.cjs",
     "bench": "node bench/load.cjs",
     "audit:keygen": "node scripts/audit-keygen.cjs",
     "verify:audit": "node verify-audit.cjs",
