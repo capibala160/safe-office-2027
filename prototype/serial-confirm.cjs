@@ -185,7 +185,9 @@ async function main() {
       log(`confirmationId=${approval.confirmationId}`);
     }
     store.close();
-    return approval.decision === 1 ? 0 : 2;
+    // 取消不会走到这里：NearfieldConfirmer 对 decision=0 抛 DECISION（cancelled:true），
+    // 由 catch 统一返回 1。2026-11-04 拍板保持该行为，不引入退出码 2。
+    return 0;
   } catch (err) {
     if (values.json) {
       console.log(JSON.stringify({ ok: false, code: err.code || null, message: err.message }, null, 2));

@@ -27,6 +27,8 @@ const FILES = [
   { from: path.join(HERE, 'board-confirm/CMakeLists.txt'), to: 'CMakeLists.txt' },
   { from: path.join(HERE, 'board-confirm/sfc1_hmac.c'), to: 'sfc1_hmac.c' },
   { from: path.join(HERE, 'board-confirm/sfc1_hmac.h'), to: 'sfc1_hmac.h' },
+  { from: path.join(HERE, 'board-confirm/sfc1_nv.c'), to: 'sfc1_nv.c' },
+  { from: path.join(HERE, 'board-confirm/sfc1_nv.h'), to: 'sfc1_nv.h' },
   { from: path.join(REPO_WS63, 'protocol.c'), to: 'protocol.c' },
   { from: path.join(REPO_WS63, 'protocol.h'), to: 'protocol.h' },
 ];

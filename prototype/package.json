@@ -31,6 +31,8 @@
     "lint:custom": "node scripts/lint.cjs",
     "bench:audit": "node bench/audit-checkpoints.cjs",
     "serial:confirm": "node serial-confirm.cjs",
+    "serial:probe": "node scripts/serial-probe.cjs",
+    "sfc1:neg": "node scripts/sfc1-negative.cjs",
     "ws63:build": "node ../ws63/firmware/build-m3.cjs --build"
   },
   "dependencies": {

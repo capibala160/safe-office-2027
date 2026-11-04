@@ -30,6 +30,7 @@
 #include "app_init.h"
 #include "protocol.h"
 #include "sfc1_hmac.h"
+#include "sfc1_nv.h"
 
 osThreadId_t task1_ID;
 
@@ -126,6 +127,10 @@ static void mark_used(const uint8_t nonce[PROTO_NONCE_LEN])
     g_used_next = (uint8_t)((g_used_next + 1u) % PROTO_REPLAY_WINDOW);
     if (g_used_count < PROTO_REPLAY_WINDOW) {
         g_used_count++;
+    }
+    /* M1：窗口落 NV，重启后仍能拒绝旧 nonce；写失败只告警，不阻断确认流程 */
+    if (sfc1_nv_save(g_used, g_used_count, DEMO_KEY) != 0) {
+        printf("SFC1 NV: save failed\r\n");
     }
 }
 
@@ -464,6 +469,15 @@ static void key_task(const char *arg)
 static void board_confirm_entry(void)
 {
     printf("Enter board confirm (M3)!\r\n");
+
+    /* M1：启动时恢复已消费 nonce 窗口（无记录/损坏则从空窗口开始） */
+    if (sfc1_nv_load(g_used, &g_used_count, DEMO_KEY)) {
+        g_used_next = (uint8_t)(g_used_count % PROTO_REPLAY_WINDOW);
+        printf("SFC1 NV: restored %u nonces\r\n", (unsigned)g_used_count);
+    } else {
+        g_used_next = 0;
+        printf("SFC1 NV: empty replay window\r\n");
+    }
 
     osThreadAttr_t attr;
     attr.name = "KeyTask";

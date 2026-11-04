@@ -1,0 +1,59 @@
+WS63 M1 掉电保存启动日志（2026-11-04 晚）
+采集：prototype/scripts/serial-probe.cjs --port COM11 --baud 115200 --watch
+固件：ws63-liteos-app_all.fwpkg（1,469,736B，含 sfc1_nv.c）
+说明：串口原文，按字节流重新拼回； 已去掉。
+------------------------------------------------------------
+boot.
+Flash Init Fail! ret = 0x80001341
+verify_public_rootkey secure verify disable!
+verify_params_key_area secure verify disable!
+verify_params_area_info secure verify disable!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+APP|dbg uart init ok.
+[UPG] init OK!
+APP|init_sle_mac failed!
+APP|mac_addr:0x1b,0x 0,los_at_plt_cmd_register EXCUTE
+Enter board confirm (M3)!
+SFC1 NV: no record
+SFC1 NV: empty replay window
+ID = 10566328, Create KeyTask is OK!
+cpu 0 entering scheduler
+APP|EM_SIZE: 32 k
+APP|support mesh:0
+APP|cali_is on
+APP|btc open
+I2C SSD1306 Init succ!
+[RADAR_LOG] radar_timer_init succ
+[RADAR_LOG] alg ctrl read from nv [1][2][0][0][1][1][20]
+device_main_init: 0!
+===hal_initialize_phy===226===
+device_module_init:: succ!
+cali_set_cali_mask:old[0x0] -> new[0x1fa2]
+
+fe_rf_initialize
+cali_offline_cali_entry enter
+cali_set_cali_done_flag:old[0x0] -> new[0x1]
+
+rf cali OK. time cost:22, ret:0
+ssd1306_init ret=0
+M3 SFC1 ready: uart=0 device=ws63-A
+xo update temp:3,diff:0,xo:0x3083c
+APP|[SYS INFO] mem: used:95140, free:269664; log: drop/all[0/0], at_recv 0.
+APP|[SYS INFO] mem: used:95140, free:269664; log: drop/all[0/0], at_recv 0.
+APP|[SYS INFO] mem: used:95140, free:269664; log: drop/all[0/0], at_recv 0.
+APP|[SYS INFO] mem: used:95140, free:269664; log: drop/all[0/0], at_recv 0.
+
+APP|[SYS INFO] mem: used:95140, free:269664; log: drop/all[0/0], at_recv 0.
+APP|[SYS INFO] mem: used:95140, free:269664; log: drop/all[0/0], at_recv 0.
+boot.
+Flash Init Fail! ret = 0x80001341
+verify_public_rootkey secure verify disable!
+verify_params_key_area secure verify disable!
+verify_params_area_info secure verify disable!
+verify_image_key_area secure verify disable!
+verify_image_code_info secure verify disable!
+APP|dbg uart init ok.
+[UPG] init OK!
+APP|init_sle_mac failed!
+APP|mac_addr:0x1b,
