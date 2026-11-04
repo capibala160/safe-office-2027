@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.50.0');
+  assert.equal(bootstrap.state.version, '0.51.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -923,4 +923,58 @@ test('屏幕共享：缺目标被拒、非法 surface 归一为 unknown、未知
   const started = service.startScreenShare({ target: 'A', surface: 'weird' });
   assert.equal(started.surface, 'unknown');
   assert.throws(() => service.stopScreenShare({ sessionId: 'nope' }), /共享会话不存在/);
+});
+
+test('录音转写：上传/转写/审计，非公开级与越权被拒', async (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safeoffice-audio-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let calls = 0;
+  const asr = {
+    transcribeFile: async (file) => {
+      calls += 1;
+      assert.ok(fs.existsSync(file), '上传的文件应落盘');
+      return { text: '会议决定下周演示', requestId: 'req-9', engine: '16k_zh' };
+    },
+  };
+  const { service } = setup({ service: { asr, audioDir: dir } });
+  t.after(() => service.close());
+  const wav = Buffer.alloc(44);
+  wav.write('RIFF', 0, 'ascii');
+  wav.writeUInt32LE(36, 4);
+  wav.write('WAVE', 8, 'ascii');
+  wav.write('fmt ', 12, 'ascii');
+
+  const { audio } = service.saveAudio({
+    filename: 'meeting.wav', data: wav.toString('base64'), title: '周会', actor: 'alice',
+  });
+  assert.match(audio.id, /^AUD-[0-9a-f]{8}$/);
+  assert.equal(service.listAudios({ actor: 'alice', role: '员工' }).length, 1);
+  assert.equal(service.listAudios({ actor: 'bob', role: '员工' }).length, 0);
+
+  const result = await service.transcribeAudioFile({ id: audio.id, actor: 'alice', role: '员工' });
+  assert.equal(result.text, '会议决定下周演示');
+  assert.equal(result.tainted, false);
+  assert.equal(result.requestId, 'req-9');
+  assert.equal(calls, 1);
+  const kinds = service.audit.entries.map((e) => e.kind);
+  assert.ok(kinds.includes('录音上传'));
+  assert.ok(kinds.includes('录音转写'));
+  assert.ok(kinds.includes('转写'));
+
+  assert.throws(() => service.saveAudio({
+    filename: 'x.wav', data: wav.toString('base64'), level: '机密', actor: 'alice',
+  }), /只处理「公开」级/);
+  await assert.rejects(
+    service.transcribeAudioFile({ id: audio.id, actor: 'bob', role: '员工' }),
+    /只能转写自己/,
+  );
+});
+
+test('录音转写：未配置 ASR 时拒绝上传', (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  assert.throws(() => service.saveAudio({ filename: 'a.wav', data: Buffer.alloc(44).toString('base64') }), /未配置 ASR/);
 });

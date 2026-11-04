@@ -22,6 +22,7 @@ const { scanAttachment, findClamav } = require('./src/file-scan.cjs');
 const { runPreflight } = require('./src/preflight.cjs');
 const { createAuthFromFile } = require('./src/auth.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
+const { createAsrFromEnv } = require('./src/asr.cjs');
 const { registerDocuments } = require('./src/scenario.cjs');
 const SFC1 = require('./public/sfc1-browser.js');
 
@@ -791,6 +792,26 @@ function createConsoleServer({
           }),
         });
       }
+      if (pathname === '/api/audios' && method === 'GET') {
+        requireRole(req, ROLE_STAFF, '读取录音列表');
+        return sendJson(res, 200, { ok: true, items: service.listAudios(userContext(req)) });
+      }
+      if (pathname === '/api/audios' && method === 'POST') {
+        requireRole(req, ROLE_STAFF, '上传录音');
+        // base64 上限按 5MB 音频留余量（约 6.7MB 文本）
+        const body = await readJson(req, 8 * 1024 * 1024);
+        return sendJson(res, 200, { ok: true, ...service.saveAudio({ ...body, ...userContext(req) }) });
+      }
+      const audioTranscribe = pathname.match(/^\/api\/audios\/([^/]+)\/transcribe$/);
+      if (audioTranscribe) requireRole(req, ROLE_STAFF, '转写录音');
+      if (audioTranscribe && method === 'POST') {
+        return sendJson(res, 200, {
+          ok: true,
+          ...(await service.transcribeAudioFile({
+            id: decodeURIComponent(audioTranscribe[1]), ...userContext(req),
+          })),
+        });
+      }
       if (pathname === '/api/devices/select' && method === 'POST') {
         requireRole(req, ROLE_ADMIN, '切换确认设备');
         const body = await readJson(req);
@@ -1035,6 +1056,13 @@ async function startServer({
     // 非生产且未接真板：保留默认演示密钥（虚拟设备路径）
     console.warn(`⚠ 未加载到设备密钥，虚拟确认继续使用演示密钥：${err.message}`);
   }
+  // 录音转写（v0.51）：SAFE_OFFICE_ASR=1 才创建腾讯云客户端；配置不全只告警，不阻塞启动
+  let asrClient = null;
+  try {
+    asrClient = createAsrFromEnv(process.env);
+  } catch (err) {
+    console.warn(`⚠ ASR 配置不完整，录音转写保持模拟：${err.message}`);
+  }
   let instance = service;
   if (!instance) {
     if (pairingCode) {
@@ -1050,12 +1078,14 @@ async function startServer({
         auditFile,
         mcpConfigFile,
         inboxReader,
+        asr: asrClient,
         mailer: mailer || new FakeMailer(),
       });
     } else {
       instance = new ConsoleService({
         documentsStore, blobStore, storeFile, auditFile, mcpConfigFile,
         inboxReader,
+        asr: asrClient,
         mailer: mailer || new FakeMailer(),
         nearfieldTransportFactory,
         gate4Nearfield,

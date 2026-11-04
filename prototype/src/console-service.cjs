@@ -33,6 +33,7 @@ const { parseDsn } = require('./dsn.cjs');
 const { DemoExecutor } = require('./demo-executor.cjs');
 const { FakeMailer, MailerError } = require('./mailer.cjs');
 const { printDocument } = require('./print-adapter.cjs');
+const { detectFormat, assertMagic, MAX_BYTES: ASR_MAX_BYTES } = require('./asr.cjs');
 const { createCalendarWriterFromEnv } = require('./calendar-adapter.cjs');
 const { createBouncePollerFromEnv } = require('./imap-poller.cjs');
 const { parseAutoReplyConfig, evaluateAutoReply } = require('./auto-reply.cjs');
@@ -44,7 +45,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.50.0';
+const VERSION = '0.51.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -151,6 +152,9 @@ class ConsoleService {
     printPdfDir = process.env.SAFE_OFFICE_PRINT_PDF_DIR || null,
     calendarDir = process.env.SAFE_OFFICE_CALENDAR_DIR || null,
     blobKey = process.env.SAFE_OFFICE_BLOB_KEY || null,
+    // 录音转写（v0.51）：注入腾讯云一句话识别客户端；null = 保持模拟
+    asr = null,
+    audioDir = process.env.SAFE_OFFICE_AUDIO_DIR || path.join('data', 'audios'),
   } = {}) {
     this.now = now;
     this._auditActorStorage = new AsyncLocalStorage();
@@ -158,6 +162,9 @@ class ConsoleService {
     this.lastPhoneResult = null;
     // 模型与持久化：默认全内存（测试/演示不变）；给了路径才落盘
     this._injectedLlm = llm;
+    this.asr = asr;                          // 真实 ASR 客户端；null = 模拟
+    this.audioDir = String(audioDir);
+    this.audios = new Map();                 // 上传的录音：id → { id, title, level, filePath, bytes, format, owner }
     this.documentsStore = documentsStore;   // 导入的真实资料（null = 只有样例）
     this._ownsBlobStore = !blobStore;
     this.blobKey = blobKey;  // 有密钥则新附件 AES-256-GCM 加密；旧明文仍可读
@@ -572,6 +579,7 @@ class ConsoleService {
     this.runtime = new AgentRuntime({
       policy: this.policy, audit: this.audit, risk: this.risk, planner: this.planner, perf: this.perf,
       toolRegistry: this.toolRegistry, toolExecutors: this.toolExecutors,
+      audioStore: this.audios, asr: this.asr,
       calendarWriter: createCalendarWriterFromEnv({
         ...process.env,
         ...(this.calendarDir ? { SAFE_OFFICE_CALENDAR_DIR: this.calendarDir } : {}),
@@ -3091,6 +3099,70 @@ class ConsoleService {
     }));
   }
 
+  // ---------- 录音转写（2026-11-04：腾讯云一句话识别） ----------
+  // 音频出端：只处理「公开」级录音；上传后由用户显式触发；转写文本仍按不可信输入过闸1。
+  saveAudio({ filename = '', data = '', title = '', level = '公开', actor = null } = {}) {
+    if (!this.asr) {
+      throw new ConsoleError('CONFLICT', '未配置 ASR（在 config.env 设 SAFE_OFFICE_ASR=1 并填腾讯云密钥）', 409);
+    }
+    if (String(level) !== '公开') {
+      throw new ConsoleError('FORBIDDEN', '云 ASR 只处理「公开」级录音（音频会发送到腾讯云）', 403);
+    }
+    const buffer = Buffer.from(String(data || '').replace(/^data:[^,]*,/, ''), 'base64');
+    const format = detectFormat(filename);
+    assertMagic(format, buffer);
+    if (buffer.length > ASR_MAX_BYTES) throw new ConsoleError('BAD_REQUEST', '音频超过 5MB', 413);
+    const id = `AUD-${crypto.randomBytes(4).toString('hex')}`;
+    fs.mkdirSync(this.audioDir, { recursive: true });
+    const filePath = path.join(this.audioDir, `${id}.${format}`);
+    fs.writeFileSync(filePath, buffer, { mode: 0o600 });
+    const meta = {
+      id, title: String(title || filename || id), level: '公开', owner: actor || '',
+      filePath, bytes: buffer.length, format, createdAt: this._iso(this.now()),
+    };
+    this.audios.set(id, meta);
+    this._withAuditActor(actor, () => this.audit.append('录音上传', {
+      audioId: id, title: meta.title, bytes: meta.bytes, format,
+    }));
+    return { audio: this._audioView(meta) };
+  }
+
+  _audioView(a) {
+    // 不回传磁盘路径：路径只在服务端使用
+    return {
+      id: a.id, title: a.title, level: a.level, bytes: a.bytes,
+      format: a.format, createdAt: a.createdAt, owner: a.owner,
+    };
+  }
+
+  listAudios({ actor = null, role = null } = {}) {
+    const all = ['管理员', '审计员'].includes(role);
+    return [...this.audios.values()]
+      .filter((a) => all || !actor || a.owner === actor)
+      .map((a) => this._audioView(a));
+  }
+
+  async transcribeAudioFile({ id, actor = null, role = null } = {}) {
+    const a = this.audios.get(String(id || '').trim());
+    if (!a) throw new ConsoleError('NOT_FOUND', `录音不存在：${id || ''}`, 404);
+    if (a.owner && actor && a.owner !== actor && !['管理员', '审计员'].includes(role)) {
+      throw new ConsoleError('FORBIDDEN', '只能转写自己上传的录音', 403);
+    }
+    if (!this.asr) throw new ConsoleError('CONFLICT', '未配置 ASR', 409);
+    const result = await this.asr.transcribeFile(a.filePath);
+    this._withAuditActor(actor, () => this.audit.append('录音转写', {
+      audioId: a.id, bytes: a.bytes, provider: 'tencent', requestId: result.requestId,
+    }));
+    const ingested = this.runtime.ingestTranscript({
+      id: a.id, title: a.title, level: a.level, text: result.text,
+      owner: actor || a.owner || '', provider: '腾讯云 ASR', requestId: result.requestId,
+    });
+    return {
+      audio: this._audioView(a), text: ingested.text, tainted: ingested.tainted,
+      reasons: ingested.reasons, requestId: result.requestId, transcriptId: ingested.id,
+    };
+  }
+
   // ---------- 治理 ----------
   _policyMatrix() {
     const matrix = {};
@@ -3767,6 +3839,7 @@ class ConsoleService {
     this.runs = [];
     this.liveRuns = new Map();
     this._screenShares = new Map();
+    this.audios = new Map();
     this._queuedTasks = 0;
     this._runChain = Promise.resolve();
     this._initWorkspace();

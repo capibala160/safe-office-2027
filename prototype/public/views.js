@@ -746,6 +746,16 @@
         <div class="sub-text mt8">密级由你指定，模型不能改；导入后按密级进入角色可读集合。资料只存本机，不进仓库。</div>
       </section>
       <section class="card">
+        <div class="card-head"><h2>录音转写</h2><span class="sub">腾讯云一句话识别 · ≤60 秒 · wav/mp3/m4a</span></div>
+        <div class="btn-row">
+          <input type="file" id="audio-file" accept=".wav,.mp3,.m4a" />
+          <input class="input" id="audio-title" placeholder="录音标题（可选）" style="max-width:240px" maxlength="64">
+          <button class="btn small" id="audio-transcribe">上传并转写</button>
+        </div>
+        <div class="sub-text mt8">音频会发送到腾讯云 ASR（只限「公开」级）；转写文本按不可信输入过闸1（注入隔离）后入知识库，并写审计。未配置 ASR 时会明确报错。</div>
+        <div id="audio-result" class="mt12"></div>
+      </section>
+      <section class="card">
         <div class="card-head"><h2>文件列表</h2><span class="sub">${docs.length} 项</span></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>类型</th><th>标题</th><th>密级</th><th>归属</th><th>状态</th><th>操作</th></tr></thead><tbody>
           ${docs.map((d) => {
@@ -796,6 +806,36 @@
         await c.refreshBootstrap();
         c.rerender();
       } catch (err) {
+        toast(c.errorText(err), 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    root.querySelector('#audio-transcribe').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const input = root.querySelector('#audio-file');
+      const box = root.querySelector('#audio-result');
+      const file = input.files && input.files[0];
+      if (!file) { toast('先选一个音频文件', 'info'); return; }
+      if (file.size > 5 * 1024 * 1024) { toast('音频超过 5MB', 'error'); return; }
+      btn.disabled = true;
+      box.innerHTML = '<div class="sub-text">上传中…</div>';
+      try {
+        const data = await fileToBase64(file);
+        const title = String(root.querySelector('#audio-title').value || '').trim() || file.name;
+        const saved = await API.post('/api/audios', { filename: file.name, data, title, level: '公开' });
+        box.innerHTML = '<div class="sub-text">云端转写中…</div>';
+        const res = await API.post(`/api/audios/${encodeURIComponent(saved.audio.id)}/transcribe`, {});
+        box.innerHTML = `<div class="notice ${res.tainted ? 'block' : 'info'}">
+          <strong>${esc(saved.audio.title)}</strong>${res.requestId ? ` · <span class="mono">${esc(res.requestId)}</span>` : ''}
+          <div class="mt8">${esc(res.text || '（空）')}</div>
+          ${res.tainted ? `<div class="sub-text mt8">⚠️ 检出注入内容已隔离：${esc((res.reasons || []).join('、'))}</div>` : ''}
+          <div class="sub-text mt8">转写稿已入知识库（${esc(res.transcriptId || '')}），过闸1 后可用。</div>
+        </div>`;
+        toast('转写完成', 'ok');
+        await c.refreshState();
+      } catch (err) {
+        box.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
         toast(c.errorText(err), 'error');
       } finally {
         btn.disabled = false;

@@ -30,6 +30,8 @@ class AgentRuntime {
   constructor({
     policy, audit, risk, planner, perf, toolRegistry = null, toolExecutors = null,
     disabledLayers = [], calendarWriter = null,
+    // 真实 ASR（v0.51）：上传的录音 + 腾讯云一句话识别客户端；null = 只用样例模拟
+    audioStore = null, asr = null,
     // 闸4 的确认接缝（docs/59）：null = 保持现状（requestHumanConfirm 模拟）。
     // 注入函数签名：({ step, operation, challenge, ctx }) => { approved, method, proof? }
     humanConfirm = null,
@@ -53,6 +55,8 @@ class AgentRuntime {
     // v0.37：会议预约的真实副作用（写 .ics）；null = 保持模拟
     this.calendarWriter = typeof calendarWriter === 'function' ? calendarWriter : null;
     this.humanConfirm = typeof humanConfirm === 'function' ? humanConfirm : null;
+    this.audioStore = audioStore instanceof Map ? audioStore : null;
+    this.asr = asr || null;
   }
 
   _ablate(layer) {
@@ -75,6 +79,24 @@ class AgentRuntime {
   _sanitize(text) {
     if (this._ablate('gate1')) return { safe: true, cleaned: String(text), reasons: [] };
     return this.perf.measure('闸1 输入消毒', () => sanitizeInput(text));
+  }
+
+  // 真实 ASR 的转写稿入库：与模拟分支同口径——文本一律按不可信输入过闸1
+  ingestTranscript({ id, title = '', level = '公开', text = '', owner = '', provider = '外部 ASR', requestId = null } = {}) {
+    const san = this._sanitize(String(text || ''));
+    const transcriptId = `tr_${id}`;
+    this.knowledge[transcriptId] = {
+      id: transcriptId, title: `${title || id}（转写稿）`, level,
+      body: san.cleaned, cleaned: san.cleaned, sourceIds: [id],
+      tainted: !san.safe, transcript: true, owner, provider,
+    };
+    if (!san.safe) {
+      this.risk.add(25, `转写文本检出注入并隔离：${san.reasons.join('、')}`);
+      this.audit.append('闸1触发', { source: `转写 ${id}`, level, reasons: san.reasons, provider, requestId });
+    } else {
+      this.audit.append('转写', { audioId: id, level, provider, requestId });
+    }
+    return { id: transcriptId, text: san.cleaned, tainted: !san.safe, reasons: san.reasons };
   }
 
   _outboundArg(action) {
@@ -609,19 +631,39 @@ class AgentRuntime {
         ? `已打印《${doc.title}》（内部级：输出含水印与操作人标识）`
         : `已打印《${doc ? doc.title : args.id}》`;
     } else if (action === 'transcribeAudio') {
-      const a = AUDIOS[args.id];
+      const uploaded = this.audioStore ? this.audioStore.get(args.id) : null;
+      const a = uploaded || AUDIOS[args.id];
       if (!a) {
         effect = `录音 ${args.id} 不存在`;
       } else {
-        const san = this._sanitize(a.body);
-        this.knowledge[`tr_${a.id}`] = { id: `tr_${a.id}`, title: `${a.title}（转写稿）`, level: a.level, body: san.cleaned, cleaned: san.cleaned, sourceIds: [a.id], tainted: !san.safe, transcript: true, owner: ctx.operator || '' };
-        if (!san.safe) {
-          this.risk.add(25, `转写文本检出注入并隔离：${san.reasons.join('、')}`);
-          this.audit.append('闸1触发', { n, source: `转写 ${a.id}`, level: a.level, reasons: san.reasons });
-          effect = `转写完成（模拟 ASR）⚠️ 文本含注入内容已隔离（${san.reasons.join('、')}）→ 仅作数据展示`;
-        } else {
-          this.audit.append('转写', { n, audioId: a.id, level: a.level });
-          effect = `转写完成（模拟 ASR，${a.title}）→ 结果按不可信输入过闸1后入知识库`;
+        let text = a.body;
+        let provider = '模拟 ASR';
+        let requestId = null;
+        if (uploaded) {
+          if (!this.asr) {
+            effect = `录音 ${args.id} 需要真实 ASR，但未配置（设 SAFE_OFFICE_ASR=1）`;
+          } else {
+            try {
+              const result = await this.asr.transcribeFile(uploaded.filePath);
+              text = result.text;
+              provider = `腾讯云 ASR（${result.engine}）`;
+              requestId = result.requestId;
+            } catch (err) {
+              effect = `转写失败（腾讯云 ASR）：${err.message}`;
+            }
+          }
+        }
+        if (!effect) {
+          const san = this._sanitize(text);
+          this.knowledge[`tr_${a.id}`] = { id: `tr_${a.id}`, title: `${a.title}（转写稿）`, level: a.level, body: san.cleaned, cleaned: san.cleaned, sourceIds: [a.id], tainted: !san.safe, transcript: true, owner: ctx.operator || '', provider };
+          if (!san.safe) {
+            this.risk.add(25, `转写文本检出注入并隔离：${san.reasons.join('、')}`);
+            this.audit.append('闸1触发', { n, source: `转写 ${a.id}`, level: a.level, reasons: san.reasons, provider, requestId });
+            effect = `转写完成（${provider}）⚠️ 文本含注入内容已隔离（${san.reasons.join('、')}）→ 仅作数据展示`;
+          } else {
+            this.audit.append('转写', { n, audioId: a.id, level: a.level, provider, requestId });
+            effect = `转写完成（${provider}，${a.title}）→ 结果按不可信输入过闸1后入知识库`;
+          }
         }
       }
     } else if (action === 'shareScreen') {

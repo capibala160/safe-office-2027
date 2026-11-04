@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.50.0');
+  assert.equal(data.version, '0.51.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -1028,4 +1028,33 @@ test('发件核对：他人记录 404，本人可核对；设备助手不能核�
   });
   assert.equal(aliceReconcile.status, 200);
   assert.equal((await aliceReconcile.json()).outbox.state, 'sent');
+});
+
+test('录音转写 API：上传 → 转写（stub ASR）', async (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safeoffice-api-audio-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const service = new ConsoleService({
+    asr: { transcribeFile: async () => ({ text: '测试转写结果', requestId: 'r-1', engine: '16k_zh' }) },
+    audioDir: dir,
+  });
+  const started = await startServer({ port: 0, service });
+  t.after(() => started.close());
+  const wav = Buffer.alloc(44);
+  wav.write('RIFF', 0, 'ascii');
+  wav.writeUInt32LE(36, 4);
+  wav.write('WAVE', 8, 'ascii');
+
+  const up = await post(`${started.url}/api/audios`, {
+    filename: 'meeting.wav', data: wav.toString('base64'), title: '测试录音',
+  });
+  assert.equal(up.res.status, 200);
+  assert.ok(up.data.audio.id);
+
+  const tr = await post(`${started.url}/api/audios/${encodeURIComponent(up.data.audio.id)}/transcribe`, {});
+  assert.equal(tr.res.status, 200);
+  assert.equal(tr.data.text, '测试转写结果');
+  assert.equal(tr.data.requestId, 'r-1');
 });

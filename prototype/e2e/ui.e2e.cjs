@@ -88,6 +88,7 @@ test('UI：登录 → 运行样例 → 审批页 → 上传 → 改密重登 →
   // 文件页：上传真实资料（.txt）并确认进入列表
   await page.goto(`${started.url}/#/files`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#doc-file');
+  await page.waitForSelector('#audio-transcribe');
   await page.setInputFiles('#doc-file', {
     name: 'e2e-note.txt',
     mimeType: 'text/plain',
