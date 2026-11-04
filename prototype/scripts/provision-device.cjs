@@ -74,10 +74,22 @@ function atomicWriteJson(file, data) {
 }
 
 function saveDevice(file, { deviceId, label, key }) {
-  let table = readJsonFile(file);
-  if (!table) table = { version: 2, devices: [] };
-  if (!Array.isArray(table.devices)) table.devices = [];
-  table.version = 2;
+  const table = readJsonFile(file);
+  if (table !== null) {
+    // 结构校验：根必须是对象；devices 必须存在时是数组。
+    // 否则（例如文件是合法 JSON 数组 []）往数组属性上塞条目会被 JSON.stringify 丢掉，
+    // 表现为"报告成功但钥匙没保存"（复核第四轮）。这种情况一律拒绝并保留原文件。
+    if (typeof table !== 'object' || Array.isArray(table)) {
+      throw new StateFileError(file, new Error('设备表根节点必须是对象'));
+    }
+    if (table.devices !== undefined && !Array.isArray(table.devices)) {
+      throw new StateFileError(file, new Error('devices 必须是数组'));
+    }
+  }
+  const next = table === null ? { version: 2, devices: [] } : table;
+  if (!Array.isArray(next.devices)) next.devices = [];
+  next.version = 2;
+
   const deviceIdHex = deviceId.toString('hex');
   const entry = {
     deviceId: deviceIdHex,
@@ -85,10 +97,25 @@ function saveDevice(file, { deviceId, label, key }) {
     key: key.toString('base64'),
     provisionedAt: new Date().toISOString(),
   };
-  const index = table.devices.findIndex((d) => d.deviceId === deviceIdHex);
-  if (index >= 0) table.devices[index] = entry;
-  else table.devices.push(entry);
-  atomicWriteJson(file, table);
+  const index = next.devices.findIndex((d) => d && d.deviceId === deviceIdHex);
+  if (index >= 0) next.devices[index] = entry;
+  else next.devices.push(entry);
+
+  atomicWriteJson(file, next);
+
+  // 写后回读：确认条目真的落盘（防序列化/结构问题导致"假成功"）
+  const check = readJsonFile(file);
+  if (!check || !Array.isArray(check.devices)
+      || !check.devices.some((d) => d && d.deviceId === deviceIdHex)) {
+    throw new StateFileError(file, new Error('设备表写入后回读校验失败'));
+  }
+  return entry;
+}
+
+// 保存成功后才清 pending：保存失败必须保留钥匙，交给 --recover
+function promoteDevice({ outFile, pendingFile, deviceId, label, key }) {
+  const entry = saveDevice(outFile, { deviceId, label, key });
+  if (pendingFile) clearPending(pendingFile, entry.deviceId);
   return entry;
 }
 
@@ -256,8 +283,7 @@ async function main() {
           console.log(`✗ ${record.deviceId} PONG 绑定不符`);
           continue;
         }
-        saveDevice(outFile, { deviceId: pong.deviceId, label: record.label, key });
-        clearPending(pendingFile, record.deviceId);
+        promoteDevice({ outFile, pendingFile, deviceId: pong.deviceId, label: record.label, key });
         console.log(`✓ ${record.deviceId}（${record.label}）已验证，钥匙已登记到设备表`);
       }
       console.log(failed === 0 ? '恢复完成' : `${failed} 条未恢复，pending 保留`);
@@ -311,8 +337,7 @@ async function main() {
       throw new Error(`板端拒绝配网：status=${err.status} ${err.reason}`);
     }
     const ok = P.decodeOk(reply, sessionKey);
-    const entry = saveDevice(outFile, { deviceId: ok.deviceId, label, key: newKey });
-    clearPending(pendingFile, deviceIdHex);
+    const entry = promoteDevice({ outFile, pendingFile, deviceId: ok.deviceId, label, key: newKey });
 
     if (asJson) {
       console.log(JSON.stringify({ ok: true, deviceId: entry.deviceId, label, file: outFile }, null, 2));
@@ -337,6 +362,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  StateFileError,
+  promoteDevice,
   saveDevice,
   writePending,
   readPendingAll,

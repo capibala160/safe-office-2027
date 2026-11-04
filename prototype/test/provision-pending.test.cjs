@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
-  saveDevice, writePending, readPendingAll, listPending, readPendingFor, clearPending,
+  saveDevice, promoteDevice, writePending, readPendingAll, listPending, readPendingFor, clearPending,
   pendingFileFor, chooseKey,
 } = require('../scripts/provision-device.cjs');
 
@@ -85,6 +85,64 @@ test('pending：写入是原子的，不留临时文件', () => {
   const leftovers = fs.readdirSync(dir).filter((name) => name.includes('.tmp-'));
   assert.deepEqual(leftovers, []);
   assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).pending.aa);
+});
+
+test('设备表：根是数组 / devices 非数组 → 拒绝并保留原文件（复核第四轮）', () => {
+  const dir = tmpDir();
+  const out = path.join(dir, 'devices.json');
+  const key = Buffer.alloc(32, 7);
+
+  fs.writeFileSync(out, '[]');
+  assert.throws(
+    () => saveDevice(out, { deviceId: Buffer.from('aa', 'hex'), label: 'ws63-A', key }),
+    /根节点必须是对象/,
+  );
+  assert.equal(fs.readFileSync(out, 'utf8'), '[]', '数组根不能被覆盖');
+
+  fs.writeFileSync(out, '{"devices":"not-an-array"}');
+  assert.throws(
+    () => saveDevice(out, { deviceId: Buffer.from('aa', 'hex'), label: 'ws63-A', key }),
+    /devices 必须是数组/,
+  );
+  assert.equal(fs.readFileSync(out, 'utf8'), '{"devices":"not-an-array"}');
+});
+
+test('设备表：空对象初始化为 v2 并写入', () => {
+  const dir = tmpDir();
+  const out = path.join(dir, 'devices.json');
+  fs.writeFileSync(out, '{}');
+  saveDevice(out, { deviceId: Buffer.from('aa', 'hex'), label: 'ws63-A', key: Buffer.alloc(32, 3) });
+  const table = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(table.version, 2);
+  assert.equal(table.devices.length, 1);
+  assert.equal(table.devices[0].label, 'ws63-A');
+});
+
+test('promoteDevice：设备表非法时保留 pending（钥匙不能丢）', () => {
+  const dir = tmpDir();
+  const out = path.join(dir, 'devices.json');
+  const file = pendingFileFor(out);
+  fs.writeFileSync(out, '[]');
+  writePending(file, record('aa'));
+
+  assert.throws(
+    () => promoteDevice({ outFile: out, pendingFile: file, deviceId: Buffer.from('aa', 'hex'), label: 'ws63-A', key: Buffer.alloc(32, 1) }),
+    /根节点必须是对象/,
+  );
+  assert.equal(fs.readFileSync(out, 'utf8'), '[]', '原设备表不能动');
+  assert.ok(readPendingFor(file, 'aa'), '保存失败时 pending 必须保留，交给 --recover');
+});
+
+test('promoteDevice：保存成功才清 pending', () => {
+  const dir = tmpDir();
+  const out = path.join(dir, 'devices.json');
+  const file = pendingFileFor(out);
+  writePending(file, record('aa'));
+
+  const entry = promoteDevice({ outFile: out, pendingFile: file, deviceId: Buffer.from('aa', 'hex'), label: 'ws63-A', key: Buffer.alloc(32, 5) });
+  assert.equal(entry.deviceId, 'aa');
+  assert.equal(JSON.parse(fs.readFileSync(out, 'utf8')).devices.length, 1);
+  assert.equal(readPendingFor(file, 'aa'), null);
 });
 
 test('设备表：损坏时 saveDevice 抛错并保留原文件', () => {
