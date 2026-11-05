@@ -43,6 +43,11 @@ osThreadId_t task1_ID;
 #define UART_BAUD      115200
 #define MAX_TTL_SEC    300u
 
+/* 执行输出：IO13 板载 LED、IO10 蜂鸣器、IO12 继电器（驱动锁体；未接线时只翻转电平） */
+#define PIN_LED        GPIO_13
+#define PIN_BUZZER     GPIO_10
+#define PIN_RELAY      GPIO_12
+
 /* 演示 PSK：与 PC 侧 --demo-key 对应；真实部署必须改为每台设备独立密钥 */
 static const uint8_t DEMO_KEY[SFC1_KEY_LEN] = {
     0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
@@ -285,10 +290,10 @@ static void handle_ping(const uint8_t *frame, size_t len)
 
 /* ---------------- 挑战处理 ---------------- */
 /* ---------------- 执行帧（GPIO，2026-11-04） ---------------- */
-/* 只允许两个可观测输出：IO13 LED、IO10 蜂鸣器（docs/10 M0 记录） */
+/* 允许的输出：IO13 LED、IO10 蜂鸣器、IO12 继电器（锁体，docs/68） */
 static int actuator_pin_allowed(uint8_t pin)
 {
-    return pin == (uint8_t)GPIO_13 || pin == (uint8_t)GPIO_10;
+    return pin == (uint8_t)PIN_LED || pin == (uint8_t)PIN_BUZZER || pin == (uint8_t)PIN_RELAY;
 }
 
 static void show_device(uint8_t pin, uint8_t level)
@@ -328,6 +333,12 @@ static void handle_actuator(const uint8_t *frame, size_t len)
     uapi_pin_set_mode((pin_t)act.pin, HAL_PIO_FUNC_GPIO);
     uapi_gpio_set_dir((pin_t)act.pin, GPIO_DIRECTION_OUTPUT);
     uapi_gpio_set_val((pin_t)act.pin, act.level ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
+    /* 继电器动作时用板载 LED 做同状态指示，现场不接锁也能看到执行结果 */
+    if ((uint8_t)act.pin == (uint8_t)PIN_RELAY) {
+        uapi_pin_set_mode(PIN_LED, HAL_PIO_FUNC_GPIO);
+        uapi_gpio_set_dir(PIN_LED, GPIO_DIRECTION_OUTPUT);
+        uapi_gpio_set_val(PIN_LED, act.level ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
+    }
     printf("SFC1 actuator: IO%u -> %u\r\n", (unsigned)act.pin, (unsigned)act.level);
     show_device(act.pin, act.level);
 
@@ -474,8 +485,9 @@ static void feed_byte(uint8_t b)
 }
 
 /* ---------------- 按键 ---------------- */
+/* IO12 留给继电器输出，不再参与按键候选扫描 */
 static const pin_t CANDIDATE_PINS[] = {
-    GPIO_02, GPIO_03, GPIO_04, GPIO_05, GPIO_06, GPIO_07, GPIO_08, GPIO_09, GPIO_11, GPIO_12, GPIO_14,
+    GPIO_02, GPIO_03, GPIO_04, GPIO_05, GPIO_06, GPIO_07, GPIO_08, GPIO_09, GPIO_11, GPIO_14,
 };
 #define PIN_COUNT (sizeof(CANDIDATE_PINS) / sizeof(CANDIDATE_PINS[0]))
 
@@ -554,6 +566,11 @@ static void key_task(const char *arg)
     }
 
     key_pins_init();
+    /* 继电器/锁体：上电默认低（继电器不吸合=上锁）；未接线时不影响现有演示 */
+    uapi_pin_set_mode(PIN_RELAY, HAL_PIO_FUNC_GPIO);
+    uapi_gpio_set_dir(PIN_RELAY, GPIO_DIRECTION_OUTPUT);
+    uapi_gpio_set_val(PIN_RELAY, GPIO_LEVEL_LOW);
+    printf("SFC1 relay: IO%u idle LOW\r\n", (unsigned)PIN_RELAY);
     uart_ret = sfc1_uart_init();
     printf("M3 SFC1 ready: uart=%d device=%s\r\n", (int)uart_ret, DEVICE_LABEL);
 

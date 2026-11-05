@@ -12,13 +12,21 @@ const { encodeActuator, decodeFrame } = require('./ws63-protocol.cjs');
 
 const PIN_LED = 13;
 const PIN_BUZZER = 10;
+const PIN_RELAY = 12;
 
 // 业务语义 → (pin, level)；未映射返回 null（不猜、不乱动）
-/** @param {string} device @param {string} op @returns {{ pin: number, level: number } | null} */
-function mapDeviceOp(device, op) {
+// relayPin：配置后 unlock/lock 走继电器（锁体）；null = 沿用 IO13 LED 演示
+/**
+ * @param {string} device
+ * @param {string} op
+ * @param {number | null} [relayPin]
+ * @returns {{ pin: number, level: number } | null}
+ */
+function mapDeviceOp(device, op, relayPin = null) {
   const action = String(op || '').toLowerCase();
-  if (['unlock', 'open', 'on', 'start'].includes(action)) return { pin: PIN_LED, level: 1 };
-  if (['lock', 'close', 'off', 'stop'].includes(action)) return { pin: PIN_LED, level: 0 };
+  const lockPin = typeof relayPin === 'number' && Number.isInteger(relayPin) ? relayPin : PIN_LED;
+  if (['unlock', 'open', 'on', 'start'].includes(action)) return { pin: lockPin, level: 1 };
+  if (['lock', 'close', 'off', 'stop'].includes(action)) return { pin: lockPin, level: 0 };
   if (['beep', 'alarm'].includes(action)) return { pin: PIN_BUZZER, level: 1 };
   if (['silence', 'mute'].includes(action)) return { pin: PIN_BUZZER, level: 0 };
   return null;
@@ -32,7 +40,7 @@ function isSfc1Header(buf, i) {
 }
 
 /**
- * @param {{ portPath?: string, key?: Buffer, timeoutMs?: number, openSerial?: ((opts: { path: string, baudRate: number }) => any) | null, serialPortModule?: any, map?: (device: string, op: string) => { pin: number, level: number } | null, now?: () => number }} [options]
+ * @param {{ portPath?: string, key?: Buffer, timeoutMs?: number, openSerial?: ((opts: { path: string, baudRate: number }) => any) | null, serialPortModule?: any, map?: ((device: string, op: string) => { pin: number, level: number } | null) | null, relayPin?: number | null, now?: () => number }} [options]
  */
 function createSerialActuator({
   portPath,
@@ -40,12 +48,18 @@ function createSerialActuator({
   timeoutMs = 3000,
   openSerial = null, // 测试注入：({path, baudRate}) => 可写/可读端口对象
   serialPortModule = undefined, // 测试注入：传 null 验证「未安装」分支
-  map = mapDeviceOp,
+  map = null,
+  relayPin = null,
   now = () => Date.now(),
 } = {}) {
   if (!portPath) throw new TypeError('设备执行需要串口路径');
   if (!Buffer.isBuffer(key) || key.length !== 32) throw new TypeError('设备执行需要 32 字节密钥');
-  if (typeof map !== 'function') throw new TypeError('map 必须是函数');
+  if (relayPin !== null && (!Number.isInteger(relayPin) || relayPin < 0 || relayPin > 48)) {
+    throw new TypeError('relayPin 必须是 0–48 的整数（或 null 关闭）');
+  }
+  /** @type {(device: string, op: string) => { pin: number, level: number } | null} */
+  const mapper = typeof map === 'function' ? map : (device, op) => mapDeviceOp(device, op, relayPin);
+  if (typeof mapper !== 'function') throw new TypeError('map 必须是函数');
 
   function resolveCtor() {
     const mod = serialPortModule === undefined
@@ -136,7 +150,7 @@ function createSerialActuator({
 
   /** @param {{ device?: string, op?: string }} [options] @returns {Promise<any>} */
   async function actuate({ device = '', op = '' } = {}) {
-    const target = map(device, op);
+    const target = mapper(device, op);
     if (!target) {
       throw Object.assign(new Error(`没有映射到物理动作：${device} ${op}`), { code: 'ACTUATOR_MAP' });
     }
@@ -159,7 +173,7 @@ function createSerialActuator({
     return { ...ack, device, op };
   }
 
-  return { actuate, send, map };
+  return { actuate, send, map: mapper };
 }
 
-module.exports = { createSerialActuator, mapDeviceOp, PIN_LED, PIN_BUZZER };
+module.exports = { createSerialActuator, mapDeviceOp, PIN_LED, PIN_BUZZER, PIN_RELAY };

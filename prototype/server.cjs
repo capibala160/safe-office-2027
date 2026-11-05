@@ -1145,10 +1145,14 @@ async function startServer({
   }
   // 设备联动（v0.52）：确认后用同一块板执行 GPIO；端口默认跟随近场串口
   const actuatorPort = String(process.env.SAFE_OFFICE_ACTUATOR_PORT || '').trim() || nearfieldPort;
+  // 继电器/锁体（docs/68）：SAFE_OFFICE_ACTUATOR_RELAY_PIN=12 时 unlock/lock 改走 IO12；
+  // 不配则保持 IO13 LED 演示。
+  const relayPinRaw = String(process.env.SAFE_OFFICE_ACTUATOR_RELAY_PIN || '').trim();
+  const actuatorRelayPin = relayPinRaw ? Number(relayPinRaw) : null;
   let actuator = null;
   try {
     if (actuatorPort && nearfieldKey) {
-      actuator = createSerialActuator({ portPath: actuatorPort, key: nearfieldKey });
+      actuator = createSerialActuator({ portPath: actuatorPort, key: nearfieldKey, relayPin: actuatorRelayPin });
     }
   } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ 设备执行未启用：${err.message}`);

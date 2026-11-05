@@ -153,3 +153,29 @@ test('执行器：首次打开被占用 → 短暂重试后成功', async () => 
   assert.equal(ack.status, 0);
   assert.equal(calls, 2, '占用后应重试一次');
 });
+
+test('映射：relayPin=12 时 unlock/lock 走继电器，未配置仍走 IO13 LED', () => {
+  assert.deepEqual(mapDeviceOp('门锁', 'unlock', 12), { pin: 12, level: 1 });
+  assert.deepEqual(mapDeviceOp('门锁', 'lock', 12), { pin: 12, level: 0 });
+  assert.deepEqual(mapDeviceOp('门锁', 'unlock'), { pin: 13, level: 1 });
+  assert.deepEqual(mapDeviceOp('门锁', 'beep', 12), { pin: 10, level: 1 });
+});
+
+test('执行器：relayPin=12 时执行帧 pin=12，ACK 绑定同一 nonce', async () => {
+  const key = Buffer.alloc(32, 11);
+  let decoded = null;
+  const actuator = createSerialActuator({
+    portPath: 'COM-TEST',
+    key,
+    relayPin: 12,
+    openSerial: () => fakePort({
+      key, status: 0, pin: 12, level: 1,
+      onWrite: (buf) => { decoded = decodeFrame(buf, key); },
+    }),
+  });
+  const ack = await actuator.actuate({ device: '门锁', op: 'unlock' });
+  assert.equal(decoded.pin, 12);
+  assert.equal(decoded.level, 1);
+  assert.equal(ack.pin, 12);
+  assert.equal(ack.level, 1);
+});

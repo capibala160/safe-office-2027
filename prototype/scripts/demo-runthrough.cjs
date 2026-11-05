@@ -132,6 +132,9 @@ function buildChallenge({ key, ttlSec, summary }) {
     process.exitCode = 2;
     return;
   }
+  const relayPinRaw = String(process.env.SAFE_OFFICE_ACTUATOR_RELAY_PIN || '').trim();
+  const relayPin = relayPinRaw ? Number(relayPinRaw) : null;
+  const lockPin = Number.isInteger(relayPin) ? relayPin : 13;
   const skipSoftware = flag('skip-software');
   const skipHardware = flag('skip-hardware');
   const skipPress = flag('skip-press');
@@ -193,17 +196,22 @@ function buildChallenge({ key, ttlSec, summary }) {
 
   // ---------- 幕2：设备执行（独占串口，早于监听） ----------
   if (!skipHardware) {
-    sceneBanner('幕2 · 设备执行：IO13 LED 亮 / 灭');
-    await runScene('设备执行：unlock → LED 亮', async () => {
-      const actuator = createSerialActuator({ portPath, key, timeoutMs: 5000 });
+    const lockTarget = Number.isInteger(relayPin) ? `IO${relayPin} 继电器` : 'IO13 LED';
+    sceneBanner(`幕2 · 设备执行：${lockTarget} 亮 / 灭`);
+    await runScene(`设备执行：unlock → ${lockTarget} 开`, async () => {
+      const actuator = createSerialActuator({ portPath, key, timeoutMs: 5000, relayPin });
       const ack = await actuator.actuate({ device: deviceLabel, op: 'unlock' });
-      if (ack.pin !== 13 || ack.level !== 1) throw new Error(`ACK 不符：pin=${ack.pin} level=${ack.level}`);
+      if (ack.pin !== lockPin || ack.level !== 1) {
+        throw new Error(`ACK 不符：pin=${ack.pin} level=${ack.level}（期望 pin=${lockPin}）`);
+      }
       return `pin=${ack.pin} level=${ack.level}`;
     });
-    await runScene('设备执行：lock → LED 灭', async () => {
-      const actuator = createSerialActuator({ portPath, key, timeoutMs: 5000 });
+    await runScene(`设备执行：lock → ${lockTarget} 关`, async () => {
+      const actuator = createSerialActuator({ portPath, key, timeoutMs: 5000, relayPin });
       const ack = await actuator.actuate({ device: deviceLabel, op: 'lock' });
-      if (ack.pin !== 13 || ack.level !== 0) throw new Error(`ACK 不符：pin=${ack.pin} level=${ack.level}`);
+      if (ack.pin !== lockPin || ack.level !== 0) {
+        throw new Error(`ACK 不符：pin=${ack.pin} level=${ack.level}（期望 pin=${lockPin}）`);
+      }
       return `pin=${ack.pin} level=${ack.level}`;
     });
   }
