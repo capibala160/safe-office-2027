@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.52.2');
+  assert.equal(bootstrap.state.version, '0.52.3');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -1053,12 +1053,28 @@ test('设备执行前先关闭近场串口，避免与确认争用同一 COM 口
   assert.equal(service._nearfieldTransport, null);
 });
 
+test('设备页：继电器模式如实标注 IO12，未配置时只标 LED/蜂鸣器', (t) => {
+  const relay = setup({ service: { actuator: { relayPin: 12, actuate: async () => ({ status: 0, pin: 12, level: 1 }) } } });
+  t.after(() => relay.service.close());
+  assert.match(relay.service.getDevice().actuator.note, /IO12 继电器/);
+  assert.match(relay.service.getDevice().actuator.note, /门锁类设备/);
+
+  const led = setup({ service: { actuator: { actuate: async () => ({ status: 0, pin: 13, level: 1 }) } } });
+  t.after(() => led.service.close());
+  assert.doesNotMatch(led.service.getDevice().actuator.note, /IO12/);
+});
+
 test('屏幕共享：只能结束自己的会话，管理员例外', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const { sessionId } = service.startScreenShare({ target: '会议室大屏', actor: 'alice' });
   assert.throws(
     () => service.stopScreenShare({ sessionId, actor: 'bob', role: '员工' }),
+    /只能结束自己的共享会话/,
+  );
+  // 无身份调用不得绕过归属检查（fail-closed）
+  assert.throws(
+    () => service.stopScreenShare({ sessionId }),
     /只能结束自己的共享会话/,
   );
   assert.ok(service.audit.entries.some((e) => e.kind === '屏幕共享越权停止'));

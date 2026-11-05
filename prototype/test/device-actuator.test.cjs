@@ -179,3 +179,47 @@ test('执行器：relayPin=12 时执行帧 pin=12，ACK 绑定同一 nonce', asy
   assert.equal(ack.pin, 12);
   assert.equal(ack.level, 1);
 });
+
+test('映射：继电器只响应门锁类设备的开/关语义，开灯不会开锁', () => {
+  // 门锁类设备 + 显式锁语义 → 继电器
+  assert.deepEqual(mapDeviceOp('会议室-门锁', 'unlock', 12), { pin: 12, level: 1 });
+  assert.deepEqual(mapDeviceOp('front-door', 'open', 12), { pin: 12, level: 1 });
+  assert.deepEqual(mapDeviceOp('会议室-门锁', 'lock', 12), { pin: 12, level: 0 });
+  // 非门锁设备的锁语义 → fail-closed，不落到继电器
+  assert.equal(mapDeviceOp('会议室灯', 'unlock', 12), null);
+  assert.equal(mapDeviceOp('空调', 'open', 12), null);
+  // 通用的 on/off 仍只驱动 IO13 LED，绝不碰继电器
+  assert.deepEqual(mapDeviceOp('会议室灯', 'on', 12), { pin: 13, level: 1 });
+  assert.deepEqual(mapDeviceOp('门锁', 'on', 12), { pin: 13, level: 1 });
+  assert.deepEqual(mapDeviceOp('门锁', 'off', 12), { pin: 13, level: 0 });
+  // 未配置继电器 / 显式配置 IO13 时保持旧行为（IO13 不是继电器）
+  assert.deepEqual(mapDeviceOp('会议室灯', 'unlock'), { pin: 13, level: 1 });
+  assert.deepEqual(mapDeviceOp('会议室灯', 'unlock', 13), { pin: 13, level: 1 });
+});
+
+test('执行器：relayPin 只接受固件支持的 IO12/IO13，其余配置直接拒绝', () => {
+  const key = Buffer.alloc(32, 12);
+  for (const bad of [10, 14, 0, 1.5, Number.NaN]) {
+    assert.throws(
+      () => createSerialActuator({ portPath: 'COM-TEST', key, relayPin: bad }),
+      /relayPin/,
+      `relayPin=${bad} 应被拒绝`,
+    );
+  }
+});
+
+test('执行器：继电器模式下非门锁设备 unlock 直接拒绝，且不写串口', async () => {
+  const key = Buffer.alloc(32, 13);
+  let writes = 0;
+  const actuator = createSerialActuator({
+    portPath: 'COM-TEST',
+    key,
+    relayPin: 12,
+    openSerial: () => fakePort({ key, pin: 12, level: 1, onWrite: () => { writes += 1; } }),
+  });
+  await assert.rejects(
+    actuator.actuate({ device: '会议室灯', op: 'unlock' }),
+    /没有映射到物理动作/,
+  );
+  assert.equal(writes, 0, '被拒绝时不应向板子发任何执行帧');
+});

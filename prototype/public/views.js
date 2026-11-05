@@ -1006,7 +1006,7 @@
       ${c.store.autoMode === 'auto-full' ? '<div class="notice block">当前为全自动演示模式：高危动作已被自动批准，没有待确认挑战。切回“人在环”才能演示设备确认。</div>' : ''}
       ${c.store.autoMode === 'auto-safe' ? '<div class="notice info">低风险自动：仅白名单内部级外发自动确认；外发/删除/打印/设备仍会出现在这里。</div>' : ''}
       ${data.device ? `<div class="notice info">设备 ${esc(data.device.id)} · ${esc(data.device.label)} · 协议 ${esc(data.device.protocol)} · ${esc(data.device.transport)} · ${esc(data.device.note)}</div>` : ''}
-      ${data.actuator && data.actuator.configured ? `<div class="notice info">设备联动：${esc(data.actuator.note)}——确认通过后由板端验签执行（unlock/lock → LED，beep/silence → 蜂鸣器）</div>` : ''}
+      ${data.actuator && data.actuator.configured ? `<div class="notice info">设备联动：${esc(data.actuator.note)}——确认通过后由板端验签执行（unlock/lock → 继电器或 LED，beep/silence → 蜂鸣器）</div>` : ''}
       <section class="card">
         <div class="card-head"><h2>确认设备</h2><span class="sub">${(data.devices || []).length} 台</span></div>
         <label class="label">当前设备</label>

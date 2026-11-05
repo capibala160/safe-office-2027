@@ -127,14 +127,21 @@ function buildChallenge({ key, ttlSec, summary }) {
 (async () => {
   const portPath = arg('port', '');
   const deviceLabel = arg('device', 'ws63-A');
+  // 业务侧设备名（必须含「锁/门禁/门」或 door/lock，否则继电器模式会 fail-closed）
+  const lockDevice = arg('lock-device', '门锁');
   if (!portPath) {
-    console.error('用法：node scripts/demo-runthrough.cjs --port COM11 [--device ws63-A] [--skip-software] [--skip-hardware]');
+    console.error('用法：node scripts/demo-runthrough.cjs --port COM11 [--device ws63-A] [--lock-device 门锁] [--skip-software] [--skip-hardware]');
     process.exitCode = 2;
     return;
   }
   const relayPinRaw = String(process.env.SAFE_OFFICE_ACTUATOR_RELAY_PIN || '').trim();
   const relayPin = relayPinRaw ? Number(relayPinRaw) : null;
-  const lockPin = Number.isInteger(relayPin) ? relayPin : 13;
+  if (relayPinRaw && relayPin !== 12 && relayPin !== 13) {
+    console.error('SAFE_OFFICE_ACTUATOR_RELAY_PIN 只支持 12（继电器）或 13（LED）');
+    process.exitCode = 2;
+    return;
+  }
+  const lockPin = relayPin === null ? 13 : relayPin;
   const skipSoftware = flag('skip-software');
   const skipHardware = flag('skip-hardware');
   const skipPress = flag('skip-press');
@@ -200,7 +207,7 @@ function buildChallenge({ key, ttlSec, summary }) {
     sceneBanner(`幕2 · 设备执行：${lockTarget} 亮 / 灭`);
     await runScene(`设备执行：unlock → ${lockTarget} 开`, async () => {
       const actuator = createSerialActuator({ portPath, key, timeoutMs: 5000, relayPin });
-      const ack = await actuator.actuate({ device: deviceLabel, op: 'unlock' });
+      const ack = await actuator.actuate({ device: lockDevice, op: 'unlock' });
       if (ack.pin !== lockPin || ack.level !== 1) {
         throw new Error(`ACK 不符：pin=${ack.pin} level=${ack.level}（期望 pin=${lockPin}）`);
       }
@@ -208,7 +215,7 @@ function buildChallenge({ key, ttlSec, summary }) {
     });
     await runScene(`设备执行：lock → ${lockTarget} 关`, async () => {
       const actuator = createSerialActuator({ portPath, key, timeoutMs: 5000, relayPin });
-      const ack = await actuator.actuate({ device: deviceLabel, op: 'lock' });
+      const ack = await actuator.actuate({ device: lockDevice, op: 'lock' });
       if (ack.pin !== lockPin || ack.level !== 0) {
         throw new Error(`ACK 不符：pin=${ack.pin} level=${ack.level}（期望 pin=${lockPin}）`);
       }

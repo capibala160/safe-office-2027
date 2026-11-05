@@ -104,8 +104,17 @@ class MockLLM {
       steps.push({ action: 'shareScreen', args: { id: 'M2' } });
       return steps;
     }
-    if (/门锁|空调|灯光|窗帘|联动/.test(command)) {
-      steps.push({ action: 'deviceControl', args: { device: '会议室-门锁', op: 'open' } });
+    // 设备联动：门锁类与一般设备分开规划——避免「开空调」被规划成「开锁」
+    if (/门锁|门禁|开锁|门.{0,2}关|关.{0,2}门|开.{0,2}门|关锁|锁上|上锁|联动/.test(command)) {
+      const op = /关|锁上|上锁/.test(command) ? 'lock' : 'open';
+      steps.push({ action: 'deviceControl', args: { device: '会议室-门锁', op } });
+      return steps;
+    }
+    if (/空调|灯光|窗帘|开灯|关灯/.test(command)) {
+      const device = /空调/.test(command) ? '会议室-空调'
+        : /窗帘/.test(command) ? '会议室-窗帘' : '会议室-灯光';
+      const op = /关|停/.test(command) ? 'off' : 'on';
+      steps.push({ action: 'deviceControl', args: { device, op } });
       return steps;
     }
 

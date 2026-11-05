@@ -3,9 +3,11 @@
 // 设备联动真实执行（v0.52，2026-11-04）
 //   确认通过后，主机把 SFC1 执行帧（type 0x21，HMAC）发给 WS63，
 //   板端验签、查重放、驱动 GPIO，再回 ACK（0x22，回带本次 nonce）。
-//   只映射两个可观测输出：IO13 板载 LED、IO10 蜂鸣器（docs/10 M0 记录）。
+//   输出：IO13 板载 LED、IO10 蜂鸣器、IO12 继电器（锁体，docs/68）。
+//   继电器只在设备名是门锁类（含「锁/门禁/门」或 door/lock）且操作是
+//   unlock/open/lock/close 时动作；开灯之类通用 on/off 只驱动 LED。
 // 边界：帧带 nonce 防重放；但执行只证明「板子收到的这条命令被执行了」，
-//       不证明门锁等真实机构动作（当前无继电器/锁体）。
+//       不证明门锁等真实机构动作（当前无继电器/锁体实物）。
 // ============================================================
 const crypto = require('node:crypto');
 const { encodeActuator, decodeFrame } = require('./ws63-protocol.cjs');
@@ -15,7 +17,21 @@ const PIN_BUZZER = 10;
 const PIN_RELAY = 12;
 
 // 业务语义 → (pin, level)；未映射返回 null（不猜、不乱动）
-// relayPin：配置后 unlock/lock 走继电器（锁体）；null = 沿用 IO13 LED 演示
+// relayPin：配置后**仅门锁类设备**的 unlock/open/lock/close 走继电器（锁体）；
+// 通用 on/start/off/stop 仍只驱动 IO13 LED——避免「开灯」这类指令误触门锁。
+// null = 沿用 IO13 LED 演示。
+const LOCK_OPS_ON = ['unlock', 'open'];
+const LOCK_OPS_OFF = ['lock', 'close'];
+const GENERIC_OPS_ON = ['on', 'start'];
+const GENERIC_OPS_OFF = ['off', 'stop'];
+// 业务设备名需含「锁 / 门禁 / 门」或 door/lock（如「会议室-门锁」「front-door」）
+const LOCK_DEVICE_RE = /(锁|门禁|门|door|lock)/i;
+
+/** @param {string} device @returns {boolean} */
+function isLockDevice(device) {
+  return LOCK_DEVICE_RE.test(String(device || ''));
+}
+
 /**
  * @param {string} device
  * @param {string} op
@@ -24,9 +40,18 @@ const PIN_RELAY = 12;
  */
 function mapDeviceOp(device, op, relayPin = null) {
   const action = String(op || '').toLowerCase();
-  const lockPin = typeof relayPin === 'number' && Number.isInteger(relayPin) ? relayPin : PIN_LED;
-  if (['unlock', 'open', 'on', 'start'].includes(action)) return { pin: lockPin, level: 1 };
-  if (['lock', 'close', 'off', 'stop'].includes(action)) return { pin: lockPin, level: 0 };
+  // 只有 IO12 才算「继电器模式」；IO13 是显式 LED，行为与未配置一致
+  const relayMode = relayPin === PIN_RELAY;
+  if (LOCK_OPS_ON.includes(action)) {
+    if (relayMode) return isLockDevice(device) ? { pin: /** @type {number} */ (relayPin), level: 1 } : null;
+    return { pin: PIN_LED, level: 1 };
+  }
+  if (LOCK_OPS_OFF.includes(action)) {
+    if (relayMode) return isLockDevice(device) ? { pin: /** @type {number} */ (relayPin), level: 0 } : null;
+    return { pin: PIN_LED, level: 0 };
+  }
+  if (GENERIC_OPS_ON.includes(action)) return { pin: PIN_LED, level: 1 };
+  if (GENERIC_OPS_OFF.includes(action)) return { pin: PIN_LED, level: 0 };
   if (['beep', 'alarm'].includes(action)) return { pin: PIN_BUZZER, level: 1 };
   if (['silence', 'mute'].includes(action)) return { pin: PIN_BUZZER, level: 0 };
   return null;
@@ -54,8 +79,10 @@ function createSerialActuator({
 } = {}) {
   if (!portPath) throw new TypeError('设备执行需要串口路径');
   if (!Buffer.isBuffer(key) || key.length !== 32) throw new TypeError('设备执行需要 32 字节密钥');
-  if (relayPin !== null && (!Number.isInteger(relayPin) || relayPin < 0 || relayPin > 48)) {
-    throw new TypeError('relayPin 必须是 0–48 的整数（或 null 关闭）');
+  // 只接受固件实际放行的输出脚：IO12 继电器 / IO13 LED（null 关闭）。
+  // 配成 IO10（蜂鸣器）会把「开锁」变成蜂鸣，配成其他脚会被板端拒绝——都在启动时直接失败。
+  if (relayPin !== null && relayPin !== PIN_RELAY && relayPin !== PIN_LED) {
+    throw new TypeError('relayPin 只支持 IO12（继电器）或 IO13（LED），或 null 关闭');
   }
   /** @type {(device: string, op: string) => { pin: number, level: number } | null} */
   const mapper = typeof map === 'function' ? map : (device, op) => mapDeviceOp(device, op, relayPin);
@@ -173,7 +200,7 @@ function createSerialActuator({
     return { ...ack, device, op };
   }
 
-  return { actuate, send, map: mapper };
+  return { actuate, send, map: mapper, relayPin };
 }
 
 module.exports = { createSerialActuator, mapDeviceOp, PIN_LED, PIN_BUZZER, PIN_RELAY };

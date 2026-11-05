@@ -45,7 +45,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.52.2';
+const VERSION = '0.52.3';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -129,6 +129,7 @@ function hashAuditEntries(/** @type {any} */ entries) {
 /**
  * @typedef {object} ActuatorLike
  * @property {(input: { device?: string, op?: string }) => Promise<any>} actuate
+ * @property {number | null} [relayPin]
  */
 /**
  * @typedef {object} AsrLike
@@ -3497,7 +3498,12 @@ class ConsoleService {
         note: this.pairingCode ? '手机确认端（局域网，非硬件）' : '虚拟设备（非硬件）',
       },
       pairing: this.pairingCode ? { code: this.pairingCode, note: '确认端配对码（局域网内可见）' } : null,
-      actuator: this.actuator ? { configured: true, note: '真实 GPIO（IO13 LED / IO10 蜂鸣器）' } : null,
+      actuator: this.actuator ? {
+        configured: true,
+        note: this.actuator.relayPin === 12
+          ? '真实 GPIO（IO12 继电器 + IO13 LED / IO10 蜂鸣器）；unlock/lock 只对门锁类设备生效'
+          : '真实 GPIO（IO13 LED / IO10 蜂鸣器）',
+      } : null,
       pending,
       history: this.challengeHistory
         .filter((/** @type {any} */ h) => !h.operationId || visible(h.operationId))
@@ -3537,8 +3543,9 @@ class ConsoleService {
     const id = String(sessionId || '').trim();
     const share = this._screenShares.get(id);
     if (!share) throw new ConsoleError('NOT_FOUND', '共享会话不存在或已结束', 404);
-    // 会话归属：只能停自己的；管理员/审计员例外
-    if (share.actor && actor && share.actor !== actor && !['管理员', '审计员'].includes(role)) {
+    // 会话归属：只能停自己的；管理员/审计员例外。无 actor 一律 fail-closed，
+    // 不能因为「没带身份」就跳过归属检查（HTTP 路由虽然已要求登录，这里仍守住）。
+    if (share.actor && share.actor !== actor && !['管理员', '审计员'].includes(role)) {
       this._withAuditActor(actor, () => this.audit.append('屏幕共享越权停止', {
         sessionId: id, owner: share.actor, actor,
       }));
