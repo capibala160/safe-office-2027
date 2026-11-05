@@ -7,16 +7,28 @@
 // ============================================================
 const { FakeMailer, MailerError } = require('./mailer.cjs');
 
+/**
+ * @typedef {{ sha256: string, name: string }} AttachmentMeta
+ * @typedef {{ content: Buffer, mime: string }} LoadedAttachment
+ */
+
 class DemoExecutor {
+  /**
+   * @param {{ mailer?: any, now?: () => number, onBusinessAction?: ((event: { operation: object, idempotencyKey: string, record: object }) => void | Promise<void>) | null, attachmentLoader?: ((sha256: string) => LoadedAttachment | null) | null }} [options]
+   */
   constructor({ mailer = new FakeMailer(), now = () => Date.now(), onBusinessAction = null, attachmentLoader = null } = {}) {
     this.mailer = mailer;
     this.now = now;
+    /** @type {((sha256: string) => LoadedAttachment | null) | null} */
     this.attachmentLoader = attachmentLoader; // sha256 → { content, mime }，真实发送时必须提供
+    /** @type {((event: { operation: object, idempotencyKey: string, record: object }) => void | Promise<void>) | null} */
     this.onBusinessAction = onBusinessAction;
+    /** @type {object[]} */
     this.actions = [];
     this.results = new Map();
   }
 
+  /** @param {{ operation: any, idempotencyKey?: string }} params @returns {Promise<any>} */
   async send({ operation, idempotencyKey }) {
     if (!operation || typeof operation !== 'object') throw new TypeError('缺少操作记录');
     const key = idempotencyKey || operation.operationHash;
@@ -27,7 +39,7 @@ class DemoExecutor {
       // 冻结记录只存附件元数据；真正发送前按 sha256 取回内容（取不到就明确失败）
       let outgoing = operation;
       if (Array.isArray(operation.attachments) && operation.attachments.length > 0) {
-        const files = operation.attachments.map((a) => {
+        const files = operation.attachments.map((/** @type {AttachmentMeta} */ a) => {
           const blob = typeof this.attachmentLoader === 'function' ? this.attachmentLoader(a.sha256) : null;
           if (!blob || !Buffer.isBuffer(blob.content)) {
             throw new MailerError('rejected', `附件「${a.name}」内容缺失，拒绝发送`);

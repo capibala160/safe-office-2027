@@ -14,6 +14,7 @@ const { randomBytes } = require('node:crypto');
 const { encodeChallenge, decodeFrame } = require('./ws63-protocol.cjs');
 const { deriveDeviceId } = require('./nearfield-confirm.cjs');
 
+/** @type {Record<string, number>} */
 const ACTION_PROTOCOL = {
   sendExternalEmail: 1,
   deleteDoc: 2,
@@ -23,6 +24,7 @@ const ACTION_PROTOCOL = {
   shareScreen: 4,
 };
 
+/** @type {Record<string, string>} */
 const ACTION_LABEL = {
   sendExternalEmail: 'SEND EXT',
   deleteDoc: 'DELETE',
@@ -35,11 +37,13 @@ const ACTION_LABEL = {
 const SUMMARY_MAX = 96;
 
 // OLED 只有 ASCII 字库：非可打印字符一律替换成 ?，再按字节截断
+/** @param {any} value @param {number} [maxBytes] @returns {string} */
 function toAscii(value, maxBytes = SUMMARY_MAX) {
   const text = String(value === undefined || value === null ? '' : value).replace(/[^\x20-\x7E]/g, '?');
   return Buffer.from(text, 'ascii').subarray(0, maxBytes).toString('ascii');
 }
 
+/** @param {any} operation @returns {string} */
 function defaultSummary(operation) {
   const action = String(operation.action || '');
   const label = ACTION_LABEL[action] || toAscii(action || 'ACTION', 12).toUpperCase();
@@ -48,6 +52,10 @@ function defaultSummary(operation) {
   return toAscii(target ? `${label} ${target}` : label, SUMMARY_MAX);
 }
 
+/**
+ * @param {{ transportFactory: () => Promise<{ send: (frame: Buffer) => Promise<any> }>, key: Buffer | (() => Buffer), deviceId: string | Buffer | (() => string | Buffer), ttlSec?: number, now?: () => number, summaryOf?: (operation: any) => string, logger?: ((line: string) => void) | null }} [options]
+ * @returns {(params?: { operation?: any }) => Promise<{ approved: boolean, method: string, proof?: any }>}
+ */
 function createBoardHumanConfirm({
   transportFactory,
   key,
@@ -56,7 +64,7 @@ function createBoardHumanConfirm({
   now = () => Math.floor(Date.now() / 1000),
   summaryOf = defaultSummary,
   logger = null,
-} = {}) {
+} = /** @type {any} */ ({})) {
   if (typeof transportFactory !== 'function') throw new TypeError('transportFactory 必填');
   // key / deviceId 支持传函数：控制台切换设备时不必重建 runtime 的 humanConfirm
   if (typeof key !== 'function' && (!Buffer.isBuffer(key) || key.length !== 32)) {
@@ -80,6 +88,7 @@ function createBoardHumanConfirm({
     if (typeof value !== 'string' || value.trim() === '') throw new TypeError('deviceId 必填');
     return value;
   };
+  /** @param {string} line */
   const log = (line) => { if (typeof logger === 'function') logger(line); };
 
   return async function boardHumanConfirm({ operation } = {}) {
@@ -92,7 +101,7 @@ function createBoardHumanConfirm({
       keyNow = currentKey();
       expectedDevice = deriveDeviceId(currentDeviceId());
     } catch (err) {
-      return { approved: false, method: `确认端参数错误：${err && err.message ? err.message : err}` };
+      return { approved: false, method: `确认端参数错误：${err instanceof Error ? err.message : String(err)}` };
     }
 
     const action = ACTION_PROTOCOL[operation.action] || 4;
@@ -114,7 +123,7 @@ function createBoardHumanConfirm({
     try {
       transport = await transportFactory();
     } catch (err) {
-      return { approved: false, method: `确认端不可用：${err && err.message ? err.message : err}` };
+      return { approved: false, method: `确认端不可用：${err instanceof Error ? err.message : String(err)}` };
     }
 
     log(`闸4 板端确认：${summary}（TTL ${ttlSec}s）`);
@@ -122,7 +131,7 @@ function createBoardHumanConfirm({
     try {
       reply = await transport.send(frame);
     } catch (err) {
-      return { approved: false, method: `确认端异常：${err && err.message ? err.message : err}` };
+      return { approved: false, method: `确认端异常：${err instanceof Error ? err.message : String(err)}` };
     }
     if (!reply) return { approved: false, method: '板端无响应（超时）' };
 
@@ -130,7 +139,7 @@ function createBoardHumanConfirm({
     try {
       decision = decodeFrame(reply, keyNow);
     } catch (err) {
-      return { approved: false, method: `决定帧非法：${err && err.message ? err.message : err}` };
+      return { approved: false, method: `决定帧非法：${err instanceof Error ? err.message : String(err)}` };
     }
     if (decision.type !== 'decision') return { approved: false, method: '不是决定帧' };
     if (!decision.taskId.equals(taskId) || !decision.nonce.equals(nonce)) {

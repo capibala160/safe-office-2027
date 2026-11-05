@@ -13,6 +13,7 @@ const crypto = require('node:crypto');
 
 const DEFAULT_DURATION_MS = 60 * 60 * 1000;
 
+/** @param {unknown} value @returns {string} */
 function escapeIcsText(value) {
   return String(value === undefined || value === null ? '' : value)
     .replace(/\\/g, '\\\\')
@@ -21,12 +22,15 @@ function escapeIcsText(value) {
     .replace(/\r?\n/g, '\\n');
 }
 
+/** @param {Date} date @returns {string} */
 function toIcsUtc(date) {
+  /** @param {number} n @returns {string} */
   const pad = (n) => String(n).padStart(2, '0');
   return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`
     + `T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`;
 }
 
+/** @param {number} year @param {number} month @param {number} day @returns {boolean} */
 function validYmd(year, month, day) {
   if (![year, month, day].every((n) => Number.isInteger(n))) return false;
   if (month < 1 || month > 12 || day < 1) return false;
@@ -43,6 +47,7 @@ function validYmd(year, month, day) {
 // eslint-disable-next-line security/detect-unsafe-regex
 const WHEN_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
+/** @param {unknown} at @returns {Date | null} */
 function parseWhen(at) {
   if (at instanceof Date) return Number.isNaN(at.getTime()) ? null : new Date(at.getTime());
   const src = String(at === undefined || at === null ? '' : at).trim();
@@ -76,6 +81,10 @@ function parseWhen(at) {
   return date;
 }
 
+/**
+ * @param {{ title?: string, at?: unknown, id?: string, description?: string, now?: Date }} [options]
+ * @returns {string}
+ */
 function buildIcs({ title, at, id = '', description = '', now = new Date() } = {}) {
   const start = parseWhen(at);
   if (!start) throw new Error(`会议时间无法解析或日期不存在：${String(at || '(空)')}`);
@@ -100,6 +109,10 @@ function buildIcs({ title, at, id = '', description = '', now = new Date() } = {
   ].join('\r\n');
 }
 
+/**
+ * @param {{ dir?: string | null, title?: string, at?: unknown, id?: string, description?: string, now?: Date }} [options]
+ * @returns {{ mode: string, file: string | null, uid: string | null }}
+ */
 function writeMeeting({ dir, title, at, id = '', description = '', now = new Date() } = {}) {
   if (!dir) return { mode: 'simulated', file: null, uid: null };
   const ics = buildIcs({ title, at, id, description, now });
@@ -113,12 +126,13 @@ function writeMeeting({ dir, title, at, id = '', description = '', now = new Dat
 
 // 环境变量 → 写入函数；未配置返回 null（调用方保持模拟）。
 // 配了 SAFE_OFFICE_CALDAV_URL 时写 CalDAV（.ics 同时可在本地留一份），否则只写本地目录。
+/** @param {Record<string, string | undefined>} [env] @returns {((input: any) => Promise<any>) | null} */
 function createCalendarWriterFromEnv(env = process.env) {
   const dir = env.SAFE_OFFICE_CALENDAR_DIR ? String(env.SAFE_OFFICE_CALENDAR_DIR) : null;
   const caldavUrl = env.SAFE_OFFICE_CALDAV_URL ? String(env.SAFE_OFFICE_CALDAV_URL).trim() : '';
   if (!caldavUrl) {
     if (!dir) return null;
-    return async (input) => writeMeeting({ ...input, dir });
+    return async (/** @type {any} */ input) => writeMeeting({ ...input, dir });
   }
   const { createCalDavWriter } = require('./caldav-writer.cjs');
   const writer = createCalDavWriter({
@@ -127,7 +141,7 @@ function createCalendarWriterFromEnv(env = process.env) {
     password: env.SAFE_OFFICE_CALDAV_PASS || '',
     timeoutMs: Number(env.SAFE_OFFICE_CALDAV_TIMEOUT_MS) || undefined,
   });
-  return async (input) => {
+  return async (/** @type {any} */ input) => {
     const ics = buildIcs(input);
     const uidMatch = /^UID:(.+)$/m.exec(ics);
     const uid = uidMatch ? uidMatch[1].trim() : '';

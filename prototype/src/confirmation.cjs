@@ -1,6 +1,14 @@
 'use strict';
 const crypto = require('node:crypto');
+/** @param {unknown} operation @returns {string} */
 const digest = operation => crypto.createHash('sha256').update(JSON.stringify(operation)).digest('hex');
+
+/**
+ * @typedef {object} PendingChallenge
+ * @property {string} nonce
+ * @property {string} operationHash
+ * @property {number} expiresAt
+ */
 
 // 协议原型：生产环境替换密钥保管及应答传输，HMAC 本身不证明距离或身份。
 class ConfirmationService {
@@ -10,6 +18,7 @@ class ConfirmationService {
     this.ttlMs = ttlMs;
     this.pending = new Map();
   }
+  /** @param {unknown} operation @returns {PendingChallenge} */
   challenge(operation) {
     for (const [nonce, c] of this.pending) if (c.expiresAt <= this.now()) this.pending.delete(nonce);
     const c = { nonce: crypto.randomBytes(24).toString('hex'), operationHash: digest(operation), expiresAt: this.now() + this.ttlMs };
@@ -17,9 +26,11 @@ class ConfirmationService {
     return structuredClone(c);
   }
   // 仅供离线模拟持有设备响应；真实节点应在可信界面展示操作并由用户主动确认。
+  /** @param {PendingChallenge} c @returns {PendingChallenge & { mac: string }} */
   simulateResponse(c) {
     return { ...c, mac: crypto.createHmac('sha256', this.key).update(JSON.stringify(c)).digest('hex') };
   }
+  /** @param {{ nonce?: string, mac?: string } | null | undefined} response @param {unknown} operation @returns {boolean} */
   consume(response, operation) {
     if (!response) return false;
     const c = this.pending.get(response.nonce);

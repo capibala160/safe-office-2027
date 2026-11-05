@@ -9,17 +9,19 @@
 // ============================================================
 const { MailerError } = require('./mailer.cjs');
 
-let nodemailer = null;
+/** @type {any} */ let nodemailer = null;
 try {
   // 可选依赖：没装时只在真正启用 SMTP 时明确报错，核心功能不受影响
-  nodemailer = require('nodemailer');
+  nodemailer = /** @type {any} */ (require('nodemailer'));
 } catch { /* ignore */ }
 
+/** @param {unknown} value @param {boolean} [fallback] @returns {boolean} */
 function asBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   return /^(1|true|yes|on)$/i.test(String(value));
 }
 
+/** @param {any} operation */
 function assertOperation(operation) {
   if (!operation || typeof operation !== 'object' ||
       typeof operation.recipient !== 'string' || operation.recipient === '' ||
@@ -29,6 +31,9 @@ function assertOperation(operation) {
 }
 
 class SMTPMailer {
+  /**
+   * @param {{ host?: string, port?: number | string, secure?: boolean, user?: string, pass?: string, from?: string | null, fromName?: string, aliases?: any[], allowTo?: string[], transport?: any, timeoutMs?: number }} [options]
+   */
   constructor({
     host, port = 465, secure = true, user, pass, from = null,
     fromName = '', aliases = [], allowTo = [], transport = null, timeoutMs = 20000,
@@ -40,17 +45,18 @@ class SMTPMailer {
     this.pass = pass;
     this.from = from || user;
     this.fromName = String(fromName || '');
-    this.aliases = (aliases || []).map((a) => (
+    this.aliases = (aliases || []).map((/** @type {any} */ a) => (
       a && typeof a === 'object'
         ? { address: String(a.address || '').trim().toLowerCase(), name: String(a.name || '').trim() }
         : { address: String(a || '').trim().toLowerCase(), name: '' }
     )).filter((a) => a.address);
-    this.allowTo = (allowTo || []).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+    this.allowTo = (allowTo || []).map((/** @type {any} */ x) => String(x).trim().toLowerCase()).filter(Boolean);
     this.transport = transport;
     this.timeoutMs = timeoutMs;
   }
 
   // 别名只能来自本账号配置；冻结记录里的 mailAlias 是地址
+  /** @param {any} operation */
   _resolveFrom(operation) {
     const alias = String((operation && operation.mailAlias) || '').trim().toLowerCase();
     if (!alias) {
@@ -82,6 +88,7 @@ class SMTPMailer {
     return this.transport;
   }
 
+  /** @param {string} to */
   _checkRecipient(to) {
     if (this.allowTo.length === 0) {
       throw new MailerError('rejected', '收件人白名单为空：拒绝发送（fail-closed）');
@@ -91,6 +98,7 @@ class SMTPMailer {
     }
   }
 
+  /** @param {{ operation: any, idempotencyKey?: string }} params */
   async send({ operation, idempotencyKey }) {
     assertOperation(operation);
     const to = String(operation.recipient).trim();
@@ -108,7 +116,7 @@ class SMTPMailer {
       to,
       subject: operation.subject || '',
       text: operation.body,
-      attachments: attachmentFiles.map((file) => ({
+      attachments: attachmentFiles.map((/** @type {any} */ file) => ({
         filename: file.name,
         content: file.content,
         contentType: file.mime || 'application/octet-stream',
@@ -120,8 +128,9 @@ class SMTPMailer {
     try {
       info = await this._transport().sendMail(mail);
     } catch (err) {
-      const code = String((err && err.code) || '');
-      const message = String((err && err.message) || err);
+      const e = /** @type {any} */ (err);
+      const code = String((e && e.code) || '');
+      const message = String((e && e.message) || err);
       // 认证/收件人/报文错误 = 明确失败；网络/超时 = 结果不确定（unknown，禁自动重试）
       if (/^(EAUTH|EENVELOPE|EMESSAGE|EATTACHMENT)$/.test(code) ||
           /auth|authentication|recipient|mailbox|invalid/i.test(message)) {
@@ -138,6 +147,7 @@ class SMTPMailer {
 
 // 环境变量 → SMTPMailer；未配置 host 返回 null（走 FakeMailer）。
 // 配了 host 但缺 user/pass，直接抛错，避免"看起来配了其实没发"。
+/** @param {Record<string, string | undefined>} [env] */
 function createSmtpMailerFromEnv(env = process.env) {
   if (!env.SAFE_OFFICE_SMTP_HOST) return null;
   const user = env.SAFE_OFFICE_SMTP_USER || '';

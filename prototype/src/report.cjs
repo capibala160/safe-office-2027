@@ -8,9 +8,11 @@
 const { mkdirSync, writeFileSync } = require('node:fs');
 const { dirname } = require('node:path');
 
+/** @param {unknown} s @returns {string} */
 const esc = (s) =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+/** @param {unknown} detail @returns {string} */
 function summarize(detail) {
   if (detail == null) return '';
   if (typeof detail !== 'object') return String(detail);
@@ -25,6 +27,7 @@ function summarize(detail) {
 }
 
 // 事件配色：拦截=红 / 降级脱敏=黄 / 放行执行=绿 / 其余=灰蓝
+/** @param {string} kind @param {any} detail @returns {string} */
 function kindClass(kind, detail) {
   if (/拒绝|拦截|失败|中止/.test(kind)) return 'block';
   if (kind === '计划校验' && detail && detail.level === 'block') return 'block';
@@ -33,10 +36,14 @@ function kindClass(kind, detail) {
   return 'info';
 }
 
+/**
+ * @param {{ title?: string, meta?: string[], audit?: any, risk?: any, perf?: any }} data
+ * @returns {string}
+ */
 function buildReport({ title = '安全智慧办公 · 治理报告', meta = [], audit, risk, perf }) {
   const verifyOk = audit && typeof audit.verify === 'function' ? audit.verify() : false;
   const entries = (audit && audit.entries) || [];
-  const blocks = entries.filter((e) => kindClass(e.kind, e.detail) === 'block').length;
+  const blocks = entries.filter((/** @type {any} */ e) => kindClass(e.kind, e.detail) === 'block').length;
   const spans = perf ? perf.report() : [];
   const events = (risk && risk.events) || [];
   const reviews = (risk && risk.reviews) || [];
@@ -50,7 +57,7 @@ function buildReport({ title = '安全智慧办公 · 治理报告', meta = [], 
     ['审计链完整性', verifyOk ? '✓ 未篡改' : '✗ 断裂'],
   ];
 
-  const timeline = entries.map((e) => {
+  const timeline = entries.map((/** @type {any} */ e) => {
     const cls = kindClass(e.kind, e.detail);
     const time = String(e.ts || '').slice(11, 19);
     return `<tr class="row-${cls}"><td class="seq">${e.seq}</td><td class="time">${time}</td>` +
@@ -58,15 +65,15 @@ function buildReport({ title = '安全智慧办公 · 治理报告', meta = [], 
       `<td class="detail">${esc(summarize(e.detail))}</td><td class="hash">${esc((e.hash || '').slice(0, 8))}</td></tr>`;
   }).join('\n');
 
-  const perfRows = spans.map((s) =>
+  const perfRows = spans.map((/** @type {any} */ s) =>
     `<tr><td>${esc(s.label)}</td><td>${s.count}</td><td>${s.totalMs.toFixed(2)} ms</td><td>${s.avgMs.toFixed(3)} ms</td><td>${s.maxMs.toFixed(3)} ms</td></tr>`,
   ).join('\n');
 
-  const riskRows = events.map((ev) =>
+  const riskRows = events.map((/** @type {any} */ ev) =>
     `<tr><td class="pts">+${ev.points}</td><td>${esc(ev.reason)}</td><td>${ev.score}</td></tr>`,
   ).join('\n');
 
-  const reviewRows = reviews.map((r) =>
+  const reviewRows = reviews.map((/** @type {any} */ r) =>
     `<tr><td>${esc(r.by)}</td><td>${esc(r.outcome)}</td><td>${r.scoreBefore} → ${r.scoreAfter}</td><td>${esc(r.note)}</td></tr>`,
   ).join('\n');
 
@@ -136,6 +143,7 @@ function buildReport({ title = '安全智慧办公 · 治理报告', meta = [], 
 </div></body></html>`;
 }
 
+/** @param {string} filePath @param {any} data @returns {string} */
 function writeReport(filePath, data) {
   const html = buildReport(data);
   mkdirSync(dirname(filePath), { recursive: true });

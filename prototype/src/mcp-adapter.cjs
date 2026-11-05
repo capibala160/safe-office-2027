@@ -8,7 +8,26 @@
 // ============================================================
 const MCP_VERSION = '0.13.0';
 
+/**
+ * @typedef {{
+ *   request: (method: string, params?: Record<string, any>) => Promise<any>,
+ *   notify?: (method: string, params?: Record<string, any>) => Promise<any>,
+ * }} McpTransport
+ * @typedef {{
+ *   name: string,
+ *   description?: string,
+ *   inputSchema?: { required?: unknown[] } | null,
+ * }} McpToolInfo
+ */
+
 class McpClient {
+  /**
+   * @param {{
+   *   transport?: McpTransport,
+   *   protocolVersion?: string,
+   *   clientInfo?: { name: string, version: string },
+   * }} [options]
+   */
   constructor({
     transport,
     protocolVersion = '2024-11-05',
@@ -54,6 +73,11 @@ class McpClient {
     throw new Error('MCP tools/list 返回结构非法');
   }
 
+  /**
+   * @param {string} name
+   * @param {Record<string, any>} [args]
+   * @returns {Promise<any>}
+   */
   async callTool(name, args = {}) {
     await this.ensureInitialized();
     if (typeof name !== 'string' || !name.trim()) throw new TypeError('callTool 需要工具名');
@@ -62,6 +86,15 @@ class McpClient {
 }
 
 // 最小 HTTP JSON-RPC 传输：POST application/json；不做 SSE
+/**
+ * @param {{
+ *   url?: string,
+ *   headers?: Record<string, string>,
+ *   fetchImpl?: typeof fetch,
+ *   timeoutMs?: number,
+ * }} [options]
+ * @returns {McpTransport}
+ */
 function createHttpTransport({
   url,
   headers = {},
@@ -71,6 +104,7 @@ function createHttpTransport({
   if (typeof url !== 'string' || !url.trim()) throw new TypeError('createHttpTransport 需要 url');
   if (typeof fetchImpl !== 'function') throw new TypeError('createHttpTransport 需要 fetch');
   let id = 0;
+  /** @type {string | null} */
   let sessionId = null;
 
   const requestHeaders = () => ({
@@ -109,12 +143,13 @@ function createHttpTransport({
   };
 }
 
+/** @param {any} result @returns {string} */
 function formatMcpResult(result) {
   if (result === undefined || result === null) return '';
   if (Array.isArray(result.content)) {
     const text = result.content
-      .filter((item) => item && item.type === 'text' && typeof item.text === 'string')
-      .map((item) => item.text)
+      .filter((/** @type {any} */ item) => item && item.type === 'text' && typeof item.text === 'string')
+      .map((/** @type {any} */ item) => item.text)
       .join('\n');
     if (text) return text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
   }
@@ -123,11 +158,16 @@ function formatMcpResult(result) {
 }
 
 // 把 MCP tools/list 的单个工具映射成注册表定义（不含 executor）
+/**
+ * @param {McpToolInfo} tool
+ * @param {{ defaults?: Record<string, any>, overrides?: Record<string, any> }} [options]
+ * @returns {Record<string, any>}
+ */
 function mcpToolToDefinition(tool, { defaults = {}, overrides = {} } = {}) {
   if (!tool || typeof tool.name !== 'string' || !tool.name.trim()) {
     throw new TypeError('MCP 工具缺少 name');
   }
-  const meta = { ...defaults, ...overrides };
+  const meta = /** @type {Record<string, any>} */ ({ ...defaults, ...overrides });
   if (!meta.sandbox) {
     throw new TypeError(`MCP 工具「${tool.name}」缺少显式 sandbox 档案（fail-closed）`);
   }
@@ -156,6 +196,18 @@ function mcpToolToDefinition(tool, { defaults = {}, overrides = {} } = {}) {
   };
 }
 
+/**
+ * @param {{
+ *   registry?: { register: Function, validate: Function },
+ *   client?: McpClient,
+ *   policy?: any,
+ *   defaults?: Record<string, any>,
+ *   overrides?: Record<string, Record<string, any>>,
+ *   include?: string[] | null,
+ *   source?: string,
+ * }} [options]
+ * @returns {Promise<{ registered: string[], executors: Map<string, any>, definitions: any[] }>}
+ */
 async function registerMcpTools({
   registry,
   client,
@@ -192,7 +244,7 @@ async function registerMcpTools({
     const def = mcpToolToDefinition(tool, { defaults, overrides: overrides[tool.name] || {} });
     return {
       ...def,
-      executor: async ({ args }) => {
+      executor: async (/** @type {{ args?: any }} */ { args }) => {
         const result = await client.callTool(tool.name, args || {});
         if (result && result.isError) throw new Error(`MCP 工具 ${tool.name} 返回错误`);
         return formatMcpResult(result);

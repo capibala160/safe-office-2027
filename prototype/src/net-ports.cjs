@@ -9,6 +9,7 @@ const FETCH_BAD_PORTS = new Set([
   3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
 ]);
 
+/** @param {number | string} port @returns {boolean} */
 function isFetchBadPort(port) {
   return FETCH_BAD_PORTS.has(Number(port));
 }

@@ -11,6 +11,7 @@ const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const STEP_SECONDS = 30;
 const DIGITS = 6;
 
+/** @param {Buffer | Uint8Array} buffer @returns {string} */
 function base32Encode(buffer) {
   let bits = 0;
   let value = 0;
@@ -27,6 +28,7 @@ function base32Encode(buffer) {
   return out;
 }
 
+/** @param {string} text @returns {Buffer} */
 function base32Decode(text) {
   const clean = String(text || '').toUpperCase().replace(/[\s=-]/g, '');
   if (!clean || !/^[A-Z2-7]+$/.test(clean)) throw new Error('Base32 密钥非法');
@@ -44,10 +46,12 @@ function base32Decode(text) {
   return Buffer.from(out);
 }
 
+/** @param {number} [bytes] @returns {string} */
 function generateSecret(bytes = 20) {
   return base32Encode(crypto.randomBytes(bytes));
 }
 
+/** @param {string} secret @param {number} counter @param {number} [digits] @returns {string} */
 function hotp(secret, counter, digits = DIGITS) {
   const key = base32Decode(secret);
   const buf = Buffer.alloc(8);
@@ -61,10 +65,17 @@ function hotp(secret, counter, digits = DIGITS) {
   return String(binary % (10 ** digits)).padStart(digits, '0');
 }
 
+/** @param {string} secret @param {{ now?: number, step?: number, digits?: number }} [options] @returns {string} */
 function totpCode(secret, { now = Date.now(), step = STEP_SECONDS, digits = DIGITS } = {}) {
   return hotp(secret, Math.floor(now / 1000 / step), digits);
 }
 
+/**
+ * @param {string} secret
+ * @param {string} code
+ * @param {{ now?: number, step?: number, digits?: number, window?: number }} [options]
+ * @returns {boolean}
+ */
 function verifyTotp(secret, code, {
   now = Date.now(), step = STEP_SECONDS, digits = DIGITS, window = 1,
 } = {}) {
@@ -82,6 +93,7 @@ function verifyTotp(secret, code, {
   return ok;
 }
 
+/** @param {{ secret: string, account: string, issuer?: string }} params @returns {string} */
 function otpauthUri({ secret, account, issuer = '安全智慧办公' }) {
   const label = `${encodeURIComponent(issuer)}:${encodeURIComponent(String(account || ''))}`;
   const query = new URLSearchParams({

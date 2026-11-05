@@ -15,14 +15,17 @@ const { findClamav } = require('./file-scan.cjs');
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
 const STATUS = { OK: 'ok', WARN: 'warn', FAIL: 'fail' };
 
+/** @param {string} id @param {string} label @param {string} status @param {unknown} detail @returns {{ id: string, label: string, status: string, detail: string }} */
 function check(id, label, status, detail) {
   return { id, label, status, detail: String(detail) };
 }
 
+/** @param {string} file @returns {boolean} */
 function fileExists(file) {
   try { return fs.statSync(file).isFile(); } catch { return false; }
 }
 
+/** @param {string} dir @returns {boolean} */
 function dirWritable(dir) {
   try {
     if (!fs.statSync(dir).isDirectory()) return false;
@@ -33,21 +36,23 @@ function dirWritable(dir) {
   }
 }
 
+/** @param {string} file @returns {{ username: string, role: string, disabled: boolean }[] | null} */
 function parseUsersFile(file) {
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
     const list = Array.isArray(raw) ? raw : (Array.isArray(raw.users) ? raw.users : []);
-    return list.map((u) => ({ username: u && u.username, role: u && u.role, disabled: !!(u && u.disabled) }));
+    return list.map((/** @type {any} */ u) => ({ username: u && u.username, role: u && u.role, disabled: !!(u && u.disabled) }));
   } catch {
     return null;
   }
 }
 
+/** @param {number} port @param {string} [host] @param {number} [timeoutMs] @returns {Promise<boolean>} */
 function probePort(port, host = '127.0.0.1', timeoutMs = 300) {
   return new Promise((resolve) => {
     const socket = net.createConnection({ port, host });
     let settled = false;
-    const finish = (inUse) => {
+    const finish = (/** @type {boolean} */ inUse) => {
       if (settled) return;
       settled = true;
       socket.destroy();
@@ -61,6 +66,7 @@ function probePort(port, host = '127.0.0.1', timeoutMs = 300) {
 }
 
 // ---------- 静态检查：不依赖运行中的服务 ----------
+/** @param {{ env?: Record<string, string | undefined>, dataDir?: string, port?: number | null, checkPort?: boolean }} [options] @returns {ReturnType<typeof check>[]} */
 function staticChecks({ env = process.env, dataDir = DATA_DIR, port = null, checkPort = false } = {}) {
   const out = [];
   const major = Number(String(process.versions.node || '').split('.')[0]);
@@ -196,6 +202,7 @@ function staticChecks({ env = process.env, dataDir = DATA_DIR, port = null, chec
 }
 
 // ---------- 运行态检查：额外看 service 的真实状态 ----------
+/** @param {{ service?: any, auth?: any }} [options] @returns {ReturnType<typeof check>[]} */
 function serviceChecks({ service, auth = null } = {}) {
   if (!service) return [];
   const out = [];
@@ -284,6 +291,7 @@ function serviceChecks({ service, auth = null } = {}) {
   return out;
 }
 
+/** @param {{ env?: Record<string, string | undefined>, dataDir?: string, service?: any, auth?: any, port?: number | null, checkPort?: boolean }} [options] */
 async function runPreflight({ env = process.env, dataDir = DATA_DIR, service = null, auth = null, port = null, checkPort = false } = {}) {
   const checks = staticChecks({ env, dataDir, port, checkPort });
   if (checkPort && port) {
@@ -308,7 +316,9 @@ async function runPreflight({ env = process.env, dataDir = DATA_DIR, service = n
   };
 }
 
+/** @param {any} result @returns {string} */
 function formatPreflight(result) {
+  /** @type {Record<string, string>} */
   const icon = { ok: '✓', warn: '!', fail: '✗' };
   const lines = [
     `演示前自检：${result.ok ? '通过' : '有阻塞项'}（${result.counts.ok} 通过 / ${result.counts.warn} 提醒 / ${result.counts.fail} 失败）`,

@@ -23,11 +23,13 @@ const DEFAULT_TEMPLATE = [
 
 const MACHINE_LOCAL_PARTS = /^(no-?reply|do-?not-?reply|mailer-daemon|postmaster|bounce|notifications?)$/i;
 
+/** @param {unknown} value @param {boolean} [fallback] @returns {boolean} */
 function asBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   return /^(1|true|yes|on)$/i.test(String(value));
 }
 
+/** @param {unknown} value @param {number} min @param {number} max @param {number} fallback @returns {number} */
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -35,6 +37,7 @@ function clampInt(value, min, max, fallback) {
 }
 
 // "Name <addr@example.com>" / "addr@example.com" → 小写地址；解析不了返回 ''
+/** @param {unknown} from @returns {string} */
 function senderAddress(from) {
   const text = String(from || '').trim();
   if (!text) return '';
@@ -45,12 +48,14 @@ function senderAddress(from) {
 }
 
 // 去重键只认 Message-ID：UID 在不同 UIDVALIDITY / 重启后可能变化，不能作为回信凭证。
+/** @param {any} item @returns {string} */
 function normalizeMessageKey(item) {
   const raw = (item && (item.messageId || (item.headers && item.headers['message-id']))) || '';
   const id = String(raw).trim().replace(/^<|>$/g, '').toLowerCase();
   return id ? `mid:${id}` : '';
 }
 
+/** @param {unknown} raw @returns {{ address?: string, domain?: string }[]} */
 function parseAllowlist(raw) {
   const list = String(raw || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   const rules = [];
@@ -77,6 +82,7 @@ function parseAllowlist(raw) {
   return rules;
 }
 
+/** @param {Record<string, string | undefined>} [env] @returns {any} */
 function parseAutoReplyConfig(env = process.env) {
   if (!asBool(env.SAFE_OFFICE_AUTOREPLY, false)) {
     return { enabled: false };
@@ -106,13 +112,14 @@ function parseAutoReplyConfig(env = process.env) {
 
 // 单封邮件的判断：纯函数 + 注入查询，便于单测
 // ctx: { selfAddresses:Set, hasReplied(key), lastReplyTo(addr), countLastHour() }
+/** @param {any} item @param {any} config @param {any} ctx @returns {{ decision: 'skip' | 'reply', reason: string, messageKey?: string, recipient?: string }} */
 function evaluateAutoReply(item, config, ctx) {
   if (!config || !config.enabled) return { decision: 'skip', reason: 'auto-reply-disabled' };
   const from = senderAddress(item && item.from);
   if (!from) return { decision: 'skip', reason: 'sender-invalid' };
   if ((ctx.selfAddresses || new Set()).has(from)) return { decision: 'skip', reason: 'self' };
 
-  const allowed = config.allow.some((rule) => (
+  const allowed = config.allow.some((/** @type {{ address?: string, domain?: string }} */ rule) => (
     rule.address ? rule.address === from : from.endsWith(`@${rule.domain}`)
   ));
   if (!allowed) return { decision: 'skip', reason: 'sender-not-allowed' };

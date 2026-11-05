@@ -9,16 +9,23 @@
 // ============================================================
 const { parseDsn } = require('./dsn.cjs');
 
+/**
+ * @typedef {{ host: string, port: number, secure: boolean, user: string, pass: string, mailbox: string, pollMs: number, maxPerPoll: number, timeoutMs: number }} ImapConfig
+ */
+
+/** @type {any} */
 let ImapFlow = null;
 try {
   ({ ImapFlow } = require('imapflow'));
 } catch { /* 未安装时在启用处明确报错 */ }
 
+/** @param {unknown} value @param {boolean} [fallback] @returns {boolean} */
 function asBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   return /^(1|true|yes|on)$/i.test(String(value));
 }
 
+/** @param {NodeJS.ProcessEnv} [env] @returns {ImapConfig | null} */
 function createImapConfigFromEnv(env = process.env) {
   const host = env.SAFE_OFFICE_IMAP_HOST;
   if (!host) return null;
@@ -41,6 +48,7 @@ function createImapConfigFromEnv(env = process.env) {
 }
 
 class ImapBouncePoller {
+  /** @param {{ config?: ImapConfig, ingest?: (eml: string) => any, factory?: ((cfg: ImapConfig) => any) | null, now?: () => number, logger?: ((message: string) => void) | null }} [options] */
   constructor({ config, ingest, factory = null, now = () => Date.now(), logger = null } = {}) {
     if (!config || typeof config.host !== 'string') throw new TypeError('ImapBouncePoller 需要 config');
     if (typeof ingest !== 'function') throw new TypeError('ImapBouncePoller 需要 ingest(eml)');
@@ -48,7 +56,7 @@ class ImapBouncePoller {
     this.ingest = ingest;
     this.now = now;
     this.logger = logger;
-    this.factory = factory || ((cfg) => {
+    this.factory = factory || ((/** @type {ImapConfig} */ cfg) => {
       if (!ImapFlow) throw new Error('imapflow 未安装：npm install imapflow 后再启用 IMAP');
       return new ImapFlow({
         host: cfg.host,
@@ -66,6 +74,7 @@ class ImapBouncePoller {
     // v0.40.1：游标轮转 + 非退信 UID 记忆，避免普通邮件占满窗口把退信饿死
     this.cursorUid = 0;
     this.ignoredUids = new Set();
+    /** @type {{ configured: boolean, lastAt: string | null, lastResult: any, lastError: string | null, totalDsns: number, totalBounced: number }} */
     this.state = {
       configured: true,
       lastAt: null,
@@ -78,6 +87,7 @@ class ImapBouncePoller {
 
   // 候选 UID：未读 + 最近 7 天的退信特征邮件（用户可能先点开看过，不能只因已读就漏掉）。
   // 单个查询服务端不支持就跳过；全部失败才抛错。
+  /** @param {any} client @returns {Promise<number[]>} */
   async _searchCandidateUids(client) {
     const since = new Date(this.now() - 7 * 24 * 60 * 60 * 1000);
     const queries = [
@@ -123,6 +133,7 @@ class ImapBouncePoller {
         .sort((a, b) => a - b);
       // 游标轮转：从上一轮扫到的 UID 之后继续，扫到尾部再绕回开头。
       // 普通邮件保持未读，但不会永远占住前 N 个位置（否则后面的退信永远轮不到）。
+      /** @type {number[]} */
       let list = [];
       if (unseen.length > 0) {
         const start = unseen.findIndex((uid) => uid > this.cursorUid);
@@ -140,7 +151,7 @@ class ImapBouncePoller {
           source = msg && msg.source ? String(msg.source) : '';
         } catch (err) {
           result.errors += 1;
-          this.state.lastError = `取信失败 UID ${uid}：${err.message}`;
+          this.state.lastError = `取信失败 UID ${uid}：${err instanceof Error ? err.message : String(err)}`;
           continue;
         }
         const parsed = parseDsn(source);
@@ -155,7 +166,7 @@ class ImapBouncePoller {
           outcome = this.ingest(source);
         } catch (err) {
           result.errors += 1;
-          this.state.lastError = `回填失败 UID ${uid}：${err.message}`;
+          this.state.lastError = `回填失败 UID ${uid}：${err instanceof Error ? err.message : String(err)}`;
           continue;   // 不标已读，下一轮重试
         }
         if (outcome && outcome.skipped) {
@@ -186,7 +197,7 @@ class ImapBouncePoller {
       return result;
     } catch (err) {
       this.state.lastAt = new Date(startedAt).toISOString();
-      this.state.lastError = String(err && err.message ? err.message : err);
+      this.state.lastError = err instanceof Error ? err.message : String(err);
       throw err;
     } finally {
       this.running = false;
@@ -202,7 +213,7 @@ class ImapBouncePoller {
       try {
         await this.poll();
       } catch (err) {
-        if (this.logger) this.logger(`IMAP 轮询失败：${err.message}`);
+        if (this.logger) this.logger(`IMAP 轮询失败：${err instanceof Error ? err.message : String(err)}`);
       }
     };
     run();
@@ -220,6 +231,7 @@ class ImapBouncePoller {
   }
 }
 
+/** @param {{ ingest?: (eml: string) => any, env?: NodeJS.ProcessEnv, logger?: ((message: string) => void) | null, factory?: ((cfg: ImapConfig) => any) | null }} [options] @returns {ImapBouncePoller | null} */
 function createBouncePollerFromEnv({ ingest, env = process.env, logger = null, factory = null } = {}) {
   const config = createImapConfigFromEnv(env);
   if (!config) return null;

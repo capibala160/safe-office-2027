@@ -8,8 +8,54 @@
 //   - 边界：不做 IMAP/POP3 收信；.eml 由人工或外部流程导入
 // ============================================================
 
+/**
+ * @typedef {Object} MessagePart
+ * @property {Record<string, string>} headers
+ * @property {string} body
+ */
+
+/**
+ * @typedef {Object} HtmlBounceFact
+ * @property {string} recipient
+ * @property {string} action
+ * @property {string} status
+ * @property {string} diagnostic
+ */
+
+/**
+ * @typedef {Object} DsnAccumulator
+ * @property {Record<string, string>[]} statusBlocks
+ * @property {Record<string, string>[]} embeddedHeaders
+ * @property {HtmlBounceFact[]} htmlFacts
+ */
+
+/**
+ * @typedef {Object} DsnReport
+ * @property {string} recipient
+ * @property {string} action
+ * @property {string} status
+ * @property {boolean} hardFail
+ * @property {string} diagnostic
+ * @property {string} remoteMta
+ * @property {string[]} messageIds
+ * @property {string[]} [idempotencyKeys]
+ */
+
+/**
+ * @typedef {Object} DsnParseResult
+ * @property {boolean} isDsn
+ * @property {string} reportType
+ * @property {string[]} messageIds
+ * @property {string[]} idempotencyKeys
+ * @property {DsnReport[]} reports
+ * @property {string[]} failedRecipients
+ * @property {string[]} delayedRecipients
+ */
+
 // 头字段解析：支持折行（续行以空白开头）与重复字段合并
+/** @param {string} [text] @returns {Record<string, string>} */
 function parseHeaders(text) {
+  /** @type {Record<string, string>} */
   const headers = {};
   let last = null;
   for (const rawLine of String(text || '').split(/\r?\n/)) {
@@ -28,6 +74,7 @@ function parseHeaders(text) {
   return headers;
 }
 
+/** @param {string} [text] @returns {MessagePart} */
 function splitMessage(text) {
   const src = String(text || '');
   const m = /\r?\n\r?\n/.exec(src);
@@ -38,7 +85,9 @@ function splitMessage(text) {
   };
 }
 
+/** @param {string} [value] @returns {{type: string, params: Record<string, string>}} */
 function parseContentType(value) {
+  /** @type {{type: string, params: Record<string, string>}} */
   const out = { type: '', params: {} };
   const src = String(value || '').trim();
   if (!src) return out;
@@ -51,7 +100,9 @@ function parseContentType(value) {
   return out;
 }
 
+/** @param {string} [body] @param {string} [boundary] @returns {MessagePart[]} */
 function splitMultipart(body, boundary) {
+  /** @type {MessagePart[]} */
   const parts = [];
   if (!boundary) return parts;
   const segments = String(body || '').split(`--${boundary}`);
@@ -66,7 +117,9 @@ function splitMultipart(body, boundary) {
 
 // delivery-status 正文按空行分块：第一块是报文级（Reporting-MTA 等），
 // 之后每个收件人一块。没有 Final-Recipient 的块不要。
+/** @param {string} [body] @returns {Record<string, string>[]} */
 function parseStatusBlocks(body) {
+  /** @type {Record<string, string>[]} */
   const blocks = [];
   for (const chunk of String(body || '').split(/\r?\n\r?\n+/)) {
     if (!chunk.trim()) continue;
@@ -76,6 +129,7 @@ function parseStatusBlocks(body) {
   return blocks;
 }
 
+/** @param {string} [value] @returns {string} */
 function normalizeMessageId(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -84,9 +138,11 @@ function normalizeMessageId(value) {
   return id ? id.toLowerCase() : '';
 }
 
+/** @param {string} [value] @returns {string[]} */
 function extractMessageIds(value) {
   const src = String(value || '').trim();
   if (!src) return [];
+  /** @type {string[]} */
   const ids = [];
   const re = /<([^<>]+)>/g;
   let m;
@@ -101,6 +157,7 @@ function extractMessageIds(value) {
   return ids;
 }
 
+/** @param {string} [value] @returns {string} */
 function stripAddress(value) {
   const raw = String(value || '').trim();
   // Final-Recipient: rfc822; user@example.com
@@ -108,6 +165,7 @@ function stripAddress(value) {
   return (m ? m[1] : raw).trim().replace(/^<|>$/g, '').trim();
 }
 
+/** @param {string} [value] @returns {string} */
 function stripDiagnostic(value) {
   const raw = String(value || '').trim();
   const m = /^\s*[a-z0-9-]+\s*;\s*([\s\S]+)$/i.exec(raw);
@@ -115,6 +173,7 @@ function stripDiagnostic(value) {
 }
 
 // 传输编码解码：目前只处理 base64（QQ 把原信放在 application/octet-stream）
+/** @param {MessagePart} part @returns {string} */
 function decodeTransferBody(part) {
   const enc = String(part.headers['content-transfer-encoding'] || '').toLowerCase();
   if (enc === 'base64') {
@@ -123,6 +182,7 @@ function decodeTransferBody(part) {
   return part.body;
 }
 
+/** @param {string} [html] @returns {string} */
 function htmlToText(html) {
   return String(html || '')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -143,6 +203,7 @@ function htmlToText(html) {
 
 // QQ 退信没有 message/delivery-status：关键信息在 HTML 正文里。
 // 例：无法发送到 x@y ... 退信原因 ... host mx[...] said: 550-5.1.1 ...
+/** @param {string} [html] @returns {HtmlBounceFact | null} */
 function extractHtmlBounceFact(html) {
   const text = htmlToText(html);
   const recipientMatch = /无法发送到\s*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)/.exec(text)
@@ -167,6 +228,11 @@ function extractHtmlBounceFact(html) {
 }
 
 // 递归收集：退信状态块 + 内嵌原信头 + HTML 退信信息
+/**
+ * @param {MessagePart} part
+ * @param {DsnAccumulator} acc
+ * @returns {DsnAccumulator}
+ */
 function collectParts(part, acc) {
   const ct = parseContentType(part.headers['content-type']);
   if (ct.type.startsWith('multipart/')) {
@@ -203,10 +269,12 @@ function collectParts(part, acc) {
   return acc;
 }
 
+/** @param {string} [text] @returns {DsnParseResult} */
 function parseDsn(text) {
   const src = String(text || '');
   const top = splitMessage(src);
   const topType = parseContentType(top.headers['content-type']);
+  /** @type {DsnAccumulator} */
   const acc = { statusBlocks: [], embeddedHeaders: [], htmlFacts: [] };
 
   if (topType.type.startsWith('multipart/')) {
@@ -218,7 +286,9 @@ function parseDsn(text) {
   }
 
   // 报文级 Message-ID：内嵌原信头优先，其次 Original-Message-ID
+  /** @type {string[]} */
   const messageIds = [];
+  /** @param {string} value */
   const pushIds = (value) => {
     for (const id of extractMessageIds(value)) if (!messageIds.includes(id)) messageIds.push(id);
   };
@@ -229,12 +299,14 @@ function parseDsn(text) {
 
   // 幂等键：我们发信时写入的 X-Idempotency-Key（= operationHash）。
   // 部分 MTA（QQ）会改写 Message-ID，但会保留这个自定义头，作为可靠回退匹配键。
+  /** @type {string[]} */
   const idempotencyKeys = [];
   for (const headers of acc.embeddedHeaders) {
     const raw = String(headers['x-idempotency-key'] || '').trim().toLowerCase();
     if (/^[0-9a-f]{64}$/.test(raw) && !idempotencyKeys.includes(raw)) idempotencyKeys.push(raw);
   }
 
+  /** @type {DsnReport[]} */
   const reports = [];
   for (const block of acc.statusBlocks) {
     const recipient = stripAddress(block['final-recipient'] || block['original-recipient'] || '');

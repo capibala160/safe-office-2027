@@ -10,6 +10,7 @@
 // ============================================================
 const { createImapConfigFromEnv } = require('./imap-poller.cjs');
 
+/** @type {any} */
 let ImapFlow = null;
 try {
   ({ ImapFlow } = require('imapflow'));
@@ -24,6 +25,22 @@ const SAFETY_HEADERS = [
   'list-id', 'list-unsubscribe', 'precedence', 'return-path', 'from', 'reply-to',
 ];
 
+/**
+ * @typedef {Object} InboxItem
+ * @property {number} uid
+ * @property {string} from
+ * @property {string} subject
+ * @property {string | null} date
+ * @property {boolean} seen
+ * @property {boolean} untrusted
+ * @property {string} preview
+ * @property {number} [size]
+ * @property {Record<string, string>} [headers]
+ * @property {string} [messageId]
+ * @property {string} [previewError]
+ */
+
+/** @param {string} [text] @returns {string} */
 function stripHtml(text) {
   return String(text || '')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -37,6 +54,7 @@ function stripHtml(text) {
     .trim();
 }
 
+/** @param {string} head @param {string} name @returns {string} */
 function headerValue(head, name) {
   // name 只来自内部常量/白名单，不接收用户输入
   // eslint-disable-next-line security/detect-non-literal-regexp
@@ -46,8 +64,10 @@ function headerValue(head, name) {
 }
 
 // 只解析安全判断要用的头；同名头保留第一个，折叠行拼回去
+/** @param {string} [raw] @returns {Record<string, string>} */
 function parseSafetyHeaders(raw) {
   const text = String(raw || '');
+  /** @type {Record<string, string>} */
   const out = {};
   if (!text) return out;
   const unfolded = text.replace(/\r?\n[ \t]+/g, ' ');
@@ -62,6 +82,7 @@ function parseSafetyHeaders(raw) {
   return out;
 }
 
+/** @param {any} node @returns {string} */
 function mimeOf(node) {
   if (!node) return '';
   const type = String(node.type || '').toLowerCase();
@@ -70,6 +91,7 @@ function mimeOf(node) {
   return subtype ? `${type}/${subtype}` : type;
 }
 
+/** @param {any} node @returns {boolean} */
 function isAttachmentPart(node) {
   if (!node) return false;
   const disposition = String(node.disposition || '').toLowerCase();
@@ -78,6 +100,11 @@ function isAttachmentPart(node) {
   return !!name && disposition !== 'inline';
 }
 
+/**
+ * @param {any} node
+ * @param {{html?: boolean}} [options]
+ * @returns {any}
+ */
 function findTextPart(node, { html = false } = {}) {
   if (!node) return null;
   // 附件整棵子树都跳过：例如 message/rfc822 附件内部的 text/plain 也不能当正文
@@ -95,10 +122,12 @@ function findTextPart(node, { html = false } = {}) {
   return null;
 }
 
+/** @param {any} root @returns {any} */
 function selectPart(root) {
   return findTextPart(root, { html: false }) || findTextPart(root, { html: true });
 }
 
+/** @param {string} text @returns {string} */
 function decodeQuotedPrintable(text) {
   return String(text)
     .replace(/=\r?\n/g, '')
@@ -107,6 +136,7 @@ function decodeQuotedPrintable(text) {
 
 // imapflow.download() 已对文本段做传输编码解码 + 字符集转 UTF-8；
 // 这里不能再做 base64/quoted-printable 解码，否则会把明文当编码数据二次解码。
+/** @param {any} buffer @param {any} part @returns {string} */
 function previewFromDownloaded(buffer, part) {
   const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
   const text = bytes.toString('utf8');
@@ -116,6 +146,7 @@ function previewFromDownloaded(buffer, part) {
 
 // 仅用于“已知未解码的原始段”（例如自建测试/非 imapflow 数据源）；
 // 不要对 imapflow.download() 的输出调用。
+/** @param {any} buffer @param {any} part @returns {string} */
 function decodeRawBody(buffer, part) {
   const encoding = String((part && part.encoding) || '').toLowerCase();
   let bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
@@ -135,6 +166,7 @@ function decodeRawBody(buffer, part) {
   return String(text).replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 
+/** @param {any} content @param {number} maxBytes @returns {Promise<Buffer>} */
 async function readLimited(content, maxBytes) {
   if (!content) return Buffer.alloc(0);
   if (Buffer.isBuffer(content)) return content.subarray(0, maxBytes);
@@ -156,6 +188,7 @@ async function readLimited(content, maxBytes) {
   return Buffer.from(String(content)).subarray(0, maxBytes);
 }
 
+/** @param {any} client @param {number} [timeoutMs] @returns {Promise<void>} */
 async function closeClient(client, timeoutMs = 2000) {
   if (!client) return;
   let finished = false;
@@ -174,7 +207,15 @@ async function closeClient(client, timeoutMs = 2000) {
   }
 }
 
+/**
+ * @param {Promise<any>} promise
+ * @param {number} ms
+ * @param {string} message
+ * @param {(() => any) | null} [onTimeout]
+ * @returns {Promise<any>}
+ */
 function withTimeout(promise, ms, message, onTimeout = null) {
+  /** @type {any} */
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(async () => {
@@ -189,6 +230,12 @@ function withTimeout(promise, ms, message, onTimeout = null) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * @param {number | undefined} uid
+ * @param {any} [envelope]
+ * @param {any} [flags]
+ * @returns {InboxItem}
+ */
 function envelopeItem(uid, envelope = null, flags = null) {
   const fromBox = envelope && Array.isArray(envelope.from) ? envelope.from[0] : null;
   const from = fromBox
@@ -207,6 +254,11 @@ function envelopeItem(uid, envelope = null, flags = null) {
 }
 
 // 兼容旧测试/调用：从原始 source 提取预览（不推荐用于大邮件）
+/**
+ * @param {any} source
+ * @param {{uid?: number, envelope?: any, flags?: any}} [options]
+ * @returns {InboxItem}
+ */
 function parseMessage(source, { uid, envelope = null, flags = null } = {}) {
   const text = String(source || '');
   const split = text.search(/\r?\n\r?\n/);
@@ -221,6 +273,14 @@ function parseMessage(source, { uid, envelope = null, flags = null } = {}) {
 }
 
 class ImapInboxReader {
+  /**
+   * @param {Object} [options]
+   * @param {any} [options.config]
+   * @param {((cfg: any) => any) | null} [options.factory]
+   * @param {() => number} [options.now]
+   * @param {number} [options.readTimeoutMs]
+   * @param {number} [options.closeTimeoutMs]
+   */
   constructor({
     config, factory = null, now = () => Date.now(), readTimeoutMs = 0, closeTimeoutMs = 0,
   } = {}) {
@@ -242,10 +302,11 @@ class ImapInboxReader {
         socketTimeout: cfg.timeoutMs,
       });
     });
-    this._cache = null;
+    this._cache = /** @type {any} */ (null);
     this._inflight = new Map();   // limit → Promise；不同条数的并发请求不能共用
   }
 
+  /** @param {{limit?: number, refresh?: boolean, includeHeaders?: boolean}} [options] @returns {Promise<any>} */
   async fetch({ limit = 10, refresh = false, includeHeaders = false } = {}) {
     const max = Math.min(50, Math.max(1, Number(limit) || 10));
     const withHeaders = !!includeHeaders;
@@ -269,6 +330,7 @@ class ImapInboxReader {
     return task;
   }
 
+  /** @param {any} client @param {number} max @param {boolean} [includeHeaders] @returns {Promise<any>} */
   async _fetchUncached(client, max, includeHeaders = false) {
     try {
       await client.connect();
@@ -283,8 +345,10 @@ class ImapInboxReader {
         .filter((uid) => Number.isInteger(uid) && uid > 0)
         .sort((a, b) => a - b)
         .slice(-max);
+      /** @type {InboxItem[]} */
       const items = [];
       for (const uid of list) {
+        /** @type {any} */
         const query = { envelope: true, bodyStructure: true, flags: true };
         if (includeHeaders) query.headers = SAFETY_HEADERS;
         const msg = await client.fetchOne(uid, query, { uid: true });
@@ -307,7 +371,8 @@ class ImapInboxReader {
             const bytes = await readLimited(downloaded && downloaded.content, MAX_PREVIEW_BYTES);
             item.preview = previewFromDownloaded(bytes, part);
           } catch (err) {
-            item.previewError = String((err && err.message) || err);
+            const caught = /** @type {any} */ (err);
+            item.previewError = String((caught && caught.message) || caught);
           }
         }
         items.push(item);

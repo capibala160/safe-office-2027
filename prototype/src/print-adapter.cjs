@@ -18,6 +18,9 @@ const PS_SCRIPT = [
   'Get-Content -LiteralPath $env:SAFE_PRINT_FILE -Raw -Encoding UTF8 | Out-Printer -Name $env:SAFE_PRINT_NAME',
 ].join('; ');
 
+/**
+ * @param {{ text?: string, printer?: string | null, title?: string, timeoutMs?: number, exec?: typeof execFile }} [options]
+ */
 function printText({
   text, printer = null, title = '', timeoutMs = 30000,
   exec = execFile,
@@ -45,17 +48,18 @@ function printText({
 }
 
 // ---------- v0.40 排版打印：HTML → PDF（Edge headless）→ 可选提交打印机 ----------
-const EDGE_CANDIDATES = [
+const EDGE_CANDIDATES = /** @type {string[]} */ ([
   process.env.SAFE_OFFICE_EDGE,
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-].filter(Boolean);
+].filter(Boolean));
 
 const PS_PRINT_PDF = [
   "$ErrorActionPreference='Stop'",
   'Start-Process -FilePath $env:SAFE_PRINT_PDF -Verb PrintTo -ArgumentList $env:SAFE_PRINT_NAME',
 ].join('; ');
 
+/** @returns {string | null} */
 function findEdge() {
   for (const candidate of EDGE_CANDIDATES) {
     try { if (fs.existsSync(candidate)) return candidate; } catch { /* ignore */ }
@@ -63,6 +67,7 @@ function findEdge() {
   return null;
 }
 
+/** @param {unknown} value @returns {string} */
 function escapeHtml(value) {
   return String(value === undefined || value === null ? '' : value)
     .replace(/&/g, '&amp;')
@@ -72,28 +77,34 @@ function escapeHtml(value) {
 }
 
 // 行内格式：先转义再加标签（顺序不能反，否则会绕过转义）
+/** @param {string} escaped @returns {string} */
 function inlineFormat(escaped) {
   return escaped
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 }
 
+/** @param {string} line @returns {string[] | null} */
 function splitTableRow(line) {
   const trimmed = line.trim();
   if (!trimmed.startsWith('|') || trimmed.indexOf('|', 1) === -1) return null;
   return trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
 }
 
+/** @param {string[]} cells @returns {boolean} */
 function isTableSeparator(cells) {
   return Array.isArray(cells) && cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
 // 轻量 Markdown：标题 / 无序·有序列表 / 表格 / 引用 / 分隔线 / 行内 **粗体** 与 `代码`
 // 其余按段落渲染；所有文本先转义，再加结构标签。
+/** @param {unknown} text @returns {string} */
 function renderBody(text) {
   const lines = String(text === undefined || text === null ? '' : text).replace(/\r\n/g, '\n').split('\n');
   const out = [];
+  /** @type {'ul' | 'ol' | null} */
   let list = null;   // 'ul' | 'ol'
+  /** @type {{ header: string[], rows: string[][] } | null} */
   let table = null;  // { header: string[], rows: string[][] }
 
   const flushList = () => {
@@ -221,15 +232,18 @@ function buildPrintHtml({ title = '', text = '', level = '', operator = '', at =
 </body></html>`;
 }
 
+/**
+ * @param {{ html?: string, outFile?: string, edgePath?: string | null, timeoutMs?: number, exec?: typeof execFile, tmpDir?: string }} [options]
+ */
 function renderPdf({
   html, outFile, edgePath = findEdge(), timeoutMs = 30000, exec = execFile, tmpDir = os.tmpdir(),
 } = {}) {
   if (!edgePath) {
     return Promise.resolve({ mode: 'failed', error: '未找到 Edge（可用 SAFE_OFFICE_EDGE 指定）', rejected: false });
   }
-  fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  fs.mkdirSync(path.dirname(/** @type {string} */ (outFile)), { recursive: true });
   const htmlFile = path.join(tmpDir, `safe-office-print-${crypto.randomUUID()}.html`);
-  fs.writeFileSync(htmlFile, html, { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(htmlFile, /** @type {string} */ (html), { encoding: 'utf8', mode: 0o600 });
   return new Promise((resolve) => {
     exec(edgePath, [
       '--headless=new', '--disable-gpu', '--no-first-run',
@@ -237,7 +251,7 @@ function renderPdf({
       pathToFileURL(htmlFile).href,
     ], { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       try { fs.rmSync(htmlFile, { force: true }); } catch { /* ignore */ }
-      if (err || !fs.existsSync(outFile)) {
+      if (err || !fs.existsSync(/** @type {string} */ (outFile))) {
         const message = String(stderr || (err && err.message) || 'PDF 渲染失败');
         resolve({ mode: 'failed', error: message.slice(0, 300), rejected: false });
         return;
@@ -247,6 +261,7 @@ function renderPdf({
   });
 }
 
+/** @param {{ file?: string, printer?: string, timeoutMs?: number, exec?: typeof execFile }} [options] */
 function submitPdf({ file, printer, timeoutMs = 30000, exec = execFile } = {}) {
   return new Promise((resolve) => {
     exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PS_PRINT_PDF], {
@@ -269,6 +284,9 @@ function submitPdf({ file, printer, timeoutMs = 30000, exec = execFile } = {}) {
 }
 
 // 排版打印：未配置打印机/PDF 目录 → simulated（与旧行为一致，不碰 Edge）
+/**
+ * @param {{ text?: string, title?: string, level?: string, operator?: string, printer?: string | null, pdfDir?: string | null, now?: Date, edgePath?: string | null, exec?: typeof execFile, timeoutMs?: number }} [options]
+ */
 async function printDocument({
   text = '', title = '', level = '', operator = '',
   printer = null, pdfDir = null, now = new Date(),

@@ -27,6 +27,7 @@ const { verifyAgentManifest } = require('./agents.cjs');
 
 class AgentRuntime {
   // disabledLayers：仅评测消融用（如 ['gate2','gate4']）。默认空集合，行为与之前完全一致。
+  /** @param {any} options */
   constructor({
     policy, audit, risk, planner, perf, toolRegistry = null, toolExecutors = null,
     disabledLayers = [], calendarWriter = null,
@@ -46,9 +47,13 @@ class AgentRuntime {
     this.toolExecutors = toolExecutors instanceof Map
       ? toolExecutors
       : new Map(Object.entries(toolExecutors || {}));
+    /** @type {any[]} */
     this.outbox = [];       // 已发送邮件（模拟副作用）
+    /** @type {any[]} */
     this.uploads = [];      // 已上传外部的内容（模拟副作用）
+    /** @type {Record<string, any>} */
     this.knowledge = {};    // 已读入的文档/转写稿（含消毒结果）
+    /** @type {any[]} */
     this.snapshots = [];    // 高危执行前的状态快照（L2 闸4：可一键回滚）
     this.confirmations = new ConfirmationService();
     this.tasks = new Map(); // 幂等键：taskId → 任务执行记录（防超时重试重复执行）
@@ -59,29 +64,47 @@ class AgentRuntime {
     this.asr = asr || null;
   }
 
+  /**
+   * @param {any} layer
+   */
   _ablate(layer) {
     return this.disabledLayers.has(layer);
   }
 
+  /**
+   * @param {any} action
+   */
   _isHighRisk(action) {
     return this.toolRegistry ? this.toolRegistry.isHighRisk(action) : HIGH_RISK_ACTIONS.has(action);
   }
 
+  /**
+   * @param {any} action
+   */
   _isOutbound(action) {
     return this.toolRegistry ? this.toolRegistry.isOutbound(action) : OUTBOUND_ACTIONS.has(action);
   }
 
+  /**
+   * @param {any} action
+   */
   _sandboxProfile(action) {
     return this.toolRegistry ? this.toolRegistry.sandboxProfile(action) : undefined;
   }
 
   // 闸1 消毒入口：消融关停时原样放行（仅评测用），并保留计时口径
+  /**
+   * @param {any} text
+   */
   _sanitize(text) {
     if (this._ablate('gate1')) return { safe: true, cleaned: String(text), reasons: [] };
     return this.perf.measure('闸1 输入消毒', () => sanitizeInput(text));
   }
 
   // 真实 ASR 的转写稿入库：与模拟分支同口径——文本一律按不可信输入过闸1
+  /**
+   * @param {any} [options]
+   */
   ingestTranscript({ id, title = '', level = '公开', text = '', owner = '', provider = '外部 ASR', requestId = null } = {}) {
     const san = this._sanitize(String(text || ''));
     const transcriptId = `tr_${id}`;
@@ -99,12 +122,18 @@ class AgentRuntime {
     return { id: transcriptId, text: san.cleaned, tainted: !san.safe, reasons: san.reasons };
   }
 
+  /**
+   * @param {any} action
+   */
   _outboundArg(action) {
     if (this.toolRegistry) return this.toolRegistry.outboundArg(action);
     return action === 'uploadToCloud' ? 'url' : 'to';
   }
 
   // —— 快照：执行高危动作前的完整状态（knowledge + outbox + uploads），支撑"误操作可回滚" ——
+  /**
+   * @param {any} label
+   */
   takeSnapshot(label) {
     const snap = {
       seq: this.snapshots.length + 1,
@@ -120,6 +149,9 @@ class AgentRuntime {
   }
 
   // —— 回滚：恢复到最近一次快照（或指定 seq），该快照起的状态一并作废 ——
+  /**
+   * @param {any} seq
+   */
   rollback(seq) {
     const idx = seq
       ? this.snapshots.findIndex((s) => s.seq === seq)
@@ -134,6 +166,10 @@ class AgentRuntime {
     return snap;
   }
 
+  /**
+   * @param {any} command
+   * @param {any} [options]
+   */
   async runCommand(command, { role: requestedRole, agent, token, nearfieldOnline = false, scene = '', modelLocation, commandLevel = '内部', sandbox, taskId = null, autoRevoke = true, delegation = null, delegationVerifier = null, deferActions = null, onDeferred = null, onStage = null, shouldAbort = null, operator = null } = {}) {
     let role = requestedRole || '员工';
     // —— Agent 身份校验（v0.9）：清单可信 → 角色一致 → 令牌绑定该 Agent ——
@@ -192,7 +228,7 @@ class AgentRuntime {
       }
       started = true;
       if (taskId) this.tasks.set(taskId, { state: 'running', command, role, outcome: null, lines: null });
-      const settle = (outcome) => {
+      const settle = (/** @type {any} */ outcome) => {
         if (!taskId) return;
         const rec = this.tasks.get(taskId);
         rec.state = 'done';
@@ -224,7 +260,7 @@ class AgentRuntime {
               : null,
           }),
         );
-      } catch (err) {
+      } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         const fault = classifyModelFault(err);
         this.audit.append('规划失败', { class: fault.class, reason: fault.reason, executed: false });
         lines.push(`  〔规划失败〕⛔ ${fault.class}：${fault.reason}`);
@@ -260,7 +296,7 @@ class AgentRuntime {
         try {
           if (onStage) onStage('执行', { step: i + 1, total: steps.length });
           lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred, operator, taskId }));
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           const fault = classifyModelFault(err);
           const notExecuted = steps.length - i - 1;
           this.audit.append('任务中止', { class: fault.class, reason: fault.reason, atStep: i + 1, action: steps[i].action, notExecuted });
@@ -282,10 +318,15 @@ class AgentRuntime {
     }
   }
 
+  /**
+   * @param {any} step
+   * @param {any} n
+   * @param {any} ctx
+   */
   async execStep(step, n, ctx) {
     const { action, args } = step;
     // 租户可见性：管理员/审计员跨租户；其余只看自己的知识条目（无 owner 的旧条目视为共享）
-    const tenantVisible = (doc) => !doc.owner
+    const tenantVisible = (/** @type {any} */ doc) => !doc.owner
       || doc.owner === ctx.operator
       || ['管理员', '审计员'].includes(ctx.role);
     this.audit.append('计划步骤', { n, action, args, fromDoc: step.fromDoc || null });
@@ -326,14 +367,14 @@ class AgentRuntime {
     const sourceId = action === 'summarize' ? args.of : action === 'printDoc' ? args.id : args.docId;
     if (!gate2Off && sourceId) {
       const sources = this.knowledge[sourceId]?.sourceIds || [sourceId];
-      if (!sources.every(id => ctx.token.documentIds.includes(id))) {
+      if (!sources.every((/** @type {any} */ id) => ctx.token.documentIds.includes(id))) {
         this.audit.append('数据访问拒绝', { action, sourceId });
         return `  [${n}] ${action} ⛔ 数据访问拒绝：源资源未授权`;
       }
     }
     if (!gate2Off && this._isOutbound(action)) {
       const target = args[this._outboundArg(action)];
-      const targets = String(ctx.command || '').match(/https:\/\/[^\s，。；）)]+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || [];
+      const targets = String(ctx.command || '').match(/https:\/\/[^\s，。；）)]+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || /** @type {string[]} */ ([]);
       if (!targets.includes(target)) {
         this.audit.append('目标授权拒绝', { action, target });
         return `  [${n}] ${action} ⛔ 出站目标未获用户明确授权`;
@@ -370,7 +411,7 @@ class AgentRuntime {
 
     // —— 图片识别：OCR 文本 = 外部内容 → 强制过闸1（图内注入同权隔离）——
     if (action === 'recognizeImage') {
-      const img = IMAGES[args.id];
+      const img = /** @type {Record<string, any>} */ (IMAGES)[args.id];
       if (!img) return `  [${n}] recognizeImage(${args.id}) ⛔ 图片不存在`;
       const san = this._sanitize(img.ocrText);
       this.knowledge[`img_${img.id}`] = { id: `img_${img.id}`, title: `${img.title}（识别稿）`, level: img.level, body: san.cleaned, cleaned: san.cleaned, sourceIds: [img.id], tainted: !san.safe, ocr: true, owner: ctx.operator || '' };
@@ -409,6 +450,7 @@ class AgentRuntime {
     }
 
     // —— 闸3：数据边界（出站动作：密级 + 脱敏）——
+    /** @type {any} */
     let payload = null;
     if (this._isOutbound(action)) {
       const doc = this.knowledge[args.docId];
@@ -497,7 +539,7 @@ class AgentRuntime {
       if (typeof ctx.onDeferred === 'function') {
         try {
           ctx.onDeferred(descriptor);
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           this.audit.append('转交失败', { n, action, reason: err.message });
           return `  [${n}] ${action} ⛔ 转交确认闭环失败：${err.message}（未执行）`;
         }
@@ -517,7 +559,7 @@ class AgentRuntime {
             ? this.humanConfirm({ step, operation, challenge, ctx })
             : requestHumanConfirm(step, { nearfieldOnline: ctx.nearfieldOnline }),
         );
-      } catch (err) {
+      } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         // 确认端异常一律拒绝（fail-closed）：不能因为适配器抛错就放行
         c = { approved: false, method: `确认端异常：${err && err.message ? err.message : err}` };
       }
@@ -566,7 +608,7 @@ class AgentRuntime {
         let draft;
         try {
           draft = await this.planner.llm.generate(prepared.command, prepared.blocks);
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           const fault = asModelFault(err);
           this.audit.append('生成失败', { n, docId: doc.id, class: fault.faultClass, reason: fault.faultReason });
           throw fault;
@@ -610,7 +652,7 @@ class AgentRuntime {
           } else {
             effect = `会议「${args.title}」已预约（${args.at}）〔模拟：未配置日历目录〕`;
           }
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           this.risk.add(10, '日历写入失败');
           this.audit.append('执行失败', { n, action, reason: err.message });
           effect = `会议预约失败：${err.message}（未伪造成功）`;
@@ -619,7 +661,7 @@ class AgentRuntime {
         effect = `会议「${args.title}」已预约（${args.at}）`;
       }
     } else if (action === 'readContact') {
-      const c = CONTACTS[args.name];
+      const c = /** @type {Record<string, any>} */ (CONTACTS)[args.name];
       if (!c) {
         effect = `未找到联系人「${args.name}」（无结果可返回）`;
       } else {
@@ -632,7 +674,7 @@ class AgentRuntime {
         : `已打印《${doc ? doc.title : args.id}》`;
     } else if (action === 'transcribeAudio') {
       const uploaded = this.audioStore ? this.audioStore.get(args.id) : null;
-      const a = uploaded || AUDIOS[args.id];
+      const a = uploaded || /** @type {Record<string, any>} */ (AUDIOS)[args.id];
       if (!a) {
         effect = `录音 ${args.id} 不存在`;
       } else {
@@ -648,7 +690,7 @@ class AgentRuntime {
               text = result.text;
               provider = `腾讯云 ASR（${result.engine}）`;
               requestId = result.requestId;
-            } catch (err) {
+            } catch (errRaw) { const err = /** @type {any} */ (errRaw);
               effect = `转写失败（腾讯云 ASR）：${err.message}`;
             }
           }
@@ -691,7 +733,7 @@ class AgentRuntime {
           effect = typeof result === 'string' && result.trim()
             ? result
             : JSON.stringify(result === undefined ? { ok: true } : result);
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           this.risk.add(15, `自定义工具执行失败 ${action}`);
           this.risk.observe({ kind: 'blocked', action });
           this.audit.append('执行失败', { n, action, reason: err.message });

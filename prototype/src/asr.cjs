@@ -18,15 +18,21 @@ const ACTION = 'SentenceRecognition';
 const MAX_BYTES = 5 * 1024 * 1024;
 const ALLOWED_FORMATS = new Set(['wav', 'mp3', 'm4a']);
 
+/** @param {Buffer | string} data @returns {string} */
 function sha256Hex(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+/** @param {Buffer | string} key @param {Buffer | string} data @returns {Buffer} */
 function hmac(key, data) {
   return crypto.createHmac('sha256', key).update(data).digest();
 }
 
 // TC3-HMAC-SHA256 签名；返回 Authorization 头
+/**
+ * @param {{ secretId: string, secretKey: string, payload: string, timestamp: number, host?: string, service?: string }} params
+ * @returns {string}
+ */
 function signTc3({ secretId, secretKey, payload, timestamp, host = HOST, service = SERVICE }) {
   const date = new Date(timestamp * 1000).toISOString().slice(0, 10);
   const canonicalHeaders = `content-type:application/json; charset=utf-8\nhost:${host}\n`;
@@ -43,6 +49,7 @@ function signTc3({ secretId, secretKey, payload, timestamp, host = HOST, service
   return `TC3-HMAC-SHA256 Credential=${secretId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 }
 
+/** @param {string} filePath @returns {string} */
 function detectFormat(filePath) {
   const ext = path.extname(String(filePath || '')).toLowerCase().replace('.', '');
   if (!ALLOWED_FORMATS.has(ext)) {
@@ -51,6 +58,7 @@ function detectFormat(filePath) {
   return ext;
 }
 
+/** @param {string} format @param {Buffer} buffer */
 function assertMagic(format, buffer) {
   const head = buffer.subarray(0, 12);
   if (format === 'wav' && !(head.subarray(0, 4).toString('ascii') === 'RIFF' && head.subarray(8, 12).toString('ascii') === 'WAVE')) {
@@ -66,6 +74,7 @@ function assertMagic(format, buffer) {
   }
 }
 
+/** @param {{ format: string, data: string, engine?: string }} params @returns {string} */
 function buildPayload({ format, data, engine = '16k_zh' }) {
   return JSON.stringify({
     EngSerViceType: engine,
@@ -76,6 +85,9 @@ function buildPayload({ format, data, engine = '16k_zh' }) {
   });
 }
 
+/**
+ * @param {{ secretId?: string, secretKey?: string, region?: string, engine?: string, fetchImpl?: typeof fetch, now?: () => number }} [options]
+ */
 function createTencentAsr({
   secretId,
   secretKey,
@@ -87,13 +99,14 @@ function createTencentAsr({
   if (!secretId || !secretKey) throw new TypeError('腾讯云 ASR 需要 SecretId 和 SecretKey');
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl 必须是函数');
 
+  /** @param {Buffer} buffer @param {string} format */
   async function transcribeBuffer(buffer, format) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new TypeError('音频内容为空');
     if (buffer.length > MAX_BYTES) throw new TypeError(`音频超过 5MB（${buffer.length} 字节）`);
     assertMagic(format, buffer);
     const payload = buildPayload({ format, data: buffer.toString('base64'), engine });
     const timestamp = now();
-    const authorization = signTc3({ secretId, secretKey, payload, timestamp });
+    const authorization = signTc3({ secretId: String(secretId), secretKey: String(secretKey), payload, timestamp });
     let response;
     try {
       response = await fetchImpl(`https://${HOST}`, {
@@ -111,25 +124,27 @@ function createTencentAsr({
         signal: AbortSignal.timeout(30000),
       });
     } catch (err) {
-      const error = new Error(`腾讯云 ASR 请求失败：${err && err.message ? err.message : err}`);
+      const e = /** @type {{ message?: string }} */ (err);
+      const error = /** @type {any} */ (new Error(`腾讯云 ASR 请求失败：${e && e.message ? e.message : err}`));
       error.code = 'ASR_NETWORK';
       throw error;
     }
     const text = await response.text();
+    /** @type {any} */
     let body;
     try { body = JSON.parse(text); } catch {
-      const error = new Error(`腾讯云 ASR 返回非 JSON（HTTP ${response.status}）`);
+      const error = /** @type {any} */ (new Error(`腾讯云 ASR 返回非 JSON（HTTP ${response.status}）`));
       error.code = 'ASR_BAD_RESPONSE';
       throw error;
     }
     const data = body && body.Response ? body.Response : {};
     if (data.Error) {
-      const error = new Error(`腾讯云 ASR 失败：${data.Error.Code || ''} ${data.Error.Message || ''}`.trim());
+      const error = /** @type {any} */ (new Error(`腾讯云 ASR 失败：${data.Error.Code || ''} ${data.Error.Message || ''}`.trim()));
       error.code = data.Error.Code || 'ASR_ERROR';
       throw error;
     }
     if (typeof data.Result !== 'string') {
-      const error = new Error('腾讯云 ASR 返回缺少 Result');
+      const error = /** @type {any} */ (new Error('腾讯云 ASR 返回缺少 Result'));
       error.code = 'ASR_BAD_RESPONSE';
       throw error;
     }
@@ -142,6 +157,7 @@ function createTencentAsr({
     };
   }
 
+  /** @param {string} filePath */
   async function transcribeFile(filePath) {
     const format = detectFormat(filePath);
     const buffer = fs.readFileSync(filePath);
@@ -152,6 +168,7 @@ function createTencentAsr({
 }
 
 // 环境变量 → 客户端；未开启返回 null（保持模拟）
+/** @param {Record<string, string | undefined>} [env] */
 function createAsrFromEnv(env = process.env) {
   if (!/^(1|true|yes|on)$/i.test(String(env.SAFE_OFFICE_ASR || ''))) return null;
   const provider = String(env.SAFE_OFFICE_ASR_PROVIDER || 'tencent').toLowerCase();

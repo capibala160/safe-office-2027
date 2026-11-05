@@ -15,17 +15,27 @@
 const { SMTPMailer, createSmtpMailerFromEnv } = require('./smtp-mailer.cjs');
 const { MailerError } = require('./mailer.cjs');
 
+/**
+ * @typedef {{ name: string, host?: string, port?: number, secure?: boolean, user?: string, pass?: string, from: string, fromName?: string, aliases?: { address: string, name: string }[], signature?: string, allowTo?: string[], timeoutMs?: number }} SmtpAccount
+ */
+/**
+ * @typedef {{ host?: string, port?: number, secure?: boolean, user?: string, pass?: string, from: string, fromName?: string, aliases?: { address: string, name: string }[], allowTo?: string[], timeoutMs?: number }} MailerConfig
+ */
+
+/** @param {unknown} value @param {boolean} [fallback] @returns {boolean} */
 function asBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   return /^(1|true|yes|on)$/i.test(String(value));
 }
 
+/** @param {any} value @returns {string[]} */
 function normalizeAllowTo(value) {
   if (Array.isArray(value)) return value.map((x) => String(x).trim().toLowerCase()).filter(Boolean);
   return String(value || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 }
 
 // 地址校验只做保守格式检查（不追求 RFC 5322 全量）；含 CR/LF/尖括号一律拒绝
+/** @param {string} address @param {string} label @returns {string} */
 function assertAddress(address, label) {
   if (!/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(address) || address.length > 254) {
     throw new TypeError(`${label} 不是合法邮箱地址：${address}`);
@@ -33,6 +43,7 @@ function assertAddress(address, label) {
   return address;
 }
 
+/** @param {any} value @param {string} accountName @returns {{ address: string, name: string }[]} */
 function normalizeAliases(value, accountName) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new TypeError(`SMTP 账号「${accountName}」的 aliases 必须是数组`);
@@ -52,6 +63,7 @@ function normalizeAliases(value, accountName) {
   });
 }
 
+/** @param {any} value @param {string} accountName @returns {string} */
 function normalizeSignature(value, accountName) {
   if (value === undefined || value === null || value === '') return '';
   if (typeof value !== 'string') throw new TypeError(`SMTP 账号「${accountName}」的 signature 必须是字符串`);
@@ -65,6 +77,7 @@ function normalizeSignature(value, accountName) {
   return text;
 }
 
+/** @param {any} raw @param {number} index @returns {SmtpAccount} */
 function normalizeAccount(raw, index) {
   if (!raw || typeof raw !== 'object') throw new TypeError(`SMTP 账号[${index}] 必须是对象`);
   const name = String(raw.name || '').trim();
@@ -89,6 +102,7 @@ function normalizeAccount(raw, index) {
   };
 }
 
+/** @param {NodeJS.ProcessEnv} [env] @returns {{ accounts: SmtpAccount[], defaultName: string } | null} */
 function parseAccountsFromEnv(env = process.env) {
   const raw = env.SAFE_OFFICE_SMTP_ACCOUNTS;
   if (raw) {
@@ -96,7 +110,7 @@ function parseAccountsFromEnv(env = process.env) {
     try {
       list = JSON.parse(String(raw));
     } catch (err) {
-      throw new Error(`SAFE_OFFICE_SMTP_ACCOUNTS 不是合法 JSON：${err.message}`);
+      throw new Error(`SAFE_OFFICE_SMTP_ACCOUNTS 不是合法 JSON：${err instanceof Error ? err.message : String(err)}`);
     }
     if (!Array.isArray(list) || list.length === 0) {
       throw new Error('SAFE_OFFICE_SMTP_ACCOUNTS 必须是非空 JSON 数组');
@@ -122,7 +136,7 @@ function parseAccountsFromEnv(env = process.env) {
       secure: legacy.secure,
       user: legacy.user,
       pass: legacy.pass,
-      from: legacy.from,
+      from: /** @type {string} */ (legacy.from),
       fromName: '',
       aliases: [],
       signature: '',
@@ -134,8 +148,10 @@ function parseAccountsFromEnv(env = process.env) {
 }
 
 class MailerPool {
+  /** @param {{ accounts?: SmtpAccount[], defaultName?: string | null, mailerFactory?: ((cfg: MailerConfig) => any) | null }} [options] */
   constructor({ accounts = [], defaultName = null, mailerFactory = null } = {}) {
     if (!Array.isArray(accounts) || accounts.length === 0) throw new TypeError('MailerPool 需要至少一个账号');
+    /** @type {Map<string, SmtpAccount>} */
     this.accounts = new Map();
     for (const a of accounts) {
       if (!a || !a.name) throw new TypeError('账号缺少 name');
@@ -144,7 +160,8 @@ class MailerPool {
     }
     this.defaultName = defaultName || accounts[0].name;
     if (!this.accounts.has(this.defaultName)) throw new TypeError(`默认账号不存在：${this.defaultName}`);
-    this.mailerFactory = mailerFactory || ((cfg) => new SMTPMailer(cfg));
+    this.mailerFactory = mailerFactory || ((/** @type {MailerConfig} */ cfg) => new SMTPMailer(cfg));
+    /** @type {Map<string, any>} */
     this.mailers = new Map();
   }
 
@@ -158,12 +175,14 @@ class MailerPool {
   }
 
   // 供控制台冻结时解析账号配置（含签名）；不要把这个对象整体返回给前端
+  /** @param {string} [name] @returns {SmtpAccount | null} */
   getAccount(name) {
     const key = String(name || this.defaultName);
     return this.accounts.get(key) || null;
   }
 
   // 解析最终发件身份：alias 必须属于该账号；空 alias 用账号主地址
+  /** @param {string} accountName @param {string} [aliasAddress] @returns {{ account: SmtpAccount, address: string, name: string, alias: string }} */
   resolveIdentity(accountName, aliasAddress = '') {
     const account = this.getAccount(accountName);
     if (!account) throw new MailerError('rejected', `未知发件账号「${accountName}」`);
@@ -178,9 +197,10 @@ class MailerPool {
     return { account, address: hit.address, name: hit.name || account.fromName || '', alias: hit.address };
   }
 
+  /** @param {string} name @returns {any} */
   _mailer(name) {
     if (!this.mailers.has(name)) {
-      const cfg = this.accounts.get(name);
+      const cfg = /** @type {SmtpAccount} */ (this.accounts.get(name));
       this.mailers.set(name, this.mailerFactory({
         host: cfg.host, port: cfg.port, secure: cfg.secure, user: cfg.user,
         pass: cfg.pass, from: cfg.from, fromName: cfg.fromName || '',
@@ -190,6 +210,7 @@ class MailerPool {
     return this.mailers.get(name);
   }
 
+  /** @param {{ operation: any, idempotencyKey?: string }} options */
   async send({ operation, idempotencyKey }) {
     const name = String((operation && operation.mailAccount) || this.defaultName);
     if (!this.accounts.has(name)) {

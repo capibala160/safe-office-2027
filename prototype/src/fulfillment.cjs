@@ -12,6 +12,9 @@ const { sealOperation, verifyOperation } = require('./operation.cjs');
 const { MailerError } = require('./mailer.cjs');
 
 class FulfillmentService {
+  /**
+   * @param {{ store?: any, mailer?: any, now?: () => number }} [options]
+   */
   constructor({ store, mailer, now = () => Date.now() } = {}) {
     if (!store) throw new TypeError('FulfillmentService 需要 store');
     if (!mailer) throw new TypeError('FulfillmentService 需要 mailer');
@@ -20,11 +23,17 @@ class FulfillmentService {
     this.now = now;
   }
 
+  /** @param {any} input @returns {any} */
   prepare(input) {
     const sealed = sealOperation(input);
     return this.store.insertOperation(sealed);
   }
 
+  /**
+   * @param {string} operationId
+   * @param {{ confirmationId?: string | null, deviceId?: string | null, confirmedHash?: string }} [options]
+   * @returns {{ operation: any, outbox: any }}
+   */
   confirm(operationId, { confirmationId = null, deviceId = null, confirmedHash } = {}) {
     const operation = this.store.getOperation(operationId);
     if (!operation) throw new Error(`操作不存在：${operationId}`);
@@ -45,6 +54,7 @@ class FulfillmentService {
     return { operation: confirmed, outbox };
   }
 
+  /** @param {string} outboxId @returns {Promise<{ state: string, messageId?: string | null, error?: string, note?: string, duplicate?: boolean }>} */
   async send(outboxId) {
     const row = this.store.getOutbox(outboxId);
     if (!row) throw new Error(`发件记录不存在：${outboxId}`);
@@ -82,17 +92,19 @@ class FulfillmentService {
     try {
       result = await this.mailer.send({ operation, idempotencyKey: row.idempotencyKey });
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       const kind = err instanceof MailerError ? err.kind : 'unknown';
       const state = kind === 'rejected' ? 'failed' : 'unknown';
       try {
-        this.store.failSend(row.outboxId, operation.operationId, { state, error: err.message, kind });
+        this.store.failSend(row.outboxId, operation.operationId, { state, error: message, kind });
       } catch (dbErr) {
-        throw new Error(`发送失败且状态落库失败：${dbErr.message}（原发送错误：${err.message}）`);
+        const dbMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
+        throw new Error(`发送失败且状态落库失败：${dbMessage}（原发送错误：${message}）`);
       }
       // unknown：操作保持 executing，等待人工核对，绝不自动重试
       return {
         state,
-        error: err.message,
+        error: message,
         note: state === 'unknown' ? '结果待核实，禁止自动重试' : '明确失败；如需重试请新建操作记录',
       };
     }
@@ -105,12 +117,13 @@ class FulfillmentService {
       });
       return { state: 'sent', messageId: result.messageId || null };
     } catch (dbErr) {
+      const dbMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
       try {
         this.store.setOutboxState(row.outboxId, 'unknown', {
-          error: `邮件已发送，但状态落库失败：${dbErr.message}`,
+          error: `邮件已发送，但状态落库失败：${dbMessage}`,
         });
       } catch { /* 落 unknown 也失败：保持 sending，重启 recoverInFlight 会转 unknown */ }
-      throw new Error(`邮件已发送，但状态落库失败：${dbErr.message}`);
+      throw new Error(`邮件已发送，但状态落库失败：${dbMessage}`);
     }
   }
 
@@ -118,6 +131,10 @@ class FulfillmentService {
   //   - 只改本地状态，绝不自动重发（重发必须新建操作并重新确认）
   //   - 重复导入同一封退信是幂等操作
   //   - 已 failed/bounced 的记录不再处理，由上层如实报告跳过原因
+  /**
+   * @param {{ messageId?: string | null, idempotencyKey?: string | null, recipient?: string | null, status?: string, diagnostic?: string, note?: string }} [options]
+   * @returns {{ matched: boolean, reason?: string, duplicate?: boolean, skipped?: boolean, outbox?: any, operation?: any, matchedBy?: string | null, previousState?: string }}
+   */
   recordBounce({
     messageId = null, idempotencyKey = null,
     recipient = null, status = '', diagnostic = '', note = '',
@@ -175,6 +192,7 @@ class FulfillmentService {
   }
 
   // 人工核对后消除 unknown；只允许 unknown → sent/failed
+  /** @param {string} outboxId @param {{ state?: 'sent' | 'failed', messageId?: string | null, note?: string }} [options] */
   reconcile(outboxId, { state, messageId = null, note = '' } = {}) {
     const row = this.store.getOutbox(outboxId);
     if (!row) throw new Error(`发件记录不存在：${outboxId}`);

@@ -14,6 +14,27 @@ const crypto = require('node:crypto');
 const { encodeChallenge, encodeDecision, decodeFrame } = require('./ws63-protocol.cjs');
 const { PROTOCOL_ACTIONS, verifyOperation } = require('./operation.cjs');
 
+/**
+ * 冻结操作记录（operation.cjs 的权威定义）
+ * @typedef {import('./operation.cjs').OperationRecord} OperationRecord
+ */
+/**
+ * 本实例的待确认任务
+ * @typedef {Object} NearfieldPending
+ * @property {Buffer} taskId
+ * @property {Buffer} nonce
+ * @property {number} action
+ * @property {Buffer} targetHash
+ * @property {number} issuedAt
+ * @property {number} expiresAt
+ * @property {string} summary
+ * @property {string} operationId
+ */
+/**
+ * 确认端传输层契约
+ * @typedef {{ send: (frame: Buffer) => Promise<Buffer|null|undefined> }} NearfieldTransport
+ */
+
 const REPLAY_WINDOW = 8;
 const SUMMARY_MAX_BYTES = 96;
 const UINT32_MAX = 0xffffffff;
@@ -26,6 +47,7 @@ const NEARFIELD_ERROR_CODES = [
   'REPLAY', 'EXPIRED', 'DECISION', 'DEVICE', 'OPERATION', 'TIMEOUT',
 ];
 
+/** @type {Record<string, string>} */
 const ERROR_TEXT = {
   ARG: '参数非法',
   FRAME: '帧格式非法',
@@ -44,16 +66,22 @@ const ERROR_TEXT = {
 };
 
 class NearfieldError extends Error {
+  /**
+   * @param {string} code
+   * @param {string} [message]
+   * @param {Record<string, any>} [extra]
+   */
   constructor(code, message, extra = {}) {
     super(message || ERROR_TEXT[code] || code, extra.cause ? { cause: extra.cause } : undefined);
     this.name = 'NearfieldError';
     this.code = code;
     for (const [key, value] of Object.entries(extra)) {
-      if (key !== 'cause') this[key] = value;
+      if (key !== 'cause') /** @type {any} */ (this)[key] = value;
     }
   }
 }
 
+/** @param {string|Buffer} value @param {Buffer} domain @param {string} name @returns {Buffer} */
 function deriveBytes(value, domain, name) {
   if (Buffer.isBuffer(value)) {
     if (value.length !== 8) throw new TypeError(`${name} Buffer 必须是 8 字节`);
@@ -68,17 +96,20 @@ function deriveBytes(value, domain, name) {
   return Buffer.from(digest.subarray(0, 8));
 }
 
+/** @param {string|Buffer} value @returns {Buffer} */
 function deriveTaskId(value) {
   return deriveBytes(value, TASK_DOMAIN, 'taskId');
 }
 
+/** @param {string|Buffer} value @returns {Buffer} */
 function deriveDeviceId(value) {
   return deriveBytes(value, DEVICE_DOMAIN, 'deviceId');
 }
 
 // 按 UTF-8 字节截断，绝不切断码点；剩余空间 >=3B 才补省略号
+/** @param {unknown} text @param {number} [maxBytes] @returns {string} */
 function truncateUtf8(text, maxBytes = SUMMARY_MAX_BYTES) {
-  const input = String(text ?? '').toWellFormed();
+  const input = /** @type {string} */ (/** @type {any} */ (String(text ?? '')).toWellFormed());
   let out = '';
   let used = 0;
   for (const ch of input) {
@@ -93,9 +124,11 @@ function truncateUtf8(text, maxBytes = SUMMARY_MAX_BYTES) {
   return out;
 }
 
+/** @param {Partial<OperationRecord>} [operation] @returns {string} */
 function buildSummary(operation = {}) {
-  const label = PROTOCOL_ACTIONS[operation.protocolAction] || '操作';
+  const label = PROTOCOL_ACTIONS[/** @type {number} */ (operation.protocolAction)] || '操作';
   // 摘要要剔除控制字符，属于有意使用
+  /** @param {unknown} value @returns {string} */
   // eslint-disable-next-line no-control-regex
   const clean = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
   const subject = clean(operation.subject) || '（无主题）';
@@ -115,6 +148,16 @@ function buildSummary(operation = {}) {
 }
 
 class NearfieldConfirmer {
+  /**
+   * @param {Object} [options]
+   * @param {Buffer} [options.key]
+   * @param {string|Buffer} [options.expectedDeviceId]
+   * @param {string|null} [options.deviceLabel]
+   * @param {number} [options.ttlSec]
+   * @param {() => number} [options.now]
+   * @param {(size: number) => Buffer} [options.randomBytes]
+   * @param {NearfieldTransport|null} [options.transport]
+   */
   constructor({
     key,
     expectedDeviceId,
@@ -138,11 +181,15 @@ class NearfieldConfirmer {
     this.ttlSec = ttlSec;
     this.now = now;
     this.randomBytes = randomBytes;
+    /** @type {NearfieldTransport|null} */
     this.transport = transport;
+    /** @type {NearfieldPending|null} */
     this.pending = null;
+    /** @type {Buffer[]} */
     this.used = [];
   }
 
+  /** @returns {number} */
   _now() {
     const now = this.now();
     if (!Number.isInteger(now) || now < 0 || now > UINT32_MAX) {
@@ -151,15 +198,18 @@ class NearfieldConfirmer {
     return now;
   }
 
+  /** @param {Buffer} nonce @returns {boolean} */
   _nonceUsed(nonce) {
     return this.used.some((used) => used.equals(nonce));
   }
 
+  /** @param {Buffer} nonce */
   _markUsed(nonce) {
     this.used.push(Buffer.from(nonce));
     while (this.used.length > REPLAY_WINDOW) this.used.shift();
   }
 
+  /** @param {Buffer} buffer @returns {any} */
   _decodeDecision(buffer) {
     if (buffer.length >= 6) {
       if (!buffer.subarray(0, 4).equals(SFC1_MAGIC)) throw new NearfieldError('FRAME', '帧头 magic 非法');
@@ -170,7 +220,8 @@ class NearfieldConfirmer {
     try {
       frame = decodeFrame(buffer, this.key);
     } catch (err) {
-      const message = String(err && err.message ? err.message : err);
+      const e = /** @type {any} */ (err);
+      const message = String(e && e.message ? e.message : err);
       if (/MAC/i.test(message)) throw new NearfieldError('MAC', 'MAC 校验失败', { cause: err });
       if (/decision/i.test(message)) throw new NearfieldError('DECISION', '决定帧非法', { cause: err });
       throw new NearfieldError('FRAME', `帧解码失败：${message}`, { cause: err });
@@ -179,6 +230,10 @@ class NearfieldConfirmer {
     return frame;
   }
 
+  /**
+   * @param {OperationRecord} operation
+   * @returns {{pending: NearfieldPending, frame: Buffer}}
+   */
   beginChallenge(operation) {
     if (!operation || typeof operation !== 'object') throw new NearfieldError('ARG', '缺少操作记录');
     const check = verifyOperation(operation);
@@ -217,7 +272,7 @@ class NearfieldConfirmer {
       taskId: deriveTaskId(operation.taskId),
       nonce,
       action: operation.protocolAction,
-      targetHash: Buffer.from(operation.operationHash, 'hex'),
+      targetHash: Buffer.from(/** @type {string} */ (operation.operationHash), 'hex'),
       issuedAt: now,
       expiresAt,
       summary: buildSummary(operation),
@@ -237,6 +292,12 @@ class NearfieldConfirmer {
     return { pending, frame };
   }
 
+  /**
+   * @param {NearfieldPending} pending
+   * @param {Buffer} buffer
+   * @param {{finalOperation?: OperationRecord}} [options]
+   * @returns {any}
+   */
   acceptDecision(pending, buffer, { finalOperation } = {}) {
     // 已无 pending → STATE（与 C 一致）；有 pending 但传入旧/克隆对象 → ARG
     if (!this.pending) throw new NearfieldError('STATE', '没有待确认任务');
@@ -272,7 +333,7 @@ class NearfieldConfirmer {
     const check = verifyOperation(finalOperation);
     if (!check.ok || finalOperation.state !== 'frozen' ||
         finalOperation.protocolAction !== pending.action ||
-        !Buffer.from(finalOperation.operationHash, 'hex').equals(pending.targetHash)) {
+        !Buffer.from(/** @type {string} */ (finalOperation.operationHash), 'hex').equals(pending.targetHash)) {
       throw new NearfieldError('OPERATION', '最终操作与确认目标不符或已变化');
     }
 
@@ -310,6 +371,11 @@ class NearfieldConfirmer {
     return this.cancel(this.pending);
   }
 
+  /**
+   * @param {OperationRecord} operation
+   * @param {{finalOperation?: OperationRecord, transport?: NearfieldTransport|null}} [options]
+   * @returns {Promise<any>}
+   */
   async requestApproval(operation, { finalOperation = operation, transport = this.transport } = {}) {
     if (!transport || typeof transport.send !== 'function') {
       throw new NearfieldError('ARG', '未配置 transport（send(frame) -> Promise<Buffer|null>）');
@@ -320,7 +386,7 @@ class NearfieldConfirmer {
       reply = await transport.send(frame);
     } catch (err) {
       this.cancel(pending);
-      throw new NearfieldError('TIMEOUT', `确认端无响应：${err.message}`, { cause: err });
+      throw new NearfieldError('TIMEOUT', `确认端无响应：${/** @type {any} */ (err).message}`, { cause: err });
     }
     if (!reply) {
       this.cancel(pending);
@@ -331,6 +397,14 @@ class NearfieldConfirmer {
 }
 
 class VirtualDevice {
+  /**
+   * @param {Object} [options]
+   * @param {Buffer} [options.key]
+   * @param {string|Buffer} [options.deviceId]
+   * @param {(challenge: any) => any} [options.decide]
+   * @param {() => number} [options.now]
+   * @param {Buffer} [options.replyKey]
+   */
   constructor({
     key,
     deviceId,
@@ -349,6 +423,7 @@ class VirtualDevice {
     this.now = now;
   }
 
+  /** @param {Buffer} frame @returns {Promise<Buffer|null>} */
   async receive(frame) {
     let challenge;
     try {
@@ -375,7 +450,13 @@ class VirtualDevice {
   }
 }
 
+/**
+ * @param {VirtualDevice} device
+ * @param {{drop?: boolean, tamper?: null | ((buffer: Buffer, frame: Buffer) => any)}} [options]
+ * @returns {{calls: Buffer[], send: (frame: Buffer) => Promise<any>}}
+ */
 function createLoopbackTransport(device, { drop = false, tamper = null } = {}) {
+  /** @type {Buffer[]} */
   const calls = [];
   return {
     calls,
@@ -394,6 +475,13 @@ function createLoopbackTransport(device, { drop = false, tamper = null } = {}) {
   };
 }
 
+/**
+ * @param {Object} params
+ * @param {{confirm: (operationId: string, details: {confirmedHash: string, deviceId: string, confirmationId: string}) => any, store: {getOperation: (operationId: string) => any}}} params.fulfillment
+ * @param {NearfieldConfirmer} params.confirmer
+ * @param {{operationId: string}} params.operation
+ * @returns {Promise<any>}
+ */
 async function confirmWithFulfillment({ fulfillment, confirmer, operation }) {
   if (!fulfillment || typeof fulfillment.confirm !== 'function' || !fulfillment.store) {
     throw new TypeError('需要 FulfillmentService');

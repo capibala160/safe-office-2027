@@ -3,6 +3,7 @@
 // 规则：已存在的环境变量优先，配置文件不覆盖它——命令行临时设置仍然生效
 const fs = require('node:fs');
 
+/** @param {string | null | undefined} file @returns {{ loaded: number, file: string | null, error?: string }} */
 function loadConfigFile(file) {
   if (!file || !fs.existsSync(file)) return { loaded: 0, file: null };
   let text;

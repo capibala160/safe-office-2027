@@ -23,6 +23,11 @@
     "src/sandbox.cjs",
     "src/model-boundary.cjs",
     "src/tool-registry.cjs",
-    "src/planner.cjs"
+    "src/planner.cjs",
+    "src/console-service.cjs",
+    "src/auth.cjs",
+    "src/mailer.cjs",
+    "server.cjs",
+    "types/nodemailer.d.ts"
   ]
 }

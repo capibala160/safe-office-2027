@@ -15,7 +15,76 @@ const { PolicyEngine } = require('./governance.cjs');
 const { TOOL_META } = require('./capabilities.cjs');
 const { IMAGES, AUDIOS, allDocuments } = require('./scenario.cjs');
 
+/**
+ * 角色定义
+ * @typedef {Object} RoleDef
+ * @property {string[]} levels
+ * @property {string} external
+ * @property {number} maxCalls
+ * @property {number} ttlMs
+ * @property {string} note
+ */
+/**
+ * Agent 清单（hashManifest 的输入，不含摘要本身）
+ * @typedef {Object} AgentManifestInput
+ * @property {string} agentId
+ * @property {string} role
+ * @property {string[]} allowedTools
+ * @property {string[]} documentScopes
+ * @property {string} modelLocation
+ */
+/**
+ * Agent 清单（运行时冻结对象）
+ * @typedef {AgentManifestInput & {manifestHash: string}} AgentManifest
+ */
+/**
+ * Agent 清单输入（校验前各字段都可缺省）
+ * @typedef {Object} AgentSpec
+ * @property {string} [agentId]
+ * @property {string} [role]
+ * @property {string[]} [allowedTools]
+ * @property {string[]} [documentScopes]
+ * @property {string} [modelLocation]
+ */
+/**
+ * 任务令牌请求
+ * @typedef {Object} TokenTask
+ * @property {string[]} [tools]
+ * @property {string[]} [documentIds]
+ * @property {string[]} [allowedExternalDomains]
+ * @property {string[]} [allowedInternalDomains]
+ * @property {number} [maxCalls]
+ * @property {number} [ttlMs]
+ * @property {string} [issuedFor]
+ */
+/**
+ * 委托令牌
+ * @typedef {Object} DelegationToken
+ * @property {string} id
+ * @property {string} from
+ * @property {string} to
+ * @property {string[]} actions
+ * @property {number} expiresAt
+ * @property {string} scope
+ * @property {string} [mac]
+ */
+/**
+ * 委托令牌签发入参（校验前可缺省）
+ * @typedef {Object} DelegationInput
+ * @property {string} [from]
+ * @property {string} [to]
+ * @property {string[]} [actions]
+ * @property {number} [ttlMs]
+ * @property {string} [scope]
+ */
+/**
+ * 工具注册表的最小结构（只用到按角色取工具）
+ * @typedef {Object} ToolRegistryLike
+ * @property {(role: string, policy: any) => string[]} toolsForRole
+ */
+
 // 角色定义：可读密级 / 外部域名策略 / 调用上限 / 令牌 TTL
+/** @type {Record<string, RoleDef>} */
 const ROLE_DEFS = {
   '员工': { levels: ['公开', '内部', '机密'], external: 'task', maxCalls: Infinity, ttlMs: 5 * 60 * 1000, note: '标准办公角色' },
   '实习生': { levels: ['公开', '内部'], external: 'none', maxCalls: 8, ttlMs: 5 * 60 * 1000, note: '只读，不得发送/预约/写入/物理动作' },
@@ -36,6 +105,7 @@ const ROLE_TOOLS = Object.fromEntries(
 );
 
 // 角色可读资源 = 按密级过滤文档/图片/录音
+/** @param {string[]} levels @returns {string[]} */
 function idsByLevels(levels) {
   const ids = [];
   // allDocuments() 含运行时导入的真实资料；样例文档仍是静态快照
@@ -45,6 +115,7 @@ function idsByLevels(levels) {
   return ids;
 }
 // 角色可读资源要在调用时重算（导入的资料在模块加载后才注册）
+/** @param {string} role @returns {string[]} */
 function roleDocIds(role) {
   const def = ROLE_DEFS[role];
   return def ? idsByLevels(def.levels) : [];
@@ -55,13 +126,20 @@ const ROLE_DOC_IDS = Object.fromEntries(
 );
 
 // v0.13：动态角色工具集；未注入 registry+policy 时回退静态 ROLE_TOOLS（旧行为不变）
+/**
+ * @param {string} role
+ * @param {{registry?: ToolRegistryLike|null, policy?: any}} [options]
+ * @returns {string[]}
+ */
 function roleToolsFor(role, { registry = null, policy = null } = {}) {
   if (registry && policy) return registry.toolsForRole(role, policy);
   return ROLE_TOOLS[role] || [];
 }
 
+/** @param {unknown} list @param {string} name @returns {string[]} */
 function uniqueStrings(list, name) {
   if (!Array.isArray(list)) throw new Error(`${name} 必须是数组`);
+  /** @type {string[]} */
   const out = [];
   for (const v of list) {
     if (typeof v !== 'string' || !v.trim()) throw new Error(`${name} 只能包含非空字符串`);
@@ -70,6 +148,7 @@ function uniqueStrings(list, name) {
   return out;
 }
 
+/** @param {AgentManifestInput} manifest @returns {string} */
 function hashManifest(manifest) {
   const canonical = JSON.stringify({
     agentId: manifest.agentId,
@@ -82,26 +161,37 @@ function hashManifest(manifest) {
 }
 
 // 定义 Agent 清单：越权申请直接抛错（fail-closed）
+/**
+ * @param {AgentSpec} [spec]
+ * @param {{registry?: ToolRegistryLike|null, policy?: any}} [options]
+ * @returns {AgentManifest}
+ */
 function defineAgent({ agentId, role, allowedTools = [], documentScopes = [], modelLocation = 'cloud' } = {}, { registry = null, policy = null } = {}) {
   if (typeof agentId !== 'string' || !agentId.trim()) throw new Error('Agent 清单缺少 agentId');
-  if (!ROLE_DEFS[role]) throw new Error(`未知角色「${role}」`);
+  if (!ROLE_DEFS[/** @type {string} */ (role)]) throw new Error(`未知角色「${role}」`);
   if (!['local', 'cloud'].includes(modelLocation)) throw new Error('modelLocation 只能是 local/cloud');
+  const roleName = /** @type {string} */ (role);
   const tools = uniqueStrings(allowedTools, 'allowedTools');
   const docs = uniqueStrings(documentScopes, 'documentScopes');
-  const roleTools = roleToolsFor(role, { registry, policy });
+  const roleTools = roleToolsFor(roleName, { registry, policy });
   const beyondTools = tools.filter((t) => !roleTools.includes(t));
   if (beyondTools.length > 0) {
     throw new Error(`Agent「${agentId}」申请了角色「${role}」不具备的工具：${beyondTools.join(', ')}`);
   }
-  const beyondDocs = docs.filter((d) => !roleDocIds(role).includes(d));
+  const beyondDocs = docs.filter((d) => !roleDocIds(roleName).includes(d));
   if (beyondDocs.length > 0) {
     throw new Error(`Agent「${agentId}」申请了角色「${role}」不可读的资源：${beyondDocs.join(', ')}`);
   }
-  const manifest = { agentId, role, allowedTools: tools, documentScopes: docs, modelLocation };
+  const manifest = { agentId, role: roleName, allowedTools: tools, documentScopes: docs, modelLocation };
   return Object.freeze({ ...manifest, manifestHash: hashManifest(manifest) });
 }
 
 // 校验清单：字段齐全 + 摘要匹配 + 不越角色
+/**
+ * @param {AgentManifest} agent
+ * @param {{registry?: ToolRegistryLike|null, policy?: any}} [options]
+ * @returns {{ok: boolean, reason: string}}
+ */
 function verifyAgentManifest(agent, { registry = null, policy = null } = {}) {
   if (!agent || typeof agent !== 'object') return { ok: false, reason: '缺少 Agent 清单' };
   if (typeof agent.agentId !== 'string' || !agent.agentId.trim()) return { ok: false, reason: '清单缺少 agentId' };
@@ -120,6 +210,12 @@ function verifyAgentManifest(agent, { registry = null, policy = null } = {}) {
 }
 
 // 签发任务令牌：角色允许 ∩ Agent 清单 ∩ 任务需要
+/**
+ * @param {AgentManifest} agent
+ * @param {TokenTask} [task]
+ * @param {{audit?: {append: (kind: string, detail: any) => any}|null, registry?: ToolRegistryLike|null, policy?: any}} [options]
+ * @returns {{token: CapabilityToken, deniedTools: string[], deniedDocs: string[], agent: AgentManifest}}
+ */
 function issueToken(agent, task = {}, { audit, registry = null, policy = null } = {}) {
   const check = verifyAgentManifest(agent, { registry, policy });
   if (!check.ok) throw new Error(`Agent 清单无效：${check.reason}`);
@@ -169,12 +265,15 @@ function issueToken(agent, task = {}, { audit, registry = null, policy = null } 
 // ---------- 委托令牌（Agent 之间转授权） ----------
 // 只证明"调用方持有该令牌"，不证明委托人真实身份；真实身份由受信任签发方保证。
 class DelegationService {
+  /** @param {{key?: Buffer, now?: () => number}} [options] */
   constructor({ key = crypto.randomBytes(32), now = Date.now } = {}) {
     this.key = key;
     this.now = now;
+    /** @type {Set<string>} */
     this.revoked = new Set();
   }
 
+  /** @param {DelegationToken} token @returns {string} */
   _mac(token) {
     const payload = JSON.stringify({
       id: token.id, from: token.from, to: token.to,
@@ -183,10 +282,12 @@ class DelegationService {
     return crypto.createHmac('sha256', this.key).update(payload).digest('hex');
   }
 
+  /** @param {DelegationInput} [input] @returns {DelegationToken} */
   issue({ from, to, actions, ttlMs = 5 * 60 * 1000, scope = '' } = {}) {
     if (!from || !to) throw new Error('委托令牌缺少 from/to');
     const acts = uniqueStrings(actions, 'actions');
     if (acts.length === 0) throw new Error('委托令牌至少覆盖一个动作');
+    /** @type {DelegationToken} */
     const token = {
       id: crypto.randomBytes(12).toString('hex'),
       from, to, actions: acts,
@@ -197,12 +298,17 @@ class DelegationService {
     return token;
   }
 
+  /**
+   * @param {DelegationToken} token
+   * @param {{to?: string, action?: string, now?: number}} [options]
+   * @returns {{allow: boolean, reason: string}}
+   */
   verify(token, { to, action, now = this.now() } = {}) {
     if (!token || typeof token !== 'object') return { allow: false, reason: '缺少委托令牌' };
     if (this.revoked.has(token.id)) return { allow: false, reason: '委托令牌已撤销' };
     if (!token.expiresAt || token.expiresAt <= now) return { allow: false, reason: '委托令牌已过期' };
     if (token.to !== to) return { allow: false, reason: '委托令牌主体不匹配' };
-    if (!Array.isArray(token.actions) || !token.actions.includes(action)) {
+    if (!Array.isArray(token.actions) || !token.actions.includes(/** @type {string} */ (action))) {
       return { allow: false, reason: `委托令牌不覆盖动作「${action}」` };
     }
     const expected = Buffer.from(this._mac(token), 'hex');
@@ -213,6 +319,7 @@ class DelegationService {
     return { allow: true, reason: 'ok' };
   }
 
+  /** @param {string} id */
   revoke(id) {
     this.revoked.add(id);
   }

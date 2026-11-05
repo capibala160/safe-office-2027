@@ -16,6 +16,7 @@ const ENC_MAGIC = Buffer.from('SFE1');
 const NONCE_LEN = 12;
 const TAG_LEN = 16;
 
+/** @param {Buffer | string | null | undefined} key @returns {Buffer | null} */
 function parseKey(key) {
   if (!key) return null;
   if (Buffer.isBuffer(key)) {
@@ -29,11 +30,18 @@ function parseKey(key) {
   return buf;
 }
 
+/** @param {Buffer | Uint8Array} buffer @returns {string} */
 function sha256Hex(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
+/**
+ * @typedef {{ name: string, sha256: string, size: number, mime: string }} BlobMeta
+ * @typedef {{ name: string, mime: string, size: number, content: Buffer }} BlobRecord
+ */
+
 class BlobStore {
+  /** @param {string} [file] @param {{ key?: Buffer | string | null }} [options] */
   constructor(file = ':memory:', { key = null } = {}) {
     if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
     this.key = parseKey(key);
@@ -66,7 +74,7 @@ class BlobStore {
         ).all();
         const update = this.db.prepare('UPDATE blobs SET encrypted = ? WHERE sha256 = ?');
         for (const row of rows) {
-          const contentHash = sha256Hex(Buffer.from(row.content));
+          const contentHash = sha256Hex(Buffer.from(/** @type {Uint8Array} */ (row.content)));
           const isPlain = contentHash === String(row.sha256).toLowerCase();
           update.run(isPlain ? 0 : 1, row.sha256);
         }
@@ -83,6 +91,11 @@ class BlobStore {
     }
   }
 
+  /**
+   * @param {Buffer} buffer
+   * @param {{ name?: string, mime?: string, now?: () => string }} [options]
+   * @returns {BlobMeta}
+   */
   put(buffer, { name, mime = 'application/octet-stream', now = () => new Date().toISOString() } = {}) {
     if (!Buffer.isBuffer(buffer)) throw new Error('附件内容必须是 Buffer');
     if (buffer.length === 0) throw new Error('附件是空文件');
@@ -107,12 +120,13 @@ class BlobStore {
     return { name: safeName, sha256, size: buffer.length, mime: safeMime };
   }
 
+  /** @param {string | null | undefined} sha256 @returns {BlobRecord | null} */
   get(sha256) {
     const key = String(sha256 || '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(key)) return null;
     const row = this.db.prepare('SELECT name, mime, size, content, encrypted FROM blobs WHERE sha256 = ?').get(key);
     if (!row) return null;
-    let content = Buffer.from(row.content);
+    let content = Buffer.from(/** @type {Uint8Array} */ (row.content));
     if (Number(row.encrypted) === 1) {
       if (!this.key) throw new Error('附件已加密，但未提供 SAFE_OFFICE_BLOB_KEY');
       if (!content.subarray(0, 4).equals(ENC_MAGIC)) throw new Error('附件加密格式损坏（缺少 SFE1 头）');
@@ -123,14 +137,16 @@ class BlobStore {
       decipher.setAuthTag(tag);
       content = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     }
-    return { name: row.name, mime: row.mime, size: row.size, content };
+    return { name: String(row.name), mime: String(row.mime), size: Number(row.size), content };
   }
 
+  /** @param {string | null | undefined} sha256 @returns {boolean} */
   has(sha256) {
     return this.get(sha256) !== null;
   }
 
   // 保留策略：列出早于 cutoff（ISO 时间）的附件元数据；调用方决定是否被引用
+  /** @param {string} cutoffIso */
   listOlderThan(cutoffIso) {
     const cutoff = String(cutoffIso || '');
     return this.db.prepare(`
@@ -140,6 +156,7 @@ class BlobStore {
   }
 
   // 只删指定内容（按内容寻址）。调用方必须自己确认没有操作还引用它。
+  /** @param {string | null | undefined} sha256 @returns {boolean} */
   delete(sha256) {
     const key = String(sha256 || '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(key)) return false;

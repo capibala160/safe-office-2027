@@ -19,7 +19,15 @@ const {
 const ROLES = new Set(['员工', '实习生', '审计员', '设备助手', '管理员', '访客']);
 const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
 
-function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+// 带业务错误码的 Error（登录/账号管理层的既有约定）
+/** @param {string} message @param {string} code @returns {Error} */
+function authError(message, code) {
+  const err = new Error(message);
+  /** @type {any} */ (err).code = code;
+  return err;
+}
+
+function hashPassword(/** @type {any} */ password, salt = crypto.randomBytes(16).toString('hex')) {
   if (typeof password !== 'string' || password.length < 8) {
     throw new Error('密码至少 8 位');
   }
@@ -27,18 +35,18 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   return { salt, hash };
 }
 
-function verifyPassword(password, user) {
+function verifyPassword(/** @type {any} */ password, /** @type {any} */ user) {
   if (!user || typeof user.hash !== 'string' || typeof user.salt !== 'string') return false;
   const expected = Buffer.from(user.hash, 'hex');
   const actual = crypto.scryptSync(String(password || ''), user.salt, 32);
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
-function hashToken(token) {
+function hashToken(/** @type {any} */ token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex');
 }
 
-function normalizeUser(raw) {
+function normalizeUser(/** @type {any} */ raw) {
   if (!raw || typeof raw !== 'object') throw new Error('用户记录必须是对象');
   const username = String(raw.username || '').trim();
   if (!username) throw new Error('用户缺少 username');
@@ -54,7 +62,7 @@ function normalizeUser(raw) {
   return { username, role: raw.role, salt: raw.salt, hash: raw.hash, totpSecret, totpEnabled, disabled: raw.disabled === true };
 }
 
-function loadUsers(file) {
+function loadUsers(/** @type {any} */ file) {
   if (!file || !fs.existsSync(file)) return [];
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
   const list = Array.isArray(data) ? data : data.users;
@@ -62,16 +70,17 @@ function loadUsers(file) {
   return list.map(normalizeUser);
 }
 
-function saveUsers(file, users) {
+function saveUsers(/** @type {any} */ file, /** @type {any} */ users) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ users }, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
 class AuthService {
+  /** @param {any} [options] */
   constructor({
     users = [], ttlMs = DEFAULT_TTL_MS, now = () => Date.now(), file = null, sessionFile = null,
   } = {}) {
-    this.users = new Map(users.map((u) => [u.username, normalizeUser(u)]));
+    this.users = new Map(users.map((/** @type {any} */ u) => [u.username, normalizeUser(u)]));
     this.sessions = new Map();      // tokenHash → { username, role, expiresAt }
     this.pendingTotp = new Map();   // username → secret（尚未启用）
     this.ttlMs = ttlMs;
@@ -105,7 +114,7 @@ class AuthService {
           persistedExpiresAt: expiresAt,
         });
       }
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this.sessionLoadError = err.message;
       this.sessions.clear();
     }
@@ -134,12 +143,17 @@ class AuthService {
       for (const session of this.sessions.values()) {
         session.persistedExpiresAt = session.expiresAt;
       }
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this.sessionSaveError = err.message;
     }
   }
 
   // ---------- 登录 / 会话 ----------
+  /**
+   * @param {any} username
+   * @param {any} password
+   * @param {any} [code]
+   */
   login(username, password, code = '') {
     const user = this.users.get(String(username || '').trim());
     if (!user || user.disabled || !verifyPassword(password, user)) return null;
@@ -151,6 +165,9 @@ class AuthService {
     return { token, expiresAt, user: { username: user.username, role: user.role } };
   }
 
+  /**
+   * @param {any} token
+   */
   verify(token) {
     if (!token) return null;
     const key = hashToken(token);
@@ -176,12 +193,18 @@ class AuthService {
     return { username: session.username, role: session.role, expiresAt: session.expiresAt };
   }
 
+  /**
+   * @param {any} token
+   */
   logout(token) {
     const removed = this.sessions.delete(hashToken(token));
     if (removed) this._saveSessions();
     return removed;
   }
 
+  /**
+   * @param {any} username
+   */
   userInfo(username) {
     const user = this.users.get(String(username || '').trim());
     if (!user) return null;
@@ -200,6 +223,9 @@ class AuthService {
       .sort((a, b) => a.username.localeCompare(b.username));
   }
 
+  /**
+   * @param {any} updated
+   */
   _persistUser(updated) {
     if (this.file) {
       const list = [...this.users.values()].map((u) => (u.username === updated.username ? updated : u));
@@ -212,6 +238,10 @@ class AuthService {
     if (this.file) saveUsers(this.file, [...this.users.values()]);
   }
 
+  /**
+   * @param {any} username
+   * @param {any} [options]
+   */
   _dropSessions(username, { keepToken = null } = {}) {
     const keepKey = keepToken ? hashToken(keepToken) : null;
     let removed = 0;
@@ -227,22 +257,22 @@ class AuthService {
 
   // 改密：校验原密码 → 重算 scrypt → 落盘 → 注销该用户的其他会话（保留当前会话）。
   // 用户表写入失败时不改内存，避免"内存已改、磁盘没改"的重启回退。
+  /**
+   * @param {any} username
+   * @param {any} oldPassword
+   * @param {any} newPassword
+   * @param {any} [options]
+   */
   changePassword(username, oldPassword, newPassword, { keepToken = null } = {}) {
     const user = this.users.get(String(username || '').trim());
     if (!user) {
-      const err = new Error('用户不存在');
-      err.code = 'INVALID_CREDENTIALS';
-      throw err;
+      throw authError('用户不存在', 'INVALID_CREDENTIALS');
     }
     if (!verifyPassword(oldPassword, user)) {
-      const err = new Error('原密码不正确');
-      err.code = 'INVALID_CREDENTIALS';
-      throw err;
+      throw authError('原密码不正确', 'INVALID_CREDENTIALS');
     }
     if (verifyPassword(newPassword, user)) {
-      const err = new Error('新密码不能与原密码相同');
-      err.code = 'BAD_PASSWORD';
-      throw err;
+      throw authError('新密码不能与原密码相同', 'BAD_PASSWORD');
     }
     const next = hashPassword(newPassword);
     this._persistUser({ ...user, salt: next.salt, hash: next.hash });
@@ -251,17 +281,17 @@ class AuthService {
   }
 
   // 管理员重置：不知道原密码；注销目标用户全部会话
+  /**
+   * @param {any} username
+   * @param {any} newPassword
+   */
   adminResetPassword(username, newPassword) {
     const user = this.users.get(String(username || '').trim());
     if (!user) {
-      const err = new Error('用户不存在');
-      err.code = 'USER_NOT_FOUND';
-      throw err;
+      throw authError('用户不存在', 'USER_NOT_FOUND');
     }
     if (typeof newPassword !== 'string' || newPassword.length < 8) {
-      const err = new Error('密码至少 8 位');
-      err.code = 'BAD_PASSWORD';
-      throw err;
+      throw authError('密码至少 8 位', 'BAD_PASSWORD');
     }
     const next = hashPassword(newPassword);
     this._persistUser({ ...user, salt: next.salt, hash: next.hash });
@@ -271,20 +301,20 @@ class AuthService {
   }
 
   // 管理员禁用/启用：禁用立即注销该用户全部会话；最后一个可用管理员不能被禁用。
+  /**
+   * @param {any} username
+   * @param {any} disabled
+   */
   setDisabled(username, disabled) {
     const user = this.users.get(String(username || '').trim());
     if (!user) {
-      const err = new Error('用户不存在');
-      err.code = 'USER_NOT_FOUND';
-      throw err;
+      throw authError('用户不存在', 'USER_NOT_FOUND');
     }
     const next = disabled === true;
     if (next && user.role === '管理员') {
       const others = [...this.users.values()].filter((u) => u.username !== user.username && u.role === '管理员' && !u.disabled);
       if (others.length === 0) {
-        const err = new Error('不能禁用最后一个可用管理员');
-        err.code = 'LAST_ADMIN';
-        throw err;
+        throw authError('不能禁用最后一个可用管理员', 'LAST_ADMIN');
       }
     }
     this._persistUser({ ...user, disabled: next });
@@ -293,19 +323,18 @@ class AuthService {
   }
 
   // 管理员删除账号：删除后不可登录、会话立即失效；最后一个可用管理员不能被删除。
+  /**
+   * @param {any} username
+   */
   deleteUser(username) {
     const user = this.users.get(String(username || '').trim());
     if (!user) {
-      const err = new Error('用户不存在');
-      err.code = 'USER_NOT_FOUND';
-      throw err;
+      throw authError('用户不存在', 'USER_NOT_FOUND');
     }
     if (user.role === '管理员') {
       const others = [...this.users.values()].filter((u) => u.username !== user.username && u.role === '管理员' && !u.disabled);
       if (others.length === 0) {
-        const err = new Error('不能删除最后一个可用管理员');
-        err.code = 'LAST_ADMIN';
-        throw err;
+        throw authError('不能删除最后一个可用管理员', 'LAST_ADMIN');
       }
     }
     // 先成功写盘，再改内存/注销会话：写盘失败时不能出现「内存已删、磁盘还在」，
@@ -320,67 +349,61 @@ class AuthService {
   }
 
   // ---------- TOTP ----------
+  /**
+   * @param {any} username
+   */
   beginTotpSetup(username) {
     const user = this.users.get(String(username || '').trim());
     if (!user) {
-      const err = new Error('用户不存在');
-      err.code = 'USER_NOT_FOUND';
-      throw err;
+      throw authError('用户不存在', 'USER_NOT_FOUND');
     }
     if (user.totpEnabled) {
-      const err = new Error('两步验证已启用；请先关闭再重新绑定');
-      err.code = 'TOTP_ENABLED';
-      throw err;
+      throw authError('两步验证已启用；请先关闭再重新绑定', 'TOTP_ENABLED');
     }
     const secret = generateSecret();
     this.pendingTotp.set(user.username, secret);
     return { secret, uri: otpauthUri({ secret, account: user.username }) };
   }
 
+  /**
+   * @param {any} username
+   * @param {any} code
+   */
   enableTotp(username, code) {
     const user = this.users.get(String(username || '').trim());
     if (!user) {
-      const err = new Error('用户不存在');
-      err.code = 'USER_NOT_FOUND';
-      throw err;
+      throw authError('用户不存在', 'USER_NOT_FOUND');
     }
     if (user.totpEnabled) {
-      const err = new Error('两步验证已启用');
-      err.code = 'TOTP_ENABLED';
-      throw err;
+      throw authError('两步验证已启用', 'TOTP_ENABLED');
     }
     const secret = this.pendingTotp.get(user.username);
     if (!secret) {
-      const err = new Error('请先生成两步验证密钥');
-      err.code = 'TOTP_SETUP_REQUIRED';
-      throw err;
+      throw authError('请先生成两步验证密钥', 'TOTP_SETUP_REQUIRED');
     }
     if (!verifyTotp(secret, code, { now: this.now() })) {
-      const err = new Error('动态验证码不正确');
-      err.code = 'INVALID_TOTP';
-      throw err;
+      throw authError('动态验证码不正确', 'INVALID_TOTP');
     }
     this._persistUser({ ...user, totpSecret: secret, totpEnabled: true });
     this.pendingTotp.delete(user.username);
     return { username: user.username, totpEnabled: true };
   }
 
+  /**
+   * @param {any} username
+   * @param {any} password
+   * @param {any} code
+   */
   disableTotp(username, password, code) {
     const user = this.users.get(String(username || '').trim());
     if (!user) {
-      const err = new Error('用户不存在');
-      err.code = 'USER_NOT_FOUND';
-      throw err;
+      throw authError('用户不存在', 'USER_NOT_FOUND');
     }
     if (!verifyPassword(password, user)) {
-      const err = new Error('密码不正确');
-      err.code = 'INVALID_CREDENTIALS';
-      throw err;
+      throw authError('密码不正确', 'INVALID_CREDENTIALS');
     }
     if (user.totpEnabled && !verifyTotp(user.totpSecret, code, { now: this.now() })) {
-      const err = new Error('动态验证码不正确');
-      err.code = 'INVALID_TOTP';
-      throw err;
+      throw authError('动态验证码不正确', 'INVALID_TOTP');
     }
     this._persistUser({ ...user, totpSecret: '', totpEnabled: false });
     this.pendingTotp.delete(user.username);
@@ -388,6 +411,7 @@ class AuthService {
   }
 }
 
+/** @param {any} file @param {{ sessionFile?: string | null }} [options] */
 function createAuthFromFile(file, { sessionFile = null } = {}) {
   const users = loadUsers(file);
   return users.length > 0 ? new AuthService({ users, file, sessionFile }) : null;

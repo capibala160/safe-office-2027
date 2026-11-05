@@ -10,6 +10,7 @@
 const DEFAULT_TIMEOUT_MS = 10000;
 const UID_RE = /^[A-Za-z0-9._@-]{1,128}$/;
 
+/** @param {{ url?: string, username?: string, password?: string }} [options] @returns {URL} */
 function assertConfig({ url, username, password } = {}) {
   let parsed;
   try {
@@ -25,15 +26,21 @@ function assertConfig({ url, username, password } = {}) {
   return parsed;
 }
 
+/** @param {string} baseUrl @param {string} uid @returns {string} */
 function eventUrl(baseUrl, uid) {
   if (!UID_RE.test(String(uid || ''))) throw new TypeError('uid 含非法字符');
   return `${String(baseUrl).replace(/\/+$/, '')}/${encodeURIComponent(uid)}.ics`;
 }
 
+/** @param {string | undefined} username @param {string | undefined} password @returns {string} */
 function basicAuth(username, password) {
   return `Basic ${Buffer.from(`${username}:${password}`, 'utf8').toString('base64')}`;
 }
 
+/**
+ * @param {{ url?: string, username?: string, password?: string, timeoutMs?: number, fetchImpl?: typeof fetch }} [options]
+ * @returns {{ putEvent: (input: { uid: string, ics: string }) => Promise<{ ok: boolean, status: number, etag: string | null, url: string }>, deleteEvent: (uid: string) => Promise<{ ok: boolean, missing: boolean }> }}
+ */
 function createCalDavWriter({
   url,
   username,
@@ -50,6 +57,7 @@ function createCalDavWriter({
     'Content-Type': 'text/calendar; charset=utf-8',
   };
 
+  /** @param {string} method @param {string} target @param {Record<string, string>} [extraHeaders] @param {string} [body] @returns {Promise<Response>} */
   async function request(method, target, extraHeaders = {}, body) {
     let response;
     try {
@@ -60,25 +68,27 @@ function createCalDavWriter({
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
-      const error = new Error(`CalDAV 请求失败（${method}）：${err && err.message ? err.message : err}`);
+      const e = /** @type {{ message?: string }} */ (err);
+      const error = /** @type {any} */ (new Error(`CalDAV 请求失败（${method}）：${e && e.message ? e.message : err}`));
       error.code = 'CALDAV_NETWORK';
       throw error;
     }
     return response;
   }
 
+  /** @param {{ uid: string, ics: string }} input */
   async function putEvent({ uid, ics }) {
     if (typeof ics !== 'string' || !ics.includes('BEGIN:VCALENDAR')) {
       throw new TypeError('ics 必须包含 BEGIN:VCALENDAR');
     }
-    const target = eventUrl(url, uid);
+    const target = eventUrl(String(url), uid);
     let response = await request('PUT', target, { 'If-None-Match': '*' }, ics);
 
     // 已存在：取 ETag 后按 If-Match 更新（避免覆盖别人并发改过的版本）
     if (response.status === 412) {
       const head = await request('GET', target);
       if (!head.ok) {
-        const error = new Error(`CalDAV 已存在但读取失败：HTTP ${head.status}`);
+        const error = /** @type {any} */ (new Error(`CalDAV 已存在但读取失败：HTTP ${head.status}`));
         error.code = 'CALDAV_CONFLICT';
         throw error;
       }
@@ -88,7 +98,7 @@ function createCalDavWriter({
 
     if (response.status !== 200 && response.status !== 201 && response.status !== 204) {
       const text = await response.text().catch(() => '');
-      const error = new Error(`CalDAV 写入失败：HTTP ${response.status}${text ? ` ${text.slice(0, 120)}` : ''}`);
+      const error = /** @type {any} */ (new Error(`CalDAV 写入失败：HTTP ${response.status}${text ? ` ${text.slice(0, 120)}` : ''}`));
       error.code = 'CALDAV_HTTP';
       error.status = response.status;
       throw error;
@@ -96,11 +106,12 @@ function createCalDavWriter({
     return { ok: true, status: response.status, etag: response.headers.get('etag') || null, url: target };
   }
 
+  /** @param {string} uid */
   async function deleteEvent(uid) {
-    const response = await request('DELETE', eventUrl(url, uid));
+    const response = await request('DELETE', eventUrl(String(url), uid));
     if (response.status === 404) return { ok: true, missing: true };
     if (!response.ok && response.status !== 204) {
-      const error = new Error(`CalDAV 删除失败：HTTP ${response.status}`);
+      const error = /** @type {any} */ (new Error(`CalDAV 删除失败：HTTP ${response.status}`));
       error.code = 'CALDAV_HTTP';
       error.status = response.status;
       throw error;

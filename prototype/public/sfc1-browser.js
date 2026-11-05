@@ -8,7 +8,7 @@
 // ============================================================
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
-  else root.SFC1 = factory();
+  else /** @type {any} */ (root).SFC1 = factory();
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
@@ -37,14 +37,14 @@
     return c.subtle;
   }
 
-  function toU8(value, name = 'bytes') {
+  function toU8(/** @type {any} */ value, name = 'bytes') {
     if (value instanceof Uint8Array) return value;
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
     throw new TypeError(`${name} 必须是 Uint8Array`);
   }
 
-  function concat(parts) {
+  function concat(/** @type {any} */ parts) {
     let total = 0;
     for (const p of parts) total += p.length;
     const out = new Uint8Array(total);
@@ -53,18 +53,18 @@
     return out;
   }
 
-  function u32le(value) {
+  function u32le(/** @type {any} */ value) {
     if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new RangeError('invalid uint32');
     const b = new Uint8Array(4);
     new DataView(b.buffer).setUint32(0, value, true);
     return b;
   }
 
-  function readU32le(bytes, offset) {
+  function readU32le(/** @type {any} */ bytes, /** @type {any} */ offset) {
     return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, true);
   }
 
-  function hexToBytes(hex) {
+  function hexToBytes(/** @type {any} */ hex) {
     const clean = String(hex || '').trim();
     if (clean.length % 2 !== 0 || /[^0-9a-fA-F]/.test(clean)) throw new TypeError('非法十六进制');
     const out = new Uint8Array(clean.length / 2);
@@ -72,29 +72,29 @@
     return out;
   }
 
-  function bytesToHex(bytes) {
+  function bytesToHex(/** @type {any} */ bytes) {
     return Array.from(toU8(bytes)).map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
-  function bytesToBase64(bytes) {
+  function bytesToBase64(/** @type {any} */ bytes) {
     const u8 = toU8(bytes);
     let binary = '';
     for (let i = 0; i < u8.length; i += 0x8000) {
-      binary += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+      binary += String.fromCharCode.apply(null, /** @type {any} */ (u8.subarray(i, i + 0x8000)));
     }
     return btoa(binary);
   }
 
-  function base64ToBytes(text) {
+  function base64ToBytes(/** @type {any} */ text) {
     const binary = atob(String(text || ''));
     const out = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
     return out;
   }
 
-  async function sha256(bytes) {
+  async function sha256(/** @type {any} */ bytes) {
     if (!hasWebCrypto()) return sha256Sync(bytes);
-    return new Uint8Array(await subtle().digest('SHA-256', toU8(bytes)));
+    return new Uint8Array(await subtle().digest('SHA-256', /** @type {any} */ (toU8(bytes))));
   }
 
   // ---------- 纯 JS 兜底：局域网 http 页面没有 crypto.subtle ----------
@@ -110,9 +110,9 @@
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
   ]);
 
-  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+  function rotr(/** @type {any} */ x, /** @type {any} */ n) { return (x >>> n) | (x << (32 - n)); }
 
-  function sha256Sync(input) {
+  function sha256Sync(/** @type {any} */ input) {
     const bytes = toU8(input);
     const padded = new Uint8Array(((bytes.length + 9 + 63) >> 6) << 6);
     padded.set(bytes);
@@ -155,7 +155,7 @@
     return out;
   }
 
-  function hmacSync(keyBytes, dataBytes) {
+  function hmacSync(/** @type {any} */ keyBytes, /** @type {any} */ dataBytes) {
     let key = toU8(keyBytes, 'key');
     if (key.length > 64) key = sha256Sync(key);
     const pad = new Uint8Array(64);
@@ -166,7 +166,7 @@
     return sha256Sync(concat([opad, sha256Sync(concat([ipad, toU8(dataBytes)]))]));
   }
 
-  function hkdfSync(ikm, salt, info) {
+  function hkdfSync(/** @type {any} */ ikm, /** @type {any} */ salt, /** @type {any} */ info) {
     const prk = hmacSync(salt, ikm);
     return hmacSync(prk, concat([info, new Uint8Array([1])]));
   }
@@ -176,16 +176,16 @@
     return !!(c && c.subtle);
   }
 
-  async function hmac(keyBytes, dataBytes) {
+  async function hmac(/** @type {any} */ keyBytes, /** @type {any} */ dataBytes) {
     const key = toU8(keyBytes, 'key');
     if (key.length !== 32) throw new TypeError('key 必须是 32 字节');
     if (!hasWebCrypto()) return hmacSync(key, toU8(dataBytes));
-    const cryptoKey = await subtle().importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    return new Uint8Array(await subtle().sign('HMAC', cryptoKey, toU8(dataBytes)));
+    const cryptoKey = await subtle().importKey('raw', /** @type {any} */ (key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return new Uint8Array(await subtle().sign('HMAC', cryptoKey, /** @type {any} */ (toU8(dataBytes))));
   }
 
   // 常量时间比较，避免在端上泄漏 MAC 比对进度
-  function equalBytes(a, b) {
+  function equalBytes(/** @type {any} */ a, /** @type {any} */ b) {
     const x = toU8(a);
     const y = toU8(b);
     if (x.length !== y.length) return false;
@@ -194,20 +194,20 @@
     return diff === 0;
   }
 
-  async function seal(type, payload, keyBytes) {
+  async function seal(/** @type {any} */ type, /** @type {any} */ payload, /** @type {any} */ keyBytes) {
     const header = new Uint8Array([0x53, 0x46, 0x43, 0x31, VERSION, type, 0, 0, 0, 0]);
     new DataView(header.buffer).setUint16(8, payload.length + MAC_LEN, true);
     const data = concat([header, payload]);
     return concat([data, await hmac(keyBytes, data)]);
   }
 
-  function requireBytes(value, length, name) {
+  function requireBytes(/** @type {any} */ value, /** @type {any} */ length, /** @type {any} */ name) {
     const out = toU8(value, name);
     if (out.length !== length) throw new TypeError(`${name}: 期望 ${length} 字节`);
     return out;
   }
 
-  async function encodeDecision(decision, keyBytes) {
+  async function encodeDecision(/** @type {any} */ decision, /** @type {any} */ keyBytes) {
     if (!decision || typeof decision !== 'object') throw new TypeError('缺少 decision');
     const decisionValue = decision.decision;
     if (decisionValue !== 0 && decisionValue !== 1) throw new RangeError('decision 只能是 0 或 1');
@@ -221,7 +221,7 @@
     return seal(TYPE_DECISION, payload, keyBytes);
   }
 
-  async function decodeFrame(buffer, keyBytes) {
+  async function decodeFrame(/** @type {any} */ buffer, /** @type {any} */ keyBytes) {
     const b = toU8(buffer, 'frame');
     if (b.length < MIN_FRAME || b.length > MAX_FRAME) throw new Error('invalid frame length');
     for (let i = 0; i < 4; i += 1) if (b[i] !== MAGIC[i]) throw new Error('invalid header');
@@ -249,31 +249,31 @@
     return { type: 'challenge', ...common, action: p[24], operationHash: p.slice(25, 57), issuedAt, expiresAt, summary };
   }
 
-  async function deriveDeviceId(value) {
+  async function deriveDeviceId(/** @type {any} */ value) {
     if (typeof value !== 'string' || !value) throw new TypeError('deviceId 必须是非空字符串');
     const digest = await sha256(concat([encoder.encode(DEVICE_DOMAIN), encoder.encode(value)]));
     return digest.slice(0, 8);
   }
 
-  async function deriveTaskId(value) {
+  async function deriveTaskId(/** @type {any} */ value) {
     if (typeof value !== 'string' || !value) throw new TypeError('taskId 必须是非空字符串');
     const digest = await sha256(concat([encoder.encode(TASK_DOMAIN), encoder.encode(value)]));
     return digest.slice(0, 8);
   }
 
   // 配对码 → PSK：两端用同一 HKDF 参数，码本身不进网络
-  function normalizeCode(code) {
+  function normalizeCode(/** @type {any} */ code) {
     return String(code || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
   }
 
   // 同步版本：服务端起步时用（不需要等 WebCrypto）
-  function deriveKeySync(code) {
+  function deriveKeySync(/** @type {any} */ code) {
     const normalized = normalizeCode(code);
     if (normalized.length < 6) throw new TypeError('配对码至少 6 位');
     return hkdfSync(encoder.encode(`sfc1-pairing:${normalized}`), encoder.encode(PAIRING_SALT), encoder.encode(PAIRING_INFO));
   }
 
-  async function deriveKey(code) {
+  async function deriveKey(/** @type {any} */ code) {
     const normalized = normalizeCode(code);
     if (normalized.length < 6) throw new TypeError('配对码至少 6 位');
     const ikm = encoder.encode(`sfc1-pairing:${normalized}`);

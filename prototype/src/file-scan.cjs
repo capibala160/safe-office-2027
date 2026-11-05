@@ -23,6 +23,7 @@ const ALLOWED_EXT = new Set([
   '.docx', '.xlsx', '.pptx', '.zip',
 ]);
 
+/** @param {Buffer} buffer @returns {string} */
 function detectKind(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) return 'empty';
   const head = buffer.subarray(0, 8);
@@ -44,6 +45,7 @@ function detectKind(buffer) {
   return 'binary';
 }
 
+/** @param {string | null | undefined} filename @returns {string} */
 function extOf(filename) {
   return path.extname(String(filename || '')).toLowerCase();
 }
@@ -68,6 +70,12 @@ function findClamav() {
   return null;
 }
 
+/**
+ * @param {Buffer} buffer
+ * @param {string} filename
+ * @param {{ cmd?: string | null, db?: string | null, timeoutMs?: number }} [options]
+ * @returns {{ available: boolean, infected: boolean, error?: string, engine?: string }}
+ */
 function scanWithClamav(buffer, filename, { cmd = null, db = null, timeoutMs = 15000 } = {}) {
   const scanner = cmd || findClamav();
   if (!scanner) return { available: false, infected: false };
@@ -81,15 +89,21 @@ function scanWithClamav(buffer, filename, { cmd = null, db = null, timeoutMs = 1
     execFileSync(scanner, args, { stdio: 'pipe', timeout: timeoutMs });
     return { available: true, infected: false };
   } catch (err) {
-    if (err && err.code === 'ENOENT') return { available: false, infected: false };
+    const e = /** @type {NodeJS.ErrnoException & { status?: number }} */ (err);
+    if (e && e.code === 'ENOENT') return { available: false, infected: false };
     // clamscan 命中病毒时 exit=1；2=扫描错误
-    if (err && err.status === 1) return { available: true, infected: true };
-    return { available: true, error: String((err && err.message) || err), infected: false };
+    if (e && e.status === 1) return { available: true, infected: true };
+    return { available: true, error: String((e && e.message) || err), infected: false };
   } finally {
     try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
   }
 }
 
+/**
+ * @param {Buffer} buffer
+ * @param {{ filename?: string, clamavMode?: string, clamavCmd?: string | null, clamavDb?: string | null }} [options]
+ * @returns {{ ok: boolean, rejected?: boolean, reason?: string, kind?: string, scanned?: boolean, engine?: string | null, note?: string }}
+ */
 function scanAttachment(buffer, {
   filename = '', clamavMode = process.env.SAFE_OFFICE_CLAMAV || 'off', clamavCmd = null, clamavDb = null,
 } = {}) {

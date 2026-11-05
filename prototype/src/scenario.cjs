@@ -35,6 +35,16 @@ const DOCS = {
 // 注意：这是一份进程内全局注册表，跨服务实例共享（演示单进程，够用）。
 const INGESTED_DOCS = new Map();
 
+/**
+ * @typedef {object} ScenarioDocument
+ * @property {string} id
+ * @property {string} title
+ * @property {string} level
+ * @property {string} body
+ * @property {string} [owner]
+ */
+
+/** @param {ScenarioDocument[] | null | undefined} docs @returns {number} */
 function registerDocuments(docs) {
   for (const doc of docs || []) {
     if (doc && typeof doc.id === 'string' && doc.id) INGESTED_DOCS.set(doc.id, doc);
@@ -46,6 +56,7 @@ function clearIngestedDocuments() {
   INGESTED_DOCS.clear();
 }
 
+/** @param {string} id @returns {boolean} */
 function unregisterDocument(id) {
   return INGESTED_DOCS.delete(id);
 }
@@ -54,8 +65,11 @@ function allDocuments() {
   return { ...DOCS, ...Object.fromEntries(INGESTED_DOCS) };
 }
 
+/** @param {string} id @returns {ScenarioDocument | null} */
 function getDocumentById(id) {
-  return DOCS[id] || INGESTED_DOCS.get(id) || null;
+  /** @type {Record<string, ScenarioDocument>} */
+  const docs = DOCS;
+  return docs[id] || INGESTED_DOCS.get(id) || null;
 }
 
 // 图片素材（命题：办公内容安全处理 —— 图片识别；AI 输入检测覆盖 文本/语音/图片 三通道）
@@ -98,6 +112,7 @@ const AUDIOS = {
 };
 
 // 从外部文档中"读出"的隐含指令（供 MockLLM 模拟"被带偏的模型输出"）
+/** @param {ScenarioDocument} doc @returns {{ action: string, args: { to: string, docId: string }, fromDoc: string, tainted: boolean }[]} */
 function extractEmbeddedInstruction(doc) {
   const email = (doc.body.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [])[0];
   const wants = /(发送|转发|发到|发给)/.test(doc.body);

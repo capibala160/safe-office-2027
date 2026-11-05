@@ -17,6 +17,27 @@ const { DatabaseSync } = require('node:sqlite');
 const LEVELS = ['公开', '内部', '机密'];
 const MAX_BYTES = 5 * 1024 * 1024;
 
+/**
+ * @typedef {{
+ *   id: string,
+ *   title: string,
+ *   level: string,
+ *   body: string,
+ *   sourcePath: string,
+ *   sha256: string,
+ *   importedAt: string,
+ *   owner?: string,
+ * }} ImportedDocument
+ * @typedef {{
+ *   filename?: string,
+ *   buffer?: Buffer,
+ *   level?: string,
+ *   owner?: string,
+ *   now?: () => string,
+ * }} ImportOptions
+ */
+
+/** @param {Buffer | string} buffer @returns {string} */
 function sha256Hex(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
@@ -26,6 +47,7 @@ const SIG_EOCD = 0x06054b50;
 const SIG_CENTRAL = 0x02014b50;
 const SIG_LOCAL = 0x04034b50;
 
+/** @param {Buffer} buffer @returns {number} */
 function findEocd(buffer) {
   const min = Math.max(0, buffer.length - 65557);
   for (let i = buffer.length - 22; i >= min; i -= 1) {
@@ -43,6 +65,11 @@ const ZIP_LIMITS = {
 
 // 返回 Map<name, Buffer>：只解压未加密的 stored/deflate 条目
 // only 给定时只解压该条目（docx 只关心 word/document.xml），其余只做限额检查
+/**
+ * @param {Buffer} buffer
+ * @param {{ only?: string | null }} [options]
+ * @returns {Map<string, Buffer>}
+ */
 function readZipEntries(buffer, { only = null } = {}) {
   const eocd = findEocd(buffer);
   if (eocd < 0) throw new Error('不是合法的 ZIP/docx 文件');
@@ -85,7 +112,7 @@ function readZipEntries(buffer, { only = null } = {}) {
         ? Buffer.from(data)
         : zlib.inflateRawSync(data, { maxOutputLength: ZIP_LIMITS.entryBytes }));
     } catch (err) {
-      if (err && (err.code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError)) {
+      if (err && (/** @type {{ code?: string }} */ (err).code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError)) {
         throw new Error(`ZIP 条目「${name}」解压后超出上限，疑似压缩炸弹`);
       }
       /* 损坏条目跳过，别让整份文件失败 */
@@ -94,6 +121,7 @@ function readZipEntries(buffer, { only = null } = {}) {
   return entries;
 }
 
+/** @param {string} text @returns {string} */
 function decodeXmlEntities(text) {
   return text
     .replace(/&lt;/g, '<')
@@ -106,6 +134,7 @@ function decodeXmlEntities(text) {
 }
 
 // 段落 → 换行，制表/换行元素保留；其余标签剥掉
+/** @param {string} xml @returns {string} */
 function xmlToText(xml) {
   return decodeXmlEntities(
     xml
@@ -116,6 +145,7 @@ function xmlToText(xml) {
   );
 }
 
+/** @param {Buffer} buffer @returns {string} */
 function docxToText(buffer) {
   // 只解压正文条目；其余条目仍经过限额检查，但不会占用内存
   const entries = readZipEntries(buffer, { only: 'word/document.xml' });
@@ -129,6 +159,7 @@ const ALLOWED_EXT = new Set(['.txt', '.md', '.markdown', '.docx']);
 const DOCX_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // "PK\x03\x04"
 
 // 上传通道要防"改了后缀的别的文件"：docx 必须真是 ZIP，文本必须是 UTF-8 且无 NUL
+/** @param {Buffer} buffer @param {string} ext */
 function assertBufferSafe(buffer, ext) {
   if (buffer.length === 0) throw new Error('文件是空的');
   if (buffer.length > MAX_BYTES) throw new Error(`文件超过 ${MAX_BYTES / 1024 / 1024}MB，拒绝导入`);
@@ -146,6 +177,11 @@ function assertBufferSafe(buffer, ext) {
   }
 }
 
+/**
+ * @param {Buffer} buffer
+ * @param {string | undefined} fileName
+ * @returns {{ title: string, body: string, ext: string }}
+ */
 function parseBuffer(buffer, fileName) {
   const ext = path.extname(String(fileName || '')).toLowerCase();
   if (!ALLOWED_EXT.has(ext)) {
@@ -162,16 +198,19 @@ function parseBuffer(buffer, fileName) {
   return { title, body, ext };
 }
 
+/** @param {string} filePath @returns {{ title: string, body: string, ext: string }} */
 function parseFile(filePath) {
   return parseBuffer(fs.readFileSync(filePath), filePath);
 }
 
+/** @param {any} level @returns {string | null} */
 function normalizeLevel(level) {
   return LEVELS.includes(level) ? level : null;
 }
 
 // ---------- 存储 ----------
 class DocumentStore {
+  /** @param {string} [file] */
   constructor(file = ':memory:') {
     if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
@@ -204,6 +243,7 @@ class DocumentStore {
     `);
   }
 
+  /** @param {ImportedDocument} doc @returns {ImportedDocument} */
   upsert(doc) {
     this.db.prepare(`
       INSERT INTO documents (doc_id, title, level, body, source_path, sha256, imported_at, owner)
@@ -216,11 +256,12 @@ class DocumentStore {
     return doc;
   }
 
+  /** @returns {ImportedDocument[]} */
   list() {
-    return this.db.prepare(`
+    return /** @type {any[]} */ (this.db.prepare(`
       SELECT doc_id, title, level, body, source_path, sha256, imported_at, owner
         FROM documents ORDER BY imported_at
-    `).all().map((row) => ({
+    `).all()).map((row) => ({
       id: row.doc_id,
       title: row.title,
       level: row.level,
@@ -232,8 +273,9 @@ class DocumentStore {
     }));
   }
 
+  /** @param {string} docId @returns {ImportedDocument | null} */
   get(docId) {
-    const row = this.db.prepare('SELECT * FROM documents WHERE doc_id = ?').get(docId);
+    const row = /** @type {any} */ (this.db.prepare('SELECT * FROM documents WHERE doc_id = ?').get(docId));
     if (!row) return null;
     return {
       id: row.doc_id, title: row.title, level: row.level, body: row.body,
@@ -242,6 +284,7 @@ class DocumentStore {
     };
   }
 
+  /** @param {string} docId @returns {boolean} */
   delete(docId) {
     const id = String(docId);
     this.db.prepare('DELETE FROM document_shares WHERE doc_id = ?').run(id);
@@ -251,6 +294,13 @@ class DocumentStore {
 
   // ---------- 文档共享（v0.41） ----------
   // 授权只是"额外允许某个账号读"，不改变文档所有者与密级
+  /**
+   * @param {string} docId
+   * @param {string} grantee
+   * @param {string} [grantedBy]
+   * @param {() => string} [now]
+   * @returns {{ docId: string, grantee: string, grantedBy: string }}
+   */
   share(docId, grantee, grantedBy = '', now = () => new Date().toISOString()) {
     const id = String(docId);
     const who = String(grantee);
@@ -264,6 +314,7 @@ class DocumentStore {
     return { docId: id, grantee: who, grantedBy: String(grantedBy || '') };
   }
 
+  /** @param {string} docId @param {string} grantee @returns {boolean} */
   revokeShare(docId, grantee) {
     const info = this.db.prepare(
       'DELETE FROM document_shares WHERE doc_id = ? AND grantee = ?',
@@ -271,11 +322,15 @@ class DocumentStore {
     return info.changes > 0;
   }
 
+  /**
+   * @param {string} docId
+   * @returns {{ docId: string, grantee: string, grantedBy: string, grantedAt: string }[]}
+   */
   listShares(docId) {
-    return this.db.prepare(`
+    return /** @type {any[]} */ (this.db.prepare(`
       SELECT doc_id, grantee, granted_by, granted_at
         FROM document_shares WHERE doc_id = ? ORDER BY granted_at, grantee
-    `).all(String(docId)).map((row) => ({
+    `).all(String(docId))).map((row) => ({
       docId: row.doc_id,
       grantee: row.grantee,
       grantedBy: row.granted_by || '',
@@ -283,6 +338,7 @@ class DocumentStore {
     }));
   }
 
+  /** @param {string} docId @param {string | null} [grantee] @returns {boolean} */
   isSharedWith(docId, grantee) {
     if (!grantee) return false;
     const row = this.db.prepare(
@@ -291,11 +347,12 @@ class DocumentStore {
     return !!row;
   }
 
+  /** @param {string | null} [grantee] @returns {string[]} */
   sharedDocIds(grantee) {
     if (!grantee) return [];
-    return this.db.prepare(
+    return /** @type {any[]} */ (this.db.prepare(
       'SELECT doc_id FROM document_shares WHERE grantee = ?',
-    ).all(String(grantee)).map((row) => row.doc_id);
+    ).all(String(grantee))).map((row) => row.doc_id);
   }
 
   close() {
@@ -305,6 +362,11 @@ class DocumentStore {
 
 // 导入一个文件：id 由内容哈希派生，同一份文件重复导入不会产生副本
 // 密级必须由导入的人显式指定——默认成"内部"会把机密文档静默降级
+/**
+ * @param {{ upsert: (doc: ImportedDocument) => ImportedDocument }} store
+ * @param {ImportOptions} [options]
+ * @returns {ImportedDocument}
+ */
 function importBuffer(store, {
   filename, buffer, level, owner = '', now = () => new Date().toISOString(),
 } = {}) {
@@ -329,11 +391,18 @@ function importBuffer(store, {
   return store.upsert(doc);
 }
 
+/**
+ * @param {{ upsert: (doc: ImportedDocument) => ImportedDocument }} store
+ * @param {string} filePath
+ * @param {ImportOptions} [options]
+ * @returns {ImportedDocument}
+ */
 function importFile(store, filePath, options = {}) {
   const buffer = fs.readFileSync(filePath);
   return importBuffer(store, { ...options, filename: path.resolve(filePath), buffer });
 }
 
+/** @param {DocumentStore} store @param {string} docId @returns {boolean} */
 function removeFile(store, docId) {
   // 走 DocumentStore.delete 以同时清掉共享授权（v0.41），否则删除后重新导入同内容
   // 会得到同一个 ID，旧授权会被重新激活。

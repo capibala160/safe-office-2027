@@ -11,6 +11,7 @@
 // 边界：本项目不实现 SMTP；真实发送优先选支持幂等键/状态查询的 HTTP 邮件服务。
 // ============================================================
 class MailerError extends Error {
+  /** @param {string} kind @param {string} message @param {ErrorOptions} [options] */
   constructor(kind, message, options = {}) {
     super(message, options);
     this.name = 'MailerError';
@@ -18,6 +19,7 @@ class MailerError extends Error {
   }
 }
 
+/** @param {any} operation */
 function assertOperation(operation) {
   if (!operation || typeof operation !== 'object' ||
       typeof operation.recipient !== 'string' || operation.recipient === '' ||
@@ -27,13 +29,17 @@ function assertOperation(operation) {
 }
 
 class FakeMailer {
+  /** @param {{ behavior?: string, messageId?: string }} [options] */
   constructor({ behavior = 'sent', messageId = 'fake-message-1' } = {}) {
     this.behavior = behavior;
     this.messageId = messageId;
+    /** @type {any[]} */
     this.calls = [];
+    /** @type {any[]} */
     this.delivered = [];
   }
 
+  /** @param {string | undefined} idempotencyKey @returns {{ idempotencyKey: string | undefined, messageId: string }} */
   _deliver(idempotencyKey) {
     const existing = this.delivered.find((d) => d.idempotencyKey === idempotencyKey);
     if (existing) return existing;
@@ -42,6 +48,7 @@ class FakeMailer {
     return record;
   }
 
+  /** @param {{ operation: any, idempotencyKey?: string }} params @returns {Promise<{ status: string, messageId: string }>} */
   async send({ operation, idempotencyKey }) {
     assertOperation(operation);
     this.calls.push({ idempotencyKey, operationId: operation.operationId });
@@ -71,6 +78,9 @@ class FakeMailer {
 }
 
 class HttpMailer {
+  /**
+   * @param {{ endpoint?: string, apiKey?: string, timeoutMs?: number, idempotencyHeader?: string, fetchImpl?: typeof fetch, buildBody?: (op: any) => any }} [options]
+   */
   constructor({
     endpoint,
     apiKey = '',
@@ -92,6 +102,7 @@ class HttpMailer {
     this.buildBody = buildBody;
   }
 
+  /** @param {{ operation: any, idempotencyKey?: string }} params @returns {Promise<{ status: string, messageId: string | null }>} */
   async send({ operation, idempotencyKey }) {
     assertOperation(operation);
     if (!this.endpoint || typeof this.fetchImpl !== 'function') {
@@ -111,10 +122,11 @@ class HttpMailer {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
-      if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      const e = /** @type {{ name?: string, message?: string }} */ (err);
+      if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
         throw new MailerError('timeout', '邮件请求超时（结果未知，禁止自动重试）', { cause: err });
       }
-      throw new MailerError('network', `邮件请求失败：${err && err.message ? err.message : err}`, { cause: err });
+      throw new MailerError('network', `邮件请求失败：${e && e.message ? e.message : String(err)}`, { cause: err });
     }
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');

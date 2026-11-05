@@ -14,6 +14,7 @@ const PIN_LED = 13;
 const PIN_BUZZER = 10;
 
 // 业务语义 → (pin, level)；未映射返回 null（不猜、不乱动）
+/** @param {string} device @param {string} op @returns {{ pin: number, level: number } | null} */
 function mapDeviceOp(device, op) {
   const action = String(op || '').toLowerCase();
   if (['unlock', 'open', 'on', 'start'].includes(action)) return { pin: PIN_LED, level: 1 };
@@ -23,12 +24,16 @@ function mapDeviceOp(device, op) {
   return null;
 }
 
+/** @param {Buffer} buf @param {number} i @returns {boolean} */
 function isSfc1Header(buf, i) {
   return buf[i] === 0x53 && buf[i + 1] === 0x46 && buf[i + 2] === 0x43 && buf[i + 3] === 0x31
     && buf[i + 4] === 1 && buf[i + 6] === 0 && buf[i + 7] === 0
     && (buf[i + 5] === 0x21 || buf[i + 5] === 0x22 || buf[i + 5] === 1 || buf[i + 5] === 2);
 }
 
+/**
+ * @param {{ portPath?: string, key?: Buffer, timeoutMs?: number, openSerial?: ((opts: { path: string, baudRate: number }) => any) | null, serialPortModule?: any, map?: (device: string, op: string) => { pin: number, level: number } | null, now?: () => number }} [options]
+ */
 function createSerialActuator({
   portPath,
   key,
@@ -50,16 +55,20 @@ function createSerialActuator({
   }
 
   // 先判依赖再构造：serialport 缺失时给出明确错误，而不是 new null 的 TypeError
+  /** @param {any} SerialPortCtor @returns {any} */
   function openPort(SerialPortCtor) {
-    if (openSerial) return openSerial({ path: portPath, baudRate: 115200 });
+    const path = String(portPath);
+    if (openSerial) return openSerial({ path, baudRate: 115200 });
     if (!SerialPortCtor) {
       throw Object.assign(new Error('serialport 未安装（optionalDependencies）'), { code: 'ACTUATOR_NO_SERIALPORT' });
     }
-    return new SerialPortCtor({ path: portPath, baudRate: 115200 });
+    return new SerialPortCtor({ path, baudRate: 115200 });
   }
 
+  /** @param {number} pin @param {number} level @returns {Promise<any>} */
   function send(pin, level) {
     return new Promise((resolve, reject) => {
+      /** @type {any} */
       let port;
       try {
         port = openPort(resolveCtor());
@@ -70,6 +79,7 @@ function createSerialActuator({
       const nonce = crypto.randomBytes(16);
       let done = false;
       let buffer = Buffer.alloc(0);
+      /** @param {any} [err] @param {any} [result] */
       const finish = (err, result) => {
         if (done) return;
         done = true;
@@ -79,13 +89,13 @@ function createSerialActuator({
       const timer = setTimeout(() => finish(Object.assign(new Error('等待设备 ACK 超时'), { code: 'ACTUATOR_TIMEOUT' })), timeoutMs);
       timer.unref?.();
 
-      port.on?.('error', (err) => finish(err));
+      port.on?.('error', (/** @type {any} */ err) => finish(err));
       port.on?.('open', () => {
         try {
-          port.write(encodeActuator({ nonce, pin, level }, key));
+          port.write(encodeActuator({ nonce, pin, level }, /** @type {Buffer} */ (key)));
         } catch (err) { finish(err); }
       });
-      port.on?.('data', (chunk) => {
+      port.on?.('data', (/** @type {Buffer} */ chunk) => {
         buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
         for (let i = 0; i + 10 <= buffer.length; i++) {
           if (!isSfc1Header(buffer, i)) continue;
@@ -93,10 +103,11 @@ function createSerialActuator({
           if (buffer.length < i + total) break;
           const frame = buffer.subarray(i, i + total);
           try {
-            const decoded = decodeFrame(frame, key);
+            const decoded = decodeFrame(frame, /** @type {Buffer} */ (key));
             if (decoded.type === 'actuator-ack') {
               // 1) 必须先绑定本次 nonce：旧回执/其他动作的 ACK 一律忽略
-              if (!decoded.nonce || decoded.nonce.length !== 16 || !crypto.timingSafeEqual(decoded.nonce, nonce)) {
+              const ackNonce = decoded.nonce;
+              if (!ackNonce || ackNonce.length !== 16 || !crypto.timingSafeEqual(ackNonce, nonce)) {
                 continue;
               }
               // 2) nonce 对上但 pin/level 不符：协议异常，直接失败
@@ -123,6 +134,7 @@ function createSerialActuator({
     });
   }
 
+  /** @param {{ device?: string, op?: string }} [options] @returns {Promise<any>} */
   async function actuate({ device = '', op = '' } = {}) {
     const target = map(device, op);
     if (!target) {
@@ -135,7 +147,8 @@ function createSerialActuator({
         ack = await send(target.pin, target.level);
         break;
       } catch (err) {
-        const busy = /Access denied|EBUSY|Resource busy|busy/i.test(String(err.message || ''));
+        const message = err instanceof Error ? err.message : String(err);
+        const busy = /Access denied|EBUSY|Resource busy|busy/i.test(message);
         if (attempt >= 3 || !busy) throw err;
         await new Promise((resolve) => setTimeout(resolve, 120));
       }

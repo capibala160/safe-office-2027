@@ -11,6 +11,7 @@ class PerfMeter {
     this.spans = new Map();
   }
 
+  /** @param {string} label @param {number} ms */
   _record(label, ms) {
     const s = this.spans.get(label) || { label, count: 0, totalMs: 0, maxMs: 0 };
     s.count += 1;
@@ -19,6 +20,7 @@ class PerfMeter {
     this.spans.set(label, s);
   }
 
+  /** @template T @param {string} label @param {() => T} fn @returns {T} */
   measure(label, fn) {
     const t0 = performance.now();
     try {
@@ -28,6 +30,7 @@ class PerfMeter {
     }
   }
 
+  /** @template T @param {string} label @param {() => Promise<T>} fn @returns {Promise<T>} */
   async measureAsync(label, fn) {
     const t0 = performance.now();
     try {

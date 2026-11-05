@@ -35,11 +35,17 @@ const PHONE_ALLOWLIST = new Set([
   '/api/phone/pair', '/api/phone/state', '/api/phone/decision', '/api/health',
 ]);
 
+/**
+ * @param {any} req
+ */
 function isLoopbackReq(req) {
   const addr = req.socket && req.socket.remoteAddress;
   return !addr || LOOPBACK_ADDRS.has(addr);
 }
 
+/**
+ * @param {any} port
+ */
 function lanUrls(port) {
   const urls = [];
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
@@ -71,6 +77,10 @@ const MIME = {
 const APP_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:";
 
+/**
+ * @param {any} res
+ * @param {any} [options]
+ */
 function securityHeaders(res, { csp = APP_CSP } = {}) {
   res.setHeader('Content-Security-Policy', csp);
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -78,6 +88,11 @@ function securityHeaders(res, { csp = APP_CSP } = {}) {
   res.setHeader('Referrer-Policy', 'no-referrer');
 }
 
+/**
+ * @param {any} res
+ * @param {any} status
+ * @param {any} payload
+ */
 function sendJson(res, status, payload) {
   securityHeaders(res);
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -86,6 +101,11 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+/**
+ * @param {any} res
+ * @param {any} buffer
+ * @param {any} [options]
+ */
 function sendBinary(res, buffer, { filename = 'attachment', mime = 'application/octet-stream' } = {}) {
   const encoded = encodeURIComponent(filename);
   res.setHeader('Content-Type', mime);
@@ -96,6 +116,12 @@ function sendBinary(res, buffer, { filename = 'attachment', mime = 'application/
   res.end(buffer);
 }
 
+/**
+ * @param {any} res
+ * @param {any} status
+ * @param {any} text
+ * @param {any} [type]
+ */
 function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
   securityHeaders(res);
   res.setHeader('Content-Type', type);
@@ -104,6 +130,12 @@ function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
   res.end(text);
 }
 
+/**
+ * @param {any} res
+ * @param {any} status
+ * @param {any} html
+ * @param {any} [options]
+ */
 function sendHtml(res, status, html, { csp = REPORT_CSP } = {}) {
   securityHeaders(res, { csp });
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -112,12 +144,17 @@ function sendHtml(res, status, html, { csp = REPORT_CSP } = {}) {
   res.end(html);
 }
 
+/**
+ * @param {any} req
+ * @param {any} [limit]
+ */
 function readJson(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
     let tooLarge = false;
+    /** @type {Buffer[]} */
     const chunks = [];
-    req.on('data', (chunk) => {
+    req.on('data', (/** @type {any} */ chunk) => {
       if (tooLarge) return;
       size += chunk.length;
       if (size > limit) {
@@ -147,10 +184,14 @@ function readJson(req, limit = 1024 * 1024) {
         return reject(new ConsoleError('BAD_REQUEST', '请求体不是合法 JSON'));
       }
     });
-    req.on('error', (err) => reject(err));
+    req.on('error', (/** @type {any} */ err) => reject(err));
   });
 }
 
+/**
+ * @param {any} root
+ * @param {any} pathname
+ */
 function safeResolve(root, pathname) {
   let decoded;
   try {
@@ -164,6 +205,11 @@ function safeResolve(root, pathname) {
   return full;
 }
 
+/**
+ * @param {any} res
+ * @param {any} publicDir
+ * @param {any} pathname
+ */
 async function serveStatic(res, publicDir, pathname) {
   const relative = pathname === '/' ? '/index.html' : pathname;
   const file = safeResolve(publicDir, relative);
@@ -172,18 +218,21 @@ async function serveStatic(res, publicDir, pathname) {
     const stat = await fs.promises.stat(file);
     if (!stat.isFile()) return sendText(res, 404, 'Not Found');
     const data = await fs.promises.readFile(file);
-    const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+    const type = /** @type {Record<string, string>} */ (MIME)[path.extname(file).toLowerCase()] || 'application/octet-stream';
     securityHeaders(res);
     res.setHeader('Content-Type', type);
     res.setHeader('Cache-Control', 'no-store');
     res.statusCode = 200;
     res.end(data);
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     if (err && err.code === 'ENOENT') return sendText(res, 404, 'Not Found');
     return sendText(res, 500, 'Internal Server Error');
   }
 }
 
+/**
+ * @param {any} reqUrl
+ */
 function parsePath(reqUrl) {
   try {
     const url = new URL(reqUrl, 'http://localhost');
@@ -196,6 +245,10 @@ function parsePath(reqUrl) {
 // 命令请求上限：附件原始总量 10MB，base64 约 13.4MB，再留 JSON 余量。
 const DEFAULT_COMMAND_BODY_LIMIT = 16 * 1024 * 1024;
 
+/**
+ * @param {any} header
+ * @param {any} name
+ */
 function parseCookie(header, name) {
   for (const part of String(header || '').split(';')) {
     const [key, ...rest] = part.trim().split('=');
@@ -205,17 +258,30 @@ function parseCookie(header, name) {
   return null;
 }
 
+/**
+ * @param {any} req
+ * @param {any} res
+ * @param {any} token
+ * @param {any} ttlMs
+ */
 function setSessionCookie(req, res, token, ttlMs) {
   const attrs = ['Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${Math.floor(ttlMs / 1000)}`];
   if (req.socket && req.socket.encrypted) attrs.push('Secure');
   res.setHeader('Set-Cookie', `sfc_session=${encodeURIComponent(token)}; ${attrs.join('; ')}`);
 }
 
+/**
+ * @param {any} req
+ * @param {any} res
+ */
 function clearSessionCookie(req, res) {
   setSessionCookie(req, res, '', 0);
 }
 
 // 租户上下文：服务层用它过滤文档/操作/运行历史；未启用登录时 actor=null（保持旧行为）
+/**
+ * @param {any} req
+ */
 function userContext(req) {
   return {
     actor: req.user ? req.user.username : null,
@@ -224,6 +290,10 @@ function userContext(req) {
 }
 
 // 登录用户只能用自己的角色执行命令，不能靠改 body 提权
+/**
+ * @param {any} req
+ * @param {any} body
+ */
 function applyUserToCommand(req, body) {
   if (!req.user) return;
   if (body.role && body.role !== req.user.role) {
@@ -233,6 +303,9 @@ function applyUserToCommand(req, body) {
   body.operator = req.user.username;
 }
 
+/**
+ * @param {any} [options]
+ */
 function createConsoleServer({
   service = new ConsoleService(),
   publicDir = path.join(__dirname, 'public'),
@@ -250,10 +323,10 @@ function createConsoleServer({
     '/api/phone/pair', '/api/phone/state', '/api/phone/decision',
   ]);
   const loginAttempts = new Map();
-  const loginRateLimited = (key) => rateLimited(loginAttempts, key, 5, 60 * 1000);
+  const loginRateLimited = (/** @type {any} */ key) => rateLimited(loginAttempts, key, 5, 60 * 1000);
   const passwordAttempts = new Map();
   const twoFactorAttempts = new Map();
-  const mapAuthError = (err) => {
+  const mapAuthError = (/** @type {any} */ err) => {
     if (err.code === 'USER_NOT_FOUND') return new ConsoleError('NOT_FOUND', err.message, 404);
     if (err.code === 'TOTP_ENABLED' || err.code === 'TOTP_SETUP_REQUIRED' || err.code === 'LAST_ADMIN') {
       return new ConsoleError('CONFLICT', err.message, 409);
@@ -274,7 +347,7 @@ function createConsoleServer({
   // 设备助手需要看到待审批队列与操作详情（但不读文档正文/审计）
   const ROLE_OP_READ = new Set(['员工', '管理员', '审计员', '设备助手']);
   const ROLE_AUDIT = new Set(['管理员', '审计员']);
-  function requireRole(req, roles, action) {
+  function requireRole(/** @type {any} */ req, /** @type {any} */ roles, /** @type {any} */ action) {
     if (!auth) return; // 未启用登录：保持本地演示行为
     if (!req.user) throw new ConsoleError('AUTH_REQUIRED', '请先登录', 401);
     if (!roles.has(req.user.role)) {
@@ -289,23 +362,23 @@ function createConsoleServer({
   const SESSION_TTL_MS = 10 * 60 * 1000;
   const PAIR_LIMIT = 5;
   const DECISION_LIMIT = 10;
-  const clientIp = (req) => (req.socket && req.socket.remoteAddress) || 'unknown';
+  const clientIp = (/** @type {any} */ req) => (req.socket && req.socket.remoteAddress) || 'unknown';
 
-  function rateLimited(map, key, max, windowMs = 60 * 1000) {
+  function rateLimited(/** @type {any} */ map, /** @type {any} */ key, /** @type {any} */ max, windowMs = 60 * 1000) {
     const now = Date.now();
-    const list = (map.get(key) || []).filter((t) => now - t < windowMs);
+    const list = (map.get(key) || []).filter((/** @type {any} */ t) => now - t < windowMs);
     list.push(now);
     map.set(key, list);
     return list.length > max;
   }
 
-  function safeEqual(a, b) {
+  function safeEqual(/** @type {any} */ a, /** @type {any} */ b) {
     const left = Buffer.from(String(a));
     const right = Buffer.from(String(b));
     return left.length === right.length && crypto.timingSafeEqual(left, right);
   }
 
-  function requirePhoneSession(req) {
+  function requirePhoneSession(/** @type {any} */ req) {
     if (!service.pairingCode) return; // 本机未启用配对码：保持旧的本地演示行为
     const token = String(req.headers['x-phone-session'] || '');
     const session = phoneSessions.get(token);
@@ -331,7 +404,7 @@ function createConsoleServer({
     });
   });
 
-  async function handleRequest(req, res) {
+  async function handleRequest(/** @type {any} */ req, /** @type {any} */ res) {
     const { pathname, query } = parsePath(req.url || '/');
     const method = req.method || 'GET';
 
@@ -378,7 +451,7 @@ function createConsoleServer({
       }
       req.user = session;
     }
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       if (err instanceof ConsoleError) {
         return sendJson(res, err.status || 400, {
           ok: false, error: { code: err.code, message: err.message, detail: err.detail },
@@ -409,7 +482,7 @@ function createConsoleServer({
           auth.changePassword(req.user.username, body.oldPassword, body.newPassword, {
             keepToken: parseCookie(req.headers.cookie, 'sfc_session'),
           });
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           if (err.code === 'INVALID_CREDENTIALS') {
             throw new ConsoleError('INVALID_CREDENTIALS', err.message, 401);
           }
@@ -437,7 +510,7 @@ function createConsoleServer({
               ...auth.disableTotp(req.user.username, body.password, body.code),
             });
           }
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
         }
         throw new ConsoleError('NOT_FOUND', `未知接口：${pathname}`, 404);
@@ -455,7 +528,7 @@ function createConsoleServer({
         const body = await readJson(req);
         try {
           auth.adminResetPassword(decodeURIComponent(userReset[1]), body.newPassword);
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
         }
         return sendJson(res, 200, { ok: true });
@@ -471,7 +544,7 @@ function createConsoleServer({
         try {
           const out = auth.setDisabled(username, userToggle[2] === 'disable');
           return sendJson(res, 200, { ok: true, ...out });
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
         }
       }
@@ -486,7 +559,7 @@ function createConsoleServer({
         try {
           const out = auth.deleteUser(username);
           return sendJson(res, 200, { ok: true, ...out });
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
         }
       }
@@ -564,7 +637,7 @@ function createConsoleServer({
             ok: true,
             document: { id: doc.id, title: doc.title, level: doc.level, bytes: Buffer.byteLength(doc.body, 'utf8') },
           });
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw new ConsoleError('BAD_REQUEST', err && err.message ? err.message : '导入失败', 400);
         }
       }
@@ -579,8 +652,8 @@ function createConsoleServer({
         return sendJson(res, 200, {
           ok: true,
           items: auth.listUsers()
-            .filter((u) => SHAREABLE_ROLES.has(u.role))
-            .map((u) => ({ username: u.username, role: u.role })),
+            .filter((/** @type {any} */ u) => SHAREABLE_ROLES.has(u.role))
+            .map((/** @type {any} */ u) => ({ username: u.username, role: u.role })),
         });
       }
       const docSharesMatch = pathname.match(/^\/api\/documents\/([^/]+)\/shares$/);
@@ -597,7 +670,7 @@ function createConsoleServer({
         if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表），无法共享', 409);
         const body = await readJson(req);
         const grantee = String(body.grantee || '').trim();
-        const target = auth.listUsers().find((u) => u.username === grantee);
+        const target = auth.listUsers().find((/** @type {any} */ u) => u.username === grantee);
         if (!target) throw new ConsoleError('NOT_FOUND', `用户不存在：${grantee || '（空）'}`, 404);
         return sendJson(res, 200, {
           ok: true,
@@ -639,7 +712,7 @@ function createConsoleServer({
         try {
           const result = await inboxReader.fetch({ limit: Number(query.get('limit')) || 10 });
           return sendJson(res, 200, { ok: true, ...result });
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw new ConsoleError('BAD_GATEWAY', `收件箱读取失败：${err.message}`, 502);
         }
       }
@@ -650,7 +723,7 @@ function createConsoleServer({
         const uid = Number(body.uid);
         if (!Number.isInteger(uid) || uid <= 0) throw new ConsoleError('BAD_REQUEST', 'uid 非法', 400);
         const inbox = await inboxReader.fetch({ limit: 20 });
-        const item = (inbox.items || []).find((x) => x.uid === uid);
+        const item = (inbox.items || []).find((/** @type {any} */ x) => x.uid === uid);
         if (!item) throw new ConsoleError('NOT_FOUND', '收件箱里没有这封邮件（可能已超出最近 20 封）', 404);
         const match = String(item.from || '').match(/<([^>]+)>/);
         const to = match ? match[1] : (String(item.from || '').includes('@') ? String(item.from).trim() : '');
@@ -769,7 +842,7 @@ function createConsoleServer({
           ok: true,
           ...view,
           // 只下发标签/身份，绝不下发密钥
-          devices: devices.map(({ label, deviceId, provisionedAt }) => ({ label, deviceId, provisionedAt })),
+          devices: devices.map((/** @type {any} */ { label, deviceId, provisionedAt }) => ({ label, deviceId, provisionedAt })),
           selected: deviceState && deviceState.selected ? deviceState.selected : service.deviceId,
         });
       }
@@ -817,7 +890,7 @@ function createConsoleServer({
         requireRole(req, ROLE_ADMIN, '切换确认设备');
         const body = await readJson(req);
         const label = String(body.label || '').trim();
-        const device = devices.find((d) => d.label === label);
+        const device = devices.find((/** @type {any} */ d) => d.label === label);
         if (!device) {
           return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: `设备不存在：${label}` } });
         }
@@ -986,7 +1059,7 @@ function createConsoleServer({
         return sendJson(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '只支持 GET/HEAD' } });
       }
       return serveStatic(res, publicDir, pathname);
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       if (err instanceof ConsoleError) {
         return sendJson(res, err.status || 400, {
           ok: false, error: { code: err.code, message: err.message, detail: err.detail },
@@ -997,17 +1070,23 @@ function createConsoleServer({
       return sendJson(res, 500, { ok: false, error: { code: 'INTERNAL', message: '服务内部错误' } });
     }
   }
-  server.consoleService = service;
+  /** @type {any} */ (server).consoleService = service;
   return server;
 }
 
 // 控制台的设备身份：显式设置 SAFE_OFFICE_DEVICE 时，deviceId 与显示名都跟着走。
 // 不设置时返回空对象，保持原有默认（deviceId=ws63-A / 虚拟确认器显示名）。
+/**
+ * @param {any} [env]
+ */
 function consoleIdentityFromEnv(env = process.env) {
   const label = String(env.SAFE_OFFICE_DEVICE || '').trim();
   return label ? { deviceId: label, deviceLabel: label } : {};
 }
 
+/**
+ * @param {any} [options]
+ */
 async function startServer({
   port = Number(process.env.PORT) || 7812,
   host = '127.0.0.1',
@@ -1052,7 +1131,7 @@ async function startServer({
       production,
     });
     nearfieldKey = resolvedDevice.key;
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     if (production || nearfieldPort) throw new Error(`确认密钥不可用：${err.message}`);
     // 非生产且未接真板：保留默认演示密钥（虚拟设备路径）
     console.warn(`⚠ 未加载到设备密钥，虚拟确认继续使用演示密钥：${err.message}`);
@@ -1061,7 +1140,7 @@ async function startServer({
   let asrClient = null;
   try {
     asrClient = createAsrFromEnv(process.env);
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ ASR 配置不完整，录音转写保持模拟：${err.message}`);
   }
   // 设备联动（v0.52）：确认后用同一块板执行 GPIO；端口默认跟随近场串口
@@ -1071,7 +1150,7 @@ async function startServer({
     if (actuatorPort && nearfieldKey) {
       actuator = createSerialActuator({ portPath: actuatorPort, key: nearfieldKey });
     }
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ 设备执行未启用：${err.message}`);
   }
   let instance = service;
@@ -1119,7 +1198,7 @@ async function startServer({
     try {
       const rotated = instance.autoRotateAuditIfDue();
       if (rotated.rotated) console.log(`审计轮转：${rotated.reason} → ${rotated.archive.audit}`);
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       console.warn(`⚠ 审计自动轮转失败：${err.message}`);
     }
   }
@@ -1129,7 +1208,7 @@ async function startServer({
     try {
       const pruned = instance.pruneAttachments({ days: retentionDays });
       if (pruned.deleted > 0) console.log(`附件保留：清理 ${pruned.deleted} 个过期内容（保留被引用 ${pruned.keptReferenced} 个）`);
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       console.warn(`⚠ 附件保留清理失败：${err.message}`);
     }
   }
@@ -1143,6 +1222,7 @@ async function startServer({
     console.log(`审计外部快照：每 ${Math.round(instance.auditExportIntervalMs / 60000)} 分钟导出，保留 ${instance.auditExportKeep} 份`);
   }
   // 多设备（docs/60）：设备表里的记录用于 UI 下拉与运行时切换；密钥只在服务端内存里
+  /** @type {any[]} */
   let deviceTable = [];
   try {
     deviceTable = readDeviceTable()
@@ -1153,7 +1233,7 @@ async function startServer({
         provisionedAt: d.provisionedAt,
       }))
       .filter((d) => d.key.length === 32);
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     if (production || nearfieldPort) throw new Error(`设备表不可用：${err.message}`);
     console.warn(`⚠ 设备表不可用：${err.message}`);
   }
@@ -1184,7 +1264,7 @@ async function startServer({
           url: `http://${host}:${actualPort}`,
           phoneUrls: pairingCode ? lanUrls(actualPort) : [],
           pairingCode: instance.pairingCode || null,
-          close: () => new Promise((done) => {
+          close: () => new Promise((/** @type {(value?: any) => void} */ done) => {
             server.close(() => {
               instance.close();
               try { if (documentsStore) documentsStore.close(); } catch { /* ignore */ }
@@ -1224,13 +1304,14 @@ if (require.main === module) {
     || path.join(__dirname, 'data', 'documents.db');
   const usersFile = process.env.SAFE_OFFICE_USERS_FILE || path.join(__dirname, 'data', 'users.json');
   const sessionsFile = process.env.SAFE_OFFICE_SESSIONS_FILE || path.join(__dirname, 'data', 'sessions.json');
+  /** @type {any} */
   let auth = null;
   try {
     auth = createAuthFromFile(usersFile, { sessionFile: sessionsFile });
     if (auth && auth.sessionLoadError) {
       console.warn(`⚠ 会话文件恢复失败（${sessionsFile}）：${auth.sessionLoadError}；旧会话已丢弃`);
     }
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.error(`✗ 用户表加载失败（${usersFile}）：${err.message}`);
     process.exit(1);
   }
@@ -1241,13 +1322,13 @@ if (require.main === module) {
   let smtpMailer = null;
   try {
     smtpMailer = createMailerPoolFromEnv();
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ SMTP 配置不完整：${err.message}；本次使用模拟发送`);
   }
   let inboxReader = null;
   try {
     inboxReader = createInboxReaderFromEnv();
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ IMAP 收件箱配置不完整：${err.message}；收件箱同步不可用`);
   }
   // 启用真实动作（SMTP / 真实打印机）时默认关闭虚拟设备批准入口
@@ -1257,7 +1338,7 @@ if (require.main === module) {
   let documentsStore = null;
   try {
     documentsStore = new DocumentStore(documentsDb);
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ 文档库打不开（${documentsDb}）：${err.message}；本次只用样例文档`);
   }
   // 附件内容：默认落在 prototype/data/attachments.db（已 gitignore）
@@ -1267,7 +1348,7 @@ if (require.main === module) {
   try {
     const blobKey = parseKey(process.env.SAFE_OFFICE_BLOB_KEY || null);
     blobStore = new BlobStore(attachmentsDb, { key: blobKey });
-  } catch (err) {
+  } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ 附件库打不开（${attachmentsDb}）：${err.message}；本次不能带附件`);
   }
   const mcpConfigFile = process.env.SAFE_OFFICE_MCP_FILE

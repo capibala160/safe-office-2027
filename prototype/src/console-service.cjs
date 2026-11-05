@@ -65,7 +65,7 @@ const BOUNDARY = [
 ];
 
 class ConsoleError extends Error {
-  constructor(code, message, status = 400, detail = null) {
+  constructor(/** @type {any} */ code, /** @type {any} */ message, /** @type {any} */ status = 400, /** @type {any} */ detail = null) {
     super(message);
     this.name = 'ConsoleError';
     this.code = code;
@@ -74,7 +74,8 @@ class ConsoleError extends Error {
   }
 }
 
-function uniqueStrings(list) {
+function uniqueStrings(/** @type {any} */ list) {
+  /** @type {string[]} */
   const out = [];
   for (const v of list || []) {
     if (typeof v === 'string' && v.trim() && !out.includes(v)) out.push(v);
@@ -83,12 +84,12 @@ function uniqueStrings(list) {
 }
 
 // 任务编号只认 RUN-<n>；解析失败按 0（不猜、不递推）
-function runSeqOf(id) {
+function runSeqOf(/** @type {any} */ id) {
   const m = /^RUN-(\d+)$/.exec(String(id || ''));
   return m ? Number(m[1]) : 0;
 }
 
-function hashAuditEntries(entries) {
+function hashAuditEntries(/** @type {any} */ entries) {
   let prev = 'GENESIS';
   let ok = true;
   for (const e of entries) {
@@ -101,6 +102,59 @@ function hashAuditEntries(entries) {
 }
 
 class ConsoleService {
+  // 工作区字段在 _initWorkspace() 中创建（TS 不分析跨方法赋值，显式声明为 any）
+  /** @type {any} */ policy;
+  /** @type {any} */ audit;
+  /** @type {any} */ risk;
+  /** @type {any} */ toolRegistry;
+  /** @type {any} */ toolExecutors;
+  /** @type {any} */ planner;
+  /** @type {any} */ perf;
+  /** @type {any} */ runtime;
+  /** @type {any} */ store;
+  /** @type {any} */ mailer;
+  /** @type {any} */ executor;
+  /** @type {any} */ fulfillment;
+  /** @type {any} */ confirmer;
+  /** @type {any} */ challenges;
+  /** @type {any} */ challengeHistory;
+  /** @type {any} */ lastDecision;
+  /** @type {any} */ business;
+  /** @type {any} */ autoMode;
+  /** @type {any} */ closed;
+  /** @type {any} */ operationMeta;
+  /** @type {any} */ recoveryInfo;
+  /** @type {any} */ lastPhoneResult;
+  /** @type {any} */ audios;
+  /** @type {any} */ auditExternalState;
+  /** @type {any} */ auditExportState;
+  /** @type {any} */ auditRotation;
+  /** @type {any} */ auditPersist;
+  /** @type {any} */ _auditQuarantine;
+  /** @type {any} */ auditRestore;
+  /** @type {any} */ _auditRestoreError;
+  /** @type {any} */ _nearfieldTransport;
+  /** @type {any} */ mcpSessions;
+  /** @type {any} */ mcpConfig;
+  /** @type {any} */ mcpConfigError;
+  /** @type {any} */ mcpRestore;
+  /** @type {any} */ bouncePollerError;
+  /** @type {any[]} */ runs;
+  /** @type {any} */ liveRuns;
+  /** @type {any} */ _screenShares;
+  /** @type {any} */ autoReplyError;
+  /** @type {any} */ _autoReplyTimer;
+  /** @type {any} */ autoReplyState;
+  /** @type {any} */ autoReplyPolicy;
+  /** @type {any} */ _trustedTenantCheckpoints;
+  /** @type {any} */ _tenantCheckpointError;
+  /** @type {any} */ _tenantChainState;
+
+  /**
+   * 依赖注入入口：各模块按配置组合（Fake/SMTP 邮件、虚拟/真板确认、Mock/HTTP 模型等），
+   * 类型上按可替换实现处理（`any`），具体契约由各模块自身与调用点测试保证。
+   * @param {any} [options]
+   */
   constructor({
     now = () => Date.now(),
     mailer = new FakeMailer(),
@@ -262,12 +316,12 @@ class ConsoleService {
     if (!this.bouncePoller) {
       try {
         this.bouncePoller = createBouncePollerFromEnv({
-          ingest: (eml) => this.ingestBounce({ eml, by: 'imap' }),
-          logger: (message) => {
+          ingest: (/** @type {any} */ eml) => this.ingestBounce({ eml, by: 'imap' }),
+          logger: (/** @type {any} */ message) => {
             try { this.audit.append('IMAP 轮询失败', { error: message }); } catch { /* ignore */ }
           },
         });
-      } catch (err) {
+      } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         this.bouncePollerError = err.message;
       }
     }
@@ -281,7 +335,7 @@ class ConsoleService {
       try {
         const cfg = parseAutoReplyConfig(process.env);
         this.autoReplyPolicy = cfg.enabled ? cfg : null;
-      } catch (err) {
+      } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         this.autoReplyError = err.message;
       }
     }
@@ -299,10 +353,17 @@ class ConsoleService {
 
   // 请求级审计身份：用 AsyncLocalStorage，不能写在共享的 audit.actor 上，
   // 否则并发请求（如命令执行 + 退信轮询）会互相串号，且结束后残留错误身份。
+  /**
+   * @param {any} actor
+   * @param {any} fn
+   */
   _withAuditActor(actor, fn) {
     return this._auditActorStorage.run(actor || null, fn);
   }
 
+  /**
+   * @param {any} [options]
+   */
   async pollBounceNow({ by = null } = {}) {
     if (!this.bouncePoller) {
       throw new ConsoleError(
@@ -328,7 +389,7 @@ class ConsoleService {
       error: this.autoReplyError,
       polling: !!this._autoReplyTimer,
       config: enabled ? {
-        allow: policy.allow.map((r) => (r.address ? r.address : `@${r.domain}`)),
+        allow: policy.allow.map((/** @type {any} */ r) => (r.address ? r.address : `@${r.domain}`)),
         subject: policy.subject,
         account: policy.account || '(默认账号)',
         maxPerHour: policy.maxPerHour,
@@ -347,7 +408,7 @@ class ConsoleService {
     const run = async () => {
       try {
         await this.scanAutoReplies({ by: 'system' });
-      } catch (err) {
+      } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         this.autoReplyState.lastError = err && err.message ? err.message : String(err);
       }
     };
@@ -387,17 +448,20 @@ class ConsoleService {
     const wanted = this.autoReplyPolicy && this.autoReplyPolicy.account;
     const list = typeof this.mailer.list === 'function' ? this.mailer.list() : [];
     if (wanted) {
-      if (list.length > 0 && !list.some((a) => a.name === wanted)) {
+      if (list.length > 0 && !list.some((/** @type {any} */ a) => a.name === wanted)) {
         throw new ConsoleError('CONFLICT', `自动回信发件账号不存在：${wanted}`, 409);
       }
       return wanted;
     }
-    const def = list.find((a) => a && a.default);
+    const def = list.find((/** @type {any} */ a) => a && a.default);
     if (def) return def.name;
     return this.mailer.defaultName ? String(this.mailer.defaultName) : '';
   }
 
   // 扫描收件箱并按策略自动回信。先占位再发送：同一 Message-ID 只回一次。
+  /**
+   * @param {any} [options]
+   */
   async scanAutoReplies({ by = null } = {}) {
     const policy = this.autoReplyPolicy;
     if (!policy || !policy.enabled) {
@@ -421,6 +485,7 @@ class ConsoleService {
       const inbox = await this.inboxReader.fetch({ limit: 50, refresh: true, includeHeaders: true });
       const items = Array.isArray(inbox.items) ? inbox.items : [];
       const selfAddresses = this._autoReplySelfAddresses();
+      /** @type {any} */
       const summary = {
         scanned: items.length, replied: 0, skipped: 0, errors: 0,
         reasons: {}, items: [],
@@ -432,8 +497,8 @@ class ConsoleService {
         const decision = evaluateAutoReply(item, policy, {
           selfAddresses,
           now: this.now(),
-          hasReplied: (key) => !!this.store.getAutoReply(key),
-          lastReplyTo: (addr) => this.store.lastAutoReplyTo(addr),
+          hasReplied: (/** @type {any} */ key) => !!this.store.getAutoReply(key),
+          lastReplyTo: (/** @type {any} */ addr) => this.store.lastAutoReplyTo(addr),
           countLastHour: () => this.store.countAutoRepliesSince(
             new Date(this.now() - 60 * 60 * 1000).toISOString(),
           ),
@@ -457,6 +522,7 @@ class ConsoleService {
           continue;
         }
 
+        /** @type {any} */
         const entry = {
           uid: Number(item.uid) || null, from: decision.recipient, decision: 'reply',
           reason: 'allowed', operationId: null, state: null,
@@ -508,7 +574,7 @@ class ConsoleService {
             state: sent.state,
             account: accountName,
           });
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           const message = err && err.message ? err.message : String(err);
           this.store.setAutoReplyState(decision.messageKey, 'error', { reason: message });
           entry.state = 'error';
@@ -547,10 +613,10 @@ class ConsoleService {
     this._loadTenantCheckpoints();
     // v0.46.2：租户派生链头缓存（增量更新，避免每条审计重算所有租户）
     this._rebuildTenantChainState();
-    this.audit.onAppend = (rec) => this._appendAudit(rec);
+    this.audit.onAppend = (/** @type {any} */ rec) => this._appendAudit(rec);
     // 导入的真实资料并入文档视图（样例文档保持静态）
     if (this.documentsStore) {
-      registerDocuments(this.documentsStore.list().map((doc) => ({
+      registerDocuments(this.documentsStore.list().map((/** @type {any} */ doc) => ({
         id: doc.id, title: doc.title, level: doc.level, body: doc.body, owner: doc.owner || '',
       })));
     }
@@ -564,7 +630,7 @@ class ConsoleService {
       });
     }
     this.risk = new RiskMeter(this.riskThreshold, {
-      onEvent: (kind, detail) => this.audit.append(kind, detail),
+      onEvent: (/** @type {any} */ kind, /** @type {any} */ detail) => this.audit.append(kind, detail),
     });
     this.toolRegistry = this._injectedRegistry || new ToolRegistry();
     this._injectedRegistry = this.toolRegistry; // reset 复用同一注册表（自定义工具不丢）
@@ -651,7 +717,7 @@ class ConsoleService {
   _restoreConsoleState() {
     if (this.storeFile === ':memory:') return;
     try {
-      this.operationMeta = new Map(this.store.listOperationMeta().map((row) => [row.operationId, row.data]));
+      this.operationMeta = new Map(this.store.listOperationMeta().map((/** @type {any} */ row) => [row.operationId, row.data]));
       const saved = this.store.loadState('console');
       if (saved) {
         if (saved.risk) {
@@ -686,7 +752,7 @@ class ConsoleService {
         risk: { score: this.risk.score, frozen: this.risk.frozen },
         note: '重启恢复：操作来源 / 运行历史 / 风险计量 / 业务状态',
       };
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       // 恢复失败不改写审计链（审计只记动作）；错误单独暴露
       this.recoveryInfo = { error: err && err.message ? err.message : String(err) };
     }
@@ -720,6 +786,9 @@ class ConsoleService {
   // 审计链 + 独立检查点是两份文件：同一磁盘上不抵抗篡改，只保证"整链替换会被发现"。
   // 恢复失败：先把原审计/检查点复制到 .corrupt-<时间>，保留取证材料；
   // 复制失败则停止落盘，绝不在无法隔离时覆盖原文件。
+  /**
+   * @param {any} reason
+   */
   _quarantineAudit(reason) {
     const at = new Date(this.now()).toISOString();
     const stamp = at.replace(/[:.]/g, '-');
@@ -733,7 +802,7 @@ class ConsoleService {
         // 移走而不是复制：原路径留给新链，原文件原样保留在 .corrupt-* 供取证
         fs.renameSync(file, dest);
         isolated.push({ from: file, to: dest });
-      } catch (err) {
+      } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         errors.push({ file, error: err && err.message ? err.message : String(err) });
       }
     }
@@ -774,7 +843,7 @@ class ConsoleService {
       }
       if (!this.auditSigner.verify(checkpoint)) throw new Error('检查点签名无效');
       return AuditLog.load(this.auditFile, checkpoint);
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this._auditJsonl = true;
       this._auditRestoreError = err && err.message ? err.message : String(err);
       this._quarantineAudit(this._auditRestoreError);
@@ -800,7 +869,7 @@ class ConsoleService {
         }
         this._trustedTenantCheckpoints.set(tenant, cp);
       }
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this._tenantCheckpointError = err && err.message ? err.message : String(err);
       this._trustedTenantCheckpoints.clear();
     }
@@ -815,6 +884,9 @@ class ConsoleService {
   }
 
   // 与 AuditLog.tenantChain() 的派生公式保持一致，只算新追加的一条
+  /**
+   * @param {any} rec
+   */
   _updateTenantChain(rec) {
     const tenant = rec && rec.actor ? String(rec.actor) : '';
     if (!tenant) return null;
@@ -835,6 +907,9 @@ class ConsoleService {
   }
 
   // change 为空 = 全量重写（启动/关闭/迁移）；否则只给本次租户签名
+  /**
+   * @param {any} [change]
+   */
   _writeTenantCheckpoints(change = null) {
     if (!this.auditTenantCheckpointFile) return;
     try {
@@ -844,6 +919,7 @@ class ConsoleService {
           this.auditSigner.sign({ count: change.count, head: change.head }),
         );
       } else {
+        /** @type {Record<string, any>} */
         const checkpoints = {};
         for (const [tenant, cp] of this._tenantChainState) {
           checkpoints[tenant] = this.auditSigner.sign({ count: cp.count, head: cp.head });
@@ -856,14 +932,14 @@ class ConsoleService {
       fs.writeFileSync(tmp, JSON.stringify({ checkpoints }, null, 2), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmp, this.auditTenantCheckpointFile);
       this._tenantCheckpointError = null;
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this._tenantCheckpointError = err && err.message ? err.message : String(err);
     }
   }
 
   _tenantAuditSummaries() {
     const globalOk = this.audit.verify();
-    return this.audit.tenantCheckpoints().map((t) => {
+    return this.audit.tenantCheckpoints().map((/** @type {any} */ t) => {
       const trusted = this._trustedTenantCheckpoints.get(t.tenant) || null;
       return {
         ...t,
@@ -875,6 +951,9 @@ class ConsoleService {
   }
 
   // 每条审计只追加一行 + 重写小检查点（O(1)）；旧整体 JSON 在第一次写时迁移
+  /**
+   * @param {any} rec
+   */
   _appendAudit(rec) {
     // 先更新内存里的租户链头：即使未落盘，缓存也要与全局链一致
     const tenantChange = this._updateTenantChain(rec);
@@ -893,7 +972,7 @@ class ConsoleService {
       this._writeTenantCheckpoints(tenantChange);
       this.auditPersist.ok = true;
       this.auditPersist.error = null;
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       // 内存链仍可用，但必须如实暴露“没有落盘”
       this.auditPersist.ok = false;
       this.auditPersist.error = err && err.message ? err.message : String(err);
@@ -914,7 +993,7 @@ class ConsoleService {
       this._writeTenantCheckpoints();
       this.auditPersist.ok = true;
       this.auditPersist.error = null;
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       // 内存链仍可用，但必须如实暴露“没有落盘”
       this.auditPersist.ok = false;
       this.auditPersist.error = err && err.message ? err.message : String(err);
@@ -924,6 +1003,9 @@ class ConsoleService {
   // ---------- 审计归档 / 轮转 / 保留 ----------
   // 轮转不删除历史：先把当前审计、检查点、租户检查点复制到 audit-archive/，
   // 再清空活动链并写入一条「审计轮转」记录（记录 previous 检查点 + 归档路径）。
+  /**
+   * @param {any} [options]
+   */
   rotateAudit({ reason = 'manual', by = null } = {}) {
     if (!this.auditFile) throw new ConsoleError('CONFLICT', '未启用审计落盘，无法轮转', 409);
     if (this._auditPersistBlocked) throw new ConsoleError('CONFLICT', '审计已停止落盘，拒绝轮转', 409);
@@ -959,7 +1041,7 @@ class ConsoleService {
       }
       // 归档副本成功后，才允许清空活动日志
       fs.writeFileSync(this.auditFile, '', { encoding: 'utf8', mode: 0o600 });
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       throw new ConsoleError('CONFLICT', `审计归档失败，未轮转：${err.message}`, 409);
     }
 
@@ -982,6 +1064,9 @@ class ConsoleService {
   }
 
   // 保留策略：只保留最近 N 份归档，整组删除更旧的 .jsonl/.head/.tenants
+  /**
+   * @param {any} [options]
+   */
   pruneAuditArchives({ keep = this.auditArchiveKeep } = {}) {
     if (!this.auditArchiveDir || !fs.existsSync(this.auditArchiveDir)) {
       return { ok: true, deleted: 0, kept: 0 };
@@ -1039,6 +1124,9 @@ class ConsoleService {
     return ext;
   }
 
+  /**
+   * @param {any} ext
+   */
   _listAuditSnapshots(ext) {
     if (!ext || !fs.existsSync(ext)) return [];
     return fs.readdirSync(ext)
@@ -1047,11 +1135,19 @@ class ConsoleService {
       .reverse();
   }
 
+  /**
+   * @param {any} file
+   */
   _hashFile(file) {
     return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
   }
 
+  /**
+   * @param {any} dir
+   * @param {any} [base]
+   */
   _walkFiles(dir, base = dir) {
+    /** @type {string[]} */
     const out = [];
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
@@ -1062,6 +1158,9 @@ class ConsoleService {
   }
 
   // 把当前审计链 + 本地归档复制成一个带 manifest 的快照目录
+  /**
+   * @param {any} [options]
+   */
   exportAuditSnapshot({ by = null, includeArchives = true } = {}) {
     if (!this.auditFile) throw new ConsoleError('CONFLICT', '未启用审计落盘，无法导出', 409);
     if (this._auditPersistBlocked) throw new ConsoleError('CONFLICT', '审计已停止落盘，拒绝导出', 409);
@@ -1076,7 +1175,7 @@ class ConsoleService {
     fs.mkdirSync(activeDir, { recursive: true });
 
     const copied = [];
-    const copyIfExists = (from, to) => {
+    const copyIfExists = (/** @type {any} */ from, /** @type {any} */ to) => {
       if (!fs.existsSync(from)) return;
       fs.mkdirSync(path.dirname(to), { recursive: true });
       fs.copyFileSync(from, to);
@@ -1094,11 +1193,11 @@ class ConsoleService {
           copyIfExists(path.join(this.auditArchiveDir, name), path.join(snapshotDir, 'archive', name));
         }
       }
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       throw new ConsoleError('CONFLICT', `外部快照复制失败：${err.message}`, 409);
     }
 
-    const files = this._walkFiles(snapshotDir).map((rel) => {
+    const files = this._walkFiles(snapshotDir).map((/** @type {any} */ rel) => {
       const full = path.join(snapshotDir, rel);
       return { path: rel, bytes: fs.statSync(full).size, sha256: this._hashFile(full) };
     });
@@ -1128,6 +1227,9 @@ class ConsoleService {
   }
 
   // 只校验最新快照（或指定名字）；只读，不修改任何文件
+  /**
+   * @param {any} [options]
+   */
   verifyAuditExport({ name = null } = {}) {
     const ext = this._auditExternalPath();
     const snapshots = this._listAuditSnapshots(ext);
@@ -1142,15 +1244,15 @@ class ConsoleService {
     const manifestPath = path.join(snapshotDir, 'manifest.json');
     if (!fs.existsSync(manifestPath)) {
       const result = { ok: false, reason: '缺少 manifest.json', dir: snapshotDir };
-      this.auditExternalState.lastVerify = { at: this._iso(), ...result };
+      this.auditExternalState.lastVerify = Object.assign({ at: this._iso() }, result);
       return result;
     }
     let manifest;
     try {
       manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       const result = { ok: false, reason: `manifest 解析失败：${err.message}`, dir: snapshotDir };
-      this.auditExternalState.lastVerify = { at: this._iso(), ...result };
+      this.auditExternalState.lastVerify = Object.assign({ at: this._iso() }, result);
       return result;
     }
     const files = Array.isArray(manifest.files) ? manifest.files : [];
@@ -1185,7 +1287,7 @@ class ConsoleService {
       ok, dir: snapshotDir, name: dirName, at: manifest.at || null, by: manifest.by || null,
       checkpoint: manifest.checkpoint || null, files: files.length, checked, missing, mismatches,
     };
-    this.auditExternalState.lastVerify = { at: this._iso(), ...result };
+    this.auditExternalState.lastVerify = Object.assign({ at: this._iso() }, result);
     this.audit.append('审计外部校验', {
       dir: dirName, ok, checked, missing: missing.length, mismatches: mismatches.length,
     });
@@ -1201,7 +1303,7 @@ class ConsoleService {
       };
     }
     let ext;
-    try { ext = this._auditExternalPath(); } catch (err) {
+    try { ext = this._auditExternalPath(); } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       return { configured: true, error: err.message, lastVerify: this.auditExternalState.lastVerify };
     }
     const snapshots = this._listAuditSnapshots(ext);
@@ -1236,6 +1338,9 @@ class ConsoleService {
   }
 
   // 删除超出保留份数的旧快照；只处理 snapshot-* 目录，且必须在外部目录内
+  /**
+   * @param {any} [options]
+   */
   pruneAuditSnapshots({ keep = this.auditExportKeep } = {}) {
     const ext = this._auditExternalPath();
     const n = Math.max(1, Number(keep) || 1);
@@ -1256,6 +1361,9 @@ class ConsoleService {
   }
 
   // 定时任务只做一次导出 + 修剪；失败写入状态，不抛出打断进程
+  /**
+   * @param {any} [options]
+   */
   runAuditExportTick({ by = 'system' } = {}) {
     if (!this.auditExternalDir) {
       return { ok: false, skipped: 'not-configured', error: '未配置外部存储目录' };
@@ -1269,8 +1377,8 @@ class ConsoleService {
         lastResult: { name: exported.name, files: exported.files.length, pruned: pruned.removed },
         lastError: null,
       };
-      return { ok: true, ...exported, pruned };
-    } catch (err) {
+      return Object.assign({ ok: true }, exported, { pruned });
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       const message = err && err.message ? err.message : String(err);
       this.auditExportState = { ...this.auditExportState, lastAt: this._iso(), lastError: message };
       return { ok: false, error: message };
@@ -1281,7 +1389,7 @@ class ConsoleService {
     if (!this.auditExternalDir || this.auditExportIntervalMs <= 0) return false;
     if (this.auditExportState.timer) return true;
     const tick = () => {
-      try { this.runAuditExportTick(); } catch (err) {
+      try { this.runAuditExportTick(); } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         this.auditExportState = {
           ...this.auditExportState,
           lastAt: this._iso(),
@@ -1322,11 +1430,14 @@ class ConsoleService {
   _autoSafeStats() {
     return {
       quota: this.autoSafeQuota,
-      used: this.store.listOperations().filter((o) => o.confirmationId === 'auto-safe').length,
+      used: this.store.listOperations().filter((/** @type {any} */ o) => o.confirmationId === 'auto-safe').length,
       domains: [...this.autoSafeDomains],
     };
   }
 
+  /**
+   * @param {any} mode
+   */
   setAutoMode(mode) {
     if (!['manual', 'auto-safe', 'auto-full'].includes(mode)) {
       throw new ConsoleError('BAD_REQUEST', "mode 必须是 manual / auto-safe / auto-full");
@@ -1337,6 +1448,10 @@ class ConsoleService {
     return { ok: true, autoMode: mode, autoSafe: this._autoSafeStats() };
   }
 
+  /**
+   * @param {any} action
+   * @param {any} operation
+   */
   _autoDecision(action, operation) {
     if (this.autoMode === 'auto-full') return 'auto-full';
     if (this.autoMode !== 'auto-safe') return null;
@@ -1347,7 +1462,7 @@ class ConsoleService {
     if (!['公开', '内部'].includes(operation.level)) return null;
     if (this.risk.frozen) return null;
     const used = this.store.listOperations()
-      .filter((o) => o.confirmationId === 'auto-safe' && o.action === 'sendExternalEmail').length;
+      .filter((/** @type {any} */ o) => o.confirmationId === 'auto-safe' && o.action === 'sendExternalEmail').length;
     if (used >= this.autoSafeQuota) return null;
     return 'auto-safe';
   }
@@ -1362,16 +1477,19 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} [options]
+   */
   getState({ actor = null, role = null } = {}) {
     const allOperations = this.store.listOperations();
-    const operations = allOperations.filter((o) => this._operationVisible(o, actor, role));
-    const visibleOpIds = new Set(operations.map((o) => o.operationId));
+    const operations = allOperations.filter((/** @type {any} */ o) => this._operationVisible(o, actor, role));
+    const visibleOpIds = new Set(operations.map((/** @type {any} */ o) => o.operationId));
     const pendingChallenges = [...this.challenges.values()]
       .filter((c) => c.state === 'pending' && visibleOpIds.has(c.operationId));
     const runs = this.runs.filter((r) => this._runVisible(r, actor, role));
     const canSeeAllAudit = !actor || ['管理员', '审计员'].includes(role);
     const recentAudit = this.audit.entries
-      .filter((e) => canSeeAllAudit || e.actor === actor)
+      .filter((/** @type {any} */ e) => canSeeAllAudit || e.actor === actor)
       .slice(-8);
     return {
       version: VERSION,
@@ -1382,8 +1500,8 @@ class ConsoleService {
         images: Object.keys(IMAGES).length,
         audios: Object.keys(AUDIOS).length,
         operations: operations.length,
-        pendingOperations: operations.filter((o) => o.state === 'frozen').length,
-        emails: operations.filter((o) => o.protocolAction === 1).length,
+        pendingOperations: operations.filter((/** @type {any} */ o) => o.state === 'frozen').length,
+        emails: operations.filter((/** @type {any} */ o) => o.protocolAction === 1).length,
         audit: this.audit.entries.length,
         pendingChallenges: pendingChallenges.length,
         runs: runs.length,
@@ -1410,7 +1528,7 @@ class ConsoleService {
           publicKeyPem: this.auditSigner.publicKeyPem,
         },
         checkpoint: this.audit.checkpoint(),
-        recent: recentAudit.map((e) => ({
+        recent: recentAudit.map((/** @type {any} */ e) => ({
           seq: e.seq, kind: e.kind, ts: e.ts, detail: e.detail, actor: e.actor || null,
         })),
       },
@@ -1436,6 +1554,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} [options]
+   */
   getBootstrap({ actor = null, role = null } = {}) {
     return {
       state: this.getState({ actor, role }),
@@ -1542,6 +1663,10 @@ class ConsoleService {
 
   // ---------- 文档 / 通讯录 / 日历 ----------
   // v0.41：显式共享授权也算可见（只加不减，密级在授权时已校验）
+  /**
+   * @param {any} docId
+   * @param {any} actor
+   */
   _isSharedWithMe(docId, actor) {
     if (!actor || !this.documentsStore) return false;
     try {
@@ -1551,6 +1676,11 @@ class ConsoleService {
     }
   }
 
+  /**
+   * @param {any} doc
+   * @param {any} actor
+   * @param {any} role
+   */
   _docRowVisible(doc, actor, role) {
     if (!actor || !doc || !doc.owner) return true;
     if (doc.owner === actor) return true;
@@ -1558,6 +1688,9 @@ class ConsoleService {
     return this._isSharedWithMe(doc.id, actor);
   }
 
+  /**
+   * @param {any} [options]
+   */
   listDocuments({ actor = null, role = null } = {}) {
     const items = [];
     for (const d of Object.values(allDocuments())) {
@@ -1588,6 +1721,10 @@ class ConsoleService {
     return items;
   }
 
+  /**
+   * @param {any} id
+   * @param {any} [options]
+   */
   getDocument(id, { actor = null, role = null } = {}) {
     const knowledge = this.runtime.knowledge[id];
     if (knowledge) {
@@ -1608,7 +1745,9 @@ class ConsoleService {
         status: 'read',
       };
     }
-    const meta = getDocumentById(id) || IMAGES[id] || AUDIOS[id];
+    const images = /** @type {Record<string, any>} */ (IMAGES);
+    const audios = /** @type {Record<string, any>} */ (AUDIOS);
+    const meta = getDocumentById(id) || images[id] || audios[id];
     if (!meta) throw new ConsoleError('NOT_FOUND', `文档不存在：${id}`, 404);
     if (!this._docRowVisible(meta, actor, role)) {
       throw new ConsoleError('NOT_FOUND', `文档不存在：${id}`, 404);
@@ -1625,6 +1764,11 @@ class ConsoleService {
   // ---------- 文档共享（v0.41） ----------
   // 规则：只有文档所有者或管理员能授权/撤销；共享不降密级（目标角色必须本就能读该密级）；
   //       共享只影响"能不能读"，不改变所有者，也不把文档移出租户视图。
+  /**
+   * @param {any} docId
+   * @param {any} actor
+   * @param {any} role
+   */
   _assertShareableDoc(docId, actor, role) {
     if (!this.documentsStore) {
       throw new ConsoleError('CONFLICT', '文档库未启用：请用 npm start 启动（内存模式不支持共享）', 409);
@@ -1641,6 +1785,10 @@ class ConsoleService {
     return doc;
   }
 
+  /**
+   * @param {any} docId
+   * @param {any} [options]
+   */
   listDocumentShares(docId, { actor = null, role = null } = {}) {
     const doc = this._assertShareableDoc(docId, actor, role);
     return {
@@ -1649,6 +1797,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} [options]
+   */
   shareDocument({ docId, grantee, granteeRole = null, actor = null, role = null } = {}) {
     const doc = this._assertShareableDoc(docId, actor, role);
     const target = String(grantee || '').trim();
@@ -1677,6 +1828,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} [options]
+   */
   revokeDocumentShare({ docId, grantee, actor = null, role = null } = {}) {
     const doc = this._assertShareableDoc(docId, actor, role);
     const target = String(grantee || '').trim();
@@ -1699,6 +1853,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} docId
+   * @param {any} grantee
+   */
   _purgeKnowledgeFor(docId, grantee) {
     let purged = 0;
     for (const [id, item] of Object.entries(this.runtime.knowledge)) {
@@ -1718,12 +1876,15 @@ class ConsoleService {
     }));
   }
 
+  /**
+   * @param {any} [options]
+   */
   listCalendar({ actor = null, role = null } = {}) {
     const canSeeAll = !actor || ['管理员', '审计员'].includes(role);
     const agentEvents = this.audit.entries
-      .filter((e) => e.kind === '执行' && e.detail && e.detail.action === 'scheduleMeeting')
-      .filter((e) => canSeeAll || e.actor === actor)
-      .map((e, i) => {
+      .filter((/** @type {any} */ e) => e.kind === '执行' && e.detail && e.detail.action === 'scheduleMeeting')
+      .filter((/** @type {any} */ e) => canSeeAll || e.actor === actor)
+      .map((/** @type {any} */ e, /** @type {any} */ i) => {
         const outcome = (e.detail && e.detail.outcome) || '';
         const fileMatch = /\.ics 已写入 (.+)$/.exec(outcome);
         return {
@@ -1751,6 +1912,9 @@ class ConsoleService {
     }
   }
 
+  /**
+   * @param {any} fn
+   */
   _enqueue(fn) {
     this._checkQueueCapacity();
     this._queuedTasks += 1;
@@ -1762,11 +1926,17 @@ class ConsoleService {
     return task;
   }
 
+  /**
+   * @param {any} [input]
+   */
   runCommand(input = {}) {
     return this._enqueue(() => this._executeCommand(input));
   }
 
   // 只清理已完成/失败的历史；进行中的任务永远保留（否则界面会查不到进度）
+  /**
+   * @param {any} [keepId]
+   */
   _pruneLiveRuns(keepId = null) {
     if (this.liveRuns.size <= this.maxLiveRuns) return;
     for (const [id, run] of this.liveRuns) {
@@ -1777,6 +1947,11 @@ class ConsoleService {
     // 若仍超限，说明都是进行中的任务：不删除，靠 maxQueuedCommands 保证有界
   }
 
+  /**
+   * @param {any} run
+   * @param {any} actor
+   * @param {any} role
+   */
   _runVisible(run, actor, role) {
     if (!actor || !run || !run.operator) return true;
     if (['管理员', '审计员'].includes(role)) return true;
@@ -1784,10 +1959,14 @@ class ConsoleService {
   }
 
   // 异步任务：立即返回 runId，前端轮询进度；离开页面任务照常跑完
+  /**
+   * @param {any} [input]
+   */
   startCommand(input = {}) {
     this._normalizeCommandInput(input); // 参数错误立刻 400，不进队列
     this._checkQueueCapacity();
     const runId = `RUN-${++this.seq}`;
+    /** @type {any} */
     const live = {
       runId,
       operator: input.operator ? String(input.operator).slice(0, 64) : null,
@@ -1808,7 +1987,7 @@ class ConsoleService {
       live.started = true;
       return this._executeCommand(input, {
         runId,
-        onStage: (stage, info) => {
+        onStage: (/** @type {any} */ stage, /** @type {any} */ info) => {
           live.stage = stage;
           live.stageLog.push({ stage, at: this._iso(), ...(info || {}) });
           if (live.stageLog.length > 40) live.stageLog.shift();
@@ -1816,7 +1995,7 @@ class ConsoleService {
         shouldAbort: () => live.cancelRequested,
       });
     }).then((run) => {
-      const pending = (run.operations || []).filter((o) => o.state === 'frozen').length;
+      const pending = (run.operations || []).filter((/** @type {any} */ o) => o.state === 'frozen').length;
       live.stage = pending ? '待确认' : '完成';
       live.status = 'done';
       live.pendingOperations = pending;
@@ -1835,10 +2014,17 @@ class ConsoleService {
     return { runId, stage: live.stage, status: live.status };
   }
 
+  /**
+   * @param {any} [options]
+   */
   listRuns({ actor = null, role = null } = {}) {
     return this.runs.filter((run) => this._runVisible(run, actor, role));
   }
 
+  /**
+   * @param {any} runId
+   * @param {any} [options]
+   */
   getRun(runId, { actor = null, role = null } = {}) {
     const live = this.liveRuns.get(runId);
     if (live && !this._runVisible(live, actor, role)) {
@@ -1863,7 +2049,7 @@ class ConsoleService {
     if (!done || !this._runVisible(done, actor, role)) {
       throw new ConsoleError('NOT_FOUND', `任务不存在：${runId}`, 404);
     }
-    const pending = (done.operations || []).filter((o) => o.state === 'frozen').length;
+    const pending = (done.operations || []).filter((/** @type {any} */ o) => o.state === 'frozen').length;
     return {
       runId,
       command: done.command,
@@ -1879,6 +2065,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} runId
+   * @param {any} [options]
+   */
   cancelRun(runId, { actor = null, role = null } = {}) {
     const live = this.liveRuns.get(runId);
     if (!live) {
@@ -1898,6 +2088,9 @@ class ConsoleService {
     return { ok: true, runId, stage: live.stage, cancelRequested: true };
   }
 
+  /**
+   * @param {any} input
+   */
   _normalizeCommandInput(input) {
     const command = typeof input.command === 'string' ? input.command.trim() : '';
     if (!command) throw new ConsoleError('BAD_REQUEST', '缺少指令 command');
@@ -1926,7 +2119,7 @@ class ConsoleService {
       throw new ConsoleError('BAD_REQUEST', 'mailAccount 只能包含字母/数字/._-');
     }
     const accounts = typeof this.mailer.list === 'function' ? this.mailer.list() : [];
-    if (mailAccount && accounts.length > 0 && !accounts.some((a) => a.name === mailAccount)) {
+    if (mailAccount && accounts.length > 0 && !accounts.some((/** @type {any} */ a) => a.name === mailAccount)) {
       throw new ConsoleError('BAD_REQUEST', `未知发件账号：${mailAccount}`);
     }
     // v0.45：别名必须是所选账号（未选则默认账号）已配置的地址
@@ -1938,9 +2131,9 @@ class ConsoleService {
       if (accounts.length === 0) {
         throw new ConsoleError('BAD_REQUEST', '当前邮件适配器不支持发件别名');
       }
-      const effective = mailAccount || (accounts.find((a) => a.default) || accounts[0]).name;
-      const account = accounts.find((a) => a.name === effective);
-      if (!account || !(account.aliases || []).some((x) => x.address === mailAlias)) {
+      const effective = mailAccount || (accounts.find((/** @type {any} */ a) => a.default) || accounts[0]).name;
+      const account = accounts.find((/** @type {any} */ a) => a.name === effective);
+      if (!account || !(account.aliases || []).some((/** @type {any} */ x) => x.address === mailAlias)) {
         throw new ConsoleError('BAD_REQUEST', `账号「${effective}」没有配置别名：${mailAlias}`);
       }
     }
@@ -1964,6 +2157,9 @@ class ConsoleService {
   // 附件：最多 5 个、单个 ≤5MB、总计 ≤10MB。
   // 这里**只校验、不落库**——命令可能因参数/规划失败，或最终没有邮件动作；
   // 提前落库会留下一批没人引用的孤儿内容（v0.18 修复）。真正入库在 _freezeDeferred。
+  /**
+   * @param {any} list
+   */
   _parseAttachments(list) {
     if (list === undefined || list === null) return [];
     if (!Array.isArray(list)) throw new ConsoleError('BAD_REQUEST', 'attachments 必须是数组');
@@ -1994,17 +2190,26 @@ class ConsoleService {
   }
 
   // 落库放在冻结邮件操作时：没有邮件动作就一个字节都不存
+  /**
+   * @param {any} list
+   */
   _storeAttachments(list) {
-    return (list || []).map((a) => this.blobStore.put(a.buffer, { name: a.filename, mime: a.mime }));
+    return (list || []).map((/** @type {any} */ a) => this.blobStore.put(a.buffer, { name: a.filename, mime: a.mime }));
   }
 
   // 内容是否已被任一操作引用（内容寻址 → 同一份文件可能被多条操作共用，不能盲删）
+  /**
+   * @param {any} sha256
+   */
   _blobReferenced(sha256) {
-    return this.store.listOperations().some((op) =>
-      (op.attachments || []).some((a) => a.sha256 === sha256));
+    return this.store.listOperations().some((/** @type {any} */ op) =>
+      (op.attachments || []).some((/** @type {any} */ a) => a.sha256 === sha256));
   }
 
   // 执行前校验：附件内容必须还在，且哈希与冻结记录一致
+  /**
+   * @param {any} operation
+   */
   _assertAttachmentsIntact(operation) {
     for (const attachment of (operation && operation.attachments) || []) {
       const blob = this.blobStore.get(attachment.sha256);
@@ -2017,6 +2222,10 @@ class ConsoleService {
     }
   }
 
+  /**
+   * @param {any} operation
+   * @param {any} outboxId
+   */
   async _sendChecked(operation, outboxId) {
     this._assertAttachmentsIntact(operation);
     return this.fulfillment.send(outboxId);
@@ -2024,6 +2233,11 @@ class ConsoleService {
 
   // 租户隔离：共享样例文档（无 owner）所有人可见；导入资料只看自己的（管理员/审计员例外）；
   // v0.41：被显式共享的文档对被授权人可见（密级已在授权时校验）
+  /**
+   * @param {any} id
+   * @param {any} actor
+   * @param {any} role
+   */
   _docVisibleTo(id, actor, role) {
     if (!actor) return true;
     const doc = getDocumentById(id);
@@ -2034,6 +2248,9 @@ class ConsoleService {
     return this._isSharedWithMe(id, actor);
   }
 
+  /**
+   * @param {any} options
+   */
   _issueAgentAndToken({
     command, role, tools, documentIds, domains, maxCalls, modelLocation, operator = null,
   }) {
@@ -2042,10 +2259,10 @@ class ConsoleService {
     const requestedTools = tools === null ? roleTools.slice() : tools;
     const requestedDocs = documentIds === null ? roleDocs.slice() : documentIds;
     // 其他租户的文档不能进令牌——否则规划上下文会读到别人的正文
-    const tenantDeniedDocs = requestedDocs.filter((d) => !this._docVisibleTo(d, operator, role));
-    const visibleDocs = requestedDocs.filter((d) => this._docVisibleTo(d, operator, role));
-    const agentTools = requestedTools.filter((t) => roleTools.includes(t) && this.toolRegistry.has(t));
-    const agentDocs = visibleDocs.filter((d) => roleDocs.includes(d));
+    const tenantDeniedDocs = requestedDocs.filter((/** @type {any} */ d) => !this._docVisibleTo(d, operator, role));
+    const visibleDocs = requestedDocs.filter((/** @type {any} */ d) => this._docVisibleTo(d, operator, role));
+    const agentTools = requestedTools.filter((/** @type {any} */ t) => roleTools.includes(t) && this.toolRegistry.has(t));
+    const agentDocs = visibleDocs.filter((/** @type {any} */ d) => roleDocs.includes(d));
     const agent = defineAgent({
       agentId: `console-${role}-${++this.agentSeq}`,
       role,
@@ -2068,6 +2285,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} input
+   * @param {any} [options]
+   */
   async _executeCommand(input, { runId: presetRunId = null, onStage = null, shouldAbort = null } = {}) {
     const options = this._normalizeCommandInput(input);
     const generation = this.generation;
@@ -2080,6 +2301,7 @@ class ConsoleService {
     const { agent, token, deniedTools, deniedDocs } = this._issueAgentAndToken({
       ...options, command: options.command, operator,
     });
+    /** @type {any[]} */
     const deferred = [];
     const sandbox = options.sandboxPreset === 'physical'
       ? { ...DEFAULT_SANDBOX, name: '演示：开放物理通道', physical: true }
@@ -2095,7 +2317,7 @@ class ConsoleService {
       commandLevel: options.commandLevel,
       sandbox,
       deferActions: this.toolRegistry.deferredNames(),
-      onDeferred: (descriptor) => deferred.push(descriptor),
+      onDeferred: (/** @type {any} */ descriptor) => deferred.push(descriptor),
       onStage,
       shouldAbort,
       operator,
@@ -2140,7 +2362,7 @@ class ConsoleService {
             sent: sent.state,
           });
           lines.push(`  〔自动模式〕${descriptor.action} ${operation.operationId.slice(0, 8)}… ${autoMode} → ${sent.state}`);
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           lines.push(`  〔自动模式〕⛔ ${descriptor.action} 自动批准失败：${err.message}`);
         }
       } else if (descriptor.action === 'sendInternalEmail') {
@@ -2152,7 +2374,7 @@ class ConsoleService {
           });
           const sent = await this._sendChecked(operation, confirmed.outbox.outboxId);
           lines.push(`  〔闭环〕${descriptor.action} ${operation.operationId.slice(0, 8)}… 策略自动确认 → ${sent.state}`);
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           lines.push(`  〔闭环〕⛔ ${descriptor.action} 自动确认失败：${err.message}`);
         }
       } else {
@@ -2199,6 +2421,15 @@ class ConsoleService {
     });
   }
 
+  /**
+   * @param {any} runId
+   * @param {any} d
+   * @param {any} auditStart
+   * @param {any} [attachments]
+   * @param {any} [operator]
+   * @param {any} [mailAccount]
+   * @param {any} [mailAlias]
+   */
   _freezeDeferred(runId, d, auditStart, attachments = [], operator = null, mailAccount = '', mailAlias = '') {
     const action = d.action;
     const protocolAction = this.toolRegistry.protocolAction(action);
@@ -2230,7 +2461,7 @@ class ConsoleService {
     let resolvedAccount = mailAccount || '';
     if (!resolvedAccount && this.mailer) {
       if (typeof this.mailer.list === 'function') {
-        const def = this.mailer.list().find((a) => a && a.default);
+        const def = this.mailer.list().find((/** @type {any} */ a) => a && a.default);
         if (def) resolvedAccount = def.name;
       }
       if (!resolvedAccount && this.mailer.defaultName) resolvedAccount = String(this.mailer.defaultName);
@@ -2247,7 +2478,7 @@ class ConsoleService {
         if (mailAlias) {
           try {
             resolvedAlias = this.mailer.resolveIdentity(account.name, mailAlias).address;
-          } catch (err) {
+          } catch (errRaw) { const err = /** @type {any} */ (errRaw);
             throw new ConsoleError('BAD_REQUEST', err.message, 400);
           }
         }
@@ -2273,7 +2504,7 @@ class ConsoleService {
         mailAccount: resolvedAccount,
         mailAlias: resolvedAlias,
         body: finalBody || `（${action}）`,
-        attachments: storedAttachments.map((a) => ({ name: a.name, sha256: a.sha256, size: a.size })),
+        attachments: storedAttachments.map((/** @type {any} */ a) => ({ name: a.name, sha256: a.sha256, size: a.size })),
         sourceDocIds,
         level: d.docLevel || '内部',
         createdAt: this._iso(),
@@ -2282,7 +2513,7 @@ class ConsoleService {
         planHash: sha256Hex(`${runId}|${d.stepNumber}|${action}`),
         createdBy: operator || '',
       });
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       // 冻结失败：刚写进去的附件内容没有操作引用，回滚掉（共用内容不动）
       for (const a of storedAttachments) {
         if (!this._blobReferenced(a.sha256)) this.blobStore.delete(a.sha256);
@@ -2305,6 +2536,10 @@ class ConsoleService {
     return operation;
   }
 
+  /**
+   * @param {any} from
+   * @param {any} to
+   */
   _gateSummary(from, to) {
     const entries = this.audit.entries.slice(from, to);
     const stages = [
@@ -2323,15 +2558,15 @@ class ConsoleService {
     const WARN = new Set(['闸3脱敏', '闸5脱敏', '计划校正']);
     const DEFER = new Set(['转交确认闭环']);
     return stages.map((stage) => {
-      const items = entries.filter((e) => stage.kinds.includes(e.kind));
+      const items = entries.filter((/** @type {any} */ e) => stage.kinds.includes(e.kind));
       let status = 'na';
       if (items.length) {
-        if (items.some((e) => BLOCK.has(e.kind))) status = 'block';
-        else if (items.some((e) => DEFER.has(e.kind))) status = 'defer';
-        else if (items.some((e) => WARN.has(e.kind))) status = 'warn';
+        if (items.some((/** @type {any} */ e) => BLOCK.has(e.kind))) status = 'block';
+        else if (items.some((/** @type {any} */ e) => DEFER.has(e.kind))) status = 'defer';
+        else if (items.some((/** @type {any} */ e) => WARN.has(e.kind))) status = 'warn';
         else status = 'pass';
       }
-      const notes = items.slice(0, 3).map((e) => {
+      const notes = items.slice(0, 3).map((/** @type {any} */ e) => {
         const d = e.detail || {};
         return d.reason || (Array.isArray(d.reasons) ? d.reasons.join('、') : '') || d.method || d.action || e.kind;
       });
@@ -2341,16 +2576,29 @@ class ConsoleService {
 
   // ---------- 操作 ----------
   // 租户隔离：员工只看自己发起的操作；管理员/审计员/设备助手跨租户（后两者需要审批队列）
+  /**
+   * @param {any} role
+   */
   _canSeeAllOperations(role) {
     return ['管理员', '审计员', '设备助手'].includes(role);
   }
 
+  /**
+   * @param {any} operation
+   * @param {any} actor
+   * @param {any} role
+   */
   _operationVisible(operation, actor, role) {
     if (!actor || !operation || !operation.createdBy) return true;
     if (this._canSeeAllOperations(role)) return true;
     return operation.createdBy === actor;
   }
 
+  /**
+   * @param {any} id
+   * @param {any} actor
+   * @param {any} role
+   */
   _assertOperationVisible(id, actor, role) {
     const operation = this.store.getOperation(id);
     if (!operation || !this._operationVisible(operation, actor, role)) {
@@ -2359,15 +2607,23 @@ class ConsoleService {
     return operation;
   }
 
+  /**
+   * @param {any} [options]
+   */
   listOperations({ state = null, actor = null, role = null } = {}) {
-    const all = this.store.listOperations().filter((o) => this._operationVisible(o, actor, role));
-    const filtered = state ? all.filter((o) => o.state === state) : all;
+    const all = this.store.listOperations().filter((/** @type {any} */ o) => this._operationVisible(o, actor, role));
+    const filtered = state ? all.filter((/** @type {any} */ o) => o.state === state) : all;
+    /** @type {Record<string, number>} */
     const counts = {};
     for (const o of all) counts[o.state] = (counts[o.state] || 0) + 1;
-    return { items: filtered.map((o) => this._operationView(o)), counts };
+    return { items: filtered.map((/** @type {any} */ o) => this._operationView(o)), counts };
   }
 
   // 导出已批准操作的正文：导出前重算冻结记录，保证"导出的就是被批准的那一份"
+  /**
+   * @param {any} id
+   * @param {any} [options]
+   */
   getOperationBody(id, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
     if (operation.state === 'frozen') throw new ConsoleError('CONFLICT', '操作尚未批准，不能导出正文', 409);
@@ -2391,6 +2647,10 @@ class ConsoleService {
 
   // 草稿编辑：改正文 → 重新计算 bodyHash/operationHash → 旧挑战作废 → 必须重新确认
   // 已确认/已执行的操作不能改（否则等于绕过确认），只能新建一条。
+  /**
+   * @param {any} id
+   * @param {any} [options]
+   */
   editOperationBody(id, { body, editor = '用户', note = '', actor = null, role = null } = {}) {
     const current = this._assertOperationVisible(id, actor, role);
     if (current.state !== 'frozen') {
@@ -2455,7 +2715,7 @@ class ConsoleService {
       operationId: id,
       revision: { from: currentRevision, to: currentRevision + 1 },
       fromHash: current.operationHash.slice(0, 16),
-      toHash: next.operationHash.slice(0, 16),
+      toHash: /** @type {string} */ (next.operationHash).slice(0, 16),
       voidedChallenges: voided,
       editor: String(editor || '用户').slice(0, 40),
     });
@@ -2469,6 +2729,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} id
+   * @param {any} [options]
+   */
   listOperationRevisions(id, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
     return {
@@ -2485,6 +2749,11 @@ class ConsoleService {
   }
 
   // 下载已批准操作的附件：先验冻结记录，再验内容哈希
+  /**
+   * @param {any} id
+   * @param {any} sha256
+   * @param {any} [options]
+   */
   getAttachment(id, sha256, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
     if (!['confirmed', 'executing', 'executed', 'failed'].includes(operation.state)) {
@@ -2492,7 +2761,7 @@ class ConsoleService {
     }
     const check = verifyOperation(operation);
     if (!check.ok) throw new ConsoleError('CONFLICT', `冻结记录校验失败：${check.reason}`, 409);
-    const target = (operation.attachments || []).find((a) => a.sha256 === String(sha256 || '').toLowerCase());
+    const target = (operation.attachments || []).find((/** @type {any} */ a) => a.sha256 === String(sha256 || '').toLowerCase());
     if (!target) throw new ConsoleError('NOT_FOUND', '该操作没有这个附件', 404);
     const blob = this.blobStore.get(target.sha256);
     if (!blob) throw new ConsoleError('CONFLICT', '附件内容缺失', 409);
@@ -2503,10 +2772,14 @@ class ConsoleService {
     return { name: target.name, mime: blob.mime, size: blob.size, content: blob.content };
   }
 
+  /**
+   * @param {any} id
+   * @param {any} [options]
+   */
   getOperation(id, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
     const meta = this.operationMeta.get(id) || {};
-    const events = this.store.listEvents().filter((e) => e.operationId === id);
+    const events = this.store.listEvents().filter((/** @type {any} */ e) => e.operationId === id);
     const auditFrom = Number.isInteger(meta.auditFrom) ? meta.auditFrom : Math.max(0, this.audit.entries.length - 50);
     const auditTo = Number.isInteger(meta.auditTo) ? meta.auditTo : this.audit.entries.length;
     return {
@@ -2517,6 +2790,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} operation
+   */
   _operationView(operation) {
     const outbox = this.store.getOutboxByOperation(operation.operationId);
     const meta = this.operationMeta.get(operation.operationId) || {};
@@ -2573,6 +2849,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} id
+   * @param {any} [options]
+   */
   rejectOperation(id, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能拒绝`, 409);
@@ -2581,6 +2861,10 @@ class ConsoleService {
     return { ok: true, operation: this._operationView(rejected) };
   }
 
+  /**
+   * @param {any} id
+   * @param {any} [options]
+   */
   async sendOperation(id, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
     const outbox = this.store.getOutboxByOperation(id);
@@ -2593,6 +2877,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} [seq]
+   */
   rollback(seq = null) {
     const snapshot = this.runtime.rollback(
       seq === null || seq === undefined || seq === '' ? undefined : Number(seq),
@@ -2610,6 +2897,9 @@ class ConsoleService {
 
   // 运行时切换确认设备（多设备，docs/60）：密钥、deviceId、confirmer 一起换。
   // 有未决挑战时拒绝切换，避免把 A 的挑战用 B 的身份收尾。
+  /**
+   * @param {any} [options]
+   */
   setNearfieldDevice({ key, deviceId, deviceIdBytes = null, deviceLabel } = {}) {
     if (!Buffer.isBuffer(key) || key.length !== 32) {
       throw new ConsoleError('BAD_REQUEST', 'key 必须是 32 字节 Buffer');
@@ -2642,6 +2932,10 @@ class ConsoleService {
   }
 
   // ---------- WS63 挑战 ----------
+  /**
+   * @param {any} operationId
+   * @param {any} [options]
+   */
   beginChallenge(operationId, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(operationId, actor, role);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能确认`, 409);
@@ -2681,6 +2975,9 @@ class ConsoleService {
   }
 
   // 确认端展示详情（收件人/正文预览/附件名与大小）
+  /**
+   * @param {any} id
+   */
   _operationDetails(id) {
     const op = this.store.getOperation(id);
     if (!op) return null;
@@ -2692,13 +2989,17 @@ class ConsoleService {
       actionLabel: PROTOCOL_ACTIONS[op.protocolAction] || op.action,
       bodyPreview: String(op.body || '').slice(0, 600),
       bodyLength: String(op.body || '').length,
-      attachments: (op.attachments || []).map((a) => ({ name: a.name, size: a.size })),
+      attachments: (op.attachments || []).map((/** @type {any} */ a) => ({ name: a.name, size: a.size })),
       targetHash: op.operationHash,
       bodyHash: op.bodyHash,
       verify: verifyOperation(op),
     };
   }
 
+  /**
+   * @param {any} challenge
+   * @param {any} [operation]
+   */
   _challengeView(challenge, operation = null) {
     const op = operation || this.store.getOperation(challenge.operationId);
     return {
@@ -2725,6 +3026,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} challenge
+   * @param {any} [extra]
+   */
   _pushHistory(challenge, extra = {}) {
     this.challengeHistory.unshift({
       ...this._challengeView(challenge),
@@ -2736,6 +3041,10 @@ class ConsoleService {
 
   // 四眼原则：已登录用户不能批准自己发起的操作。
   // 手机/WS63 确认端没有用户身份，只能靠"设备在另一台手机上"这个物理边界（见 docs/32）。
+  /**
+   * @param {any} operation
+   * @param {any} actor
+   */
   _assertNotSelfApproval(operation, actor) {
     if (!actor || !operation || !operation.createdBy) return;
     if (String(actor) !== operation.createdBy) return;
@@ -2747,6 +3056,11 @@ class ConsoleService {
     throw new ConsoleError('FORBIDDEN', `四眼原则：操作由「${operation.createdBy}」发起，不能由本人批准`, 403);
   }
 
+  /**
+   * @param {any} challengeId
+   * @param {any} decision
+   * @param {any} [options]
+   */
   async decideChallenge(challengeId, decision, { actor = null, role = null } = {}) {
     if (decision !== 'approve' && decision !== 'cancel') {
       throw new ConsoleError('BAD_REQUEST', "decision 必须是 'approve' 或 'cancel'");
@@ -2787,7 +3101,7 @@ class ConsoleService {
         const transport = createLoopbackTransport(device);
         reply = await transport.send(challenge.frame);
       }
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this.confirmer.cancel(challenge.pending);
       challenge.state = 'expired';
       this._pushHistory(challenge, { code: 'TRANSPORT', outcome: 'error' });
@@ -2824,6 +3138,10 @@ class ConsoleService {
   }
 
   // 回帧后的统一收尾：虚拟设备与手机确认端走同一条校验链路
+  /**
+   * @param {any} challenge
+   * @param {any} reply
+   */
   async _completeChallenge(challenge, reply) {
     const operation = this.store.getOperation(challenge.operationId);
     if (!operation) throw new ConsoleError('NOT_FOUND', '操作不存在', 404);
@@ -2843,7 +3161,7 @@ class ConsoleService {
     let approval;
     try {
       approval = this.confirmer.acceptDecision(challenge.pending, reply, { finalOperation: operation });
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       if (err.code === 'DECISION') {
         const rejected = this.store.setOperationState(operation.operationId, 'rejected');
         challenge.state = 'cancelled';
@@ -2918,7 +3236,7 @@ class ConsoleService {
         outbox: sent,
         send: sent,
       };
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       challenge.state = 'approved';
       challenge.result = { code: 'OPERATION', error: err.message };
       this._pushHistory(challenge, { code: 'OPERATION', outcome: 'approved-but-failed' });
@@ -2929,6 +3247,9 @@ class ConsoleService {
     }
   }
 
+  /**
+   * @param {any} challengeId
+   */
   expireChallenge(challengeId) {
     const challenge = this.challenges.get(challengeId);
     if (!challenge) throw new ConsoleError('NOT_FOUND', `挑战不存在：${challengeId}`, 404);
@@ -2942,6 +3263,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} challengeId
+   */
   async tamperChallenge(challengeId) {
     const challenge = this.challenges.get(challengeId);
     if (!challenge) throw new ConsoleError('NOT_FOUND', `挑战不存在：${challengeId}`, 404);
@@ -2955,7 +3279,7 @@ class ConsoleService {
     tampered[35] ^= 1; // device_id 首字节
     try {
       this.confirmer.acceptDecision(challenge.pending, tampered, { finalOperation: operation });
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this._pushHistory(challenge, { code: err.code, outcome: 'tampered' });
       return {
         ok: false, outcome: 'tampered', code: err.code || 'MAC', message: err.message,
@@ -2974,7 +3298,7 @@ class ConsoleService {
     if (!operation) return { ok: false, outcome: 'replay', code: 'NOT_FOUND', message: '操作不存在' };
     try {
       this.confirmer.acceptDecision(this.lastDecision.pending, this.lastDecision.reply, { finalOperation: operation });
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       return {
         ok: false, outcome: 'replay', code: err.code || 'STATE', message: err.message,
         note: '一次性 nonce：旧决定不能再次使用',
@@ -2984,6 +3308,10 @@ class ConsoleService {
     return { ok: false, outcome: 'replay', code: 'STATE', message: '重复决定未生效', operation: this._operationView(operation) };
   }
 
+  /**
+   * @param {any} operationId
+   * @param {any} [options]
+   */
   verifyTamper(operationId, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(operationId, actor, role);
     const tampered = { ...operation, body: `${operation.body}（被改）` };
@@ -3021,6 +3349,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} challengeId
+   * @param {any} frameBase64
+   */
   async submitPhoneDecision(challengeId, frameBase64) {
     if (typeof challengeId !== 'string' || !challengeId) {
       throw new ConsoleError('BAD_REQUEST', '缺少 challengeId');
@@ -3057,8 +3389,11 @@ class ConsoleService {
     return result;
   }
 
+  /**
+   * @param {any} [options]
+   */
   getDevice({ actor = null, role = null } = {}) {
-    const visible = (operationId) => this._operationVisible(this.store.getOperation(operationId), actor, role);
+    const visible = (/** @type {any} */ operationId) => this._operationVisible(this.store.getOperation(operationId), actor, role);
     const pending = [...this.challenges.values()]
       .filter((c) => c.state === 'pending' && visible(c.operationId))
       .map((c) => this._challengeView(c));
@@ -3072,7 +3407,7 @@ class ConsoleService {
       actuator: this.actuator ? { configured: true, note: '真实 GPIO（IO13 LED / IO10 蜂鸣器）' } : null,
       pending,
       history: this.challengeHistory
-        .filter((h) => !h.operationId || visible(h.operationId))
+        .filter((/** @type {any} */ h) => !h.operationId || visible(h.operationId))
         .slice(0, 12),
       lastDecision: this.lastDecision ? {
         challengeId: this.lastDecision.challengeId,
@@ -3085,6 +3420,9 @@ class ConsoleService {
   // ---------- 屏幕共享（2026-11-04：从模拟转为真实投屏） ----------
   // 画面由浏览器 getDisplayMedia 采集，不经过服务器；服务端只记录
   // 「谁、何时、共享到哪个目标、什么 surface、持续多久」，并写审计链。
+  /**
+   * @param {any} [options]
+   */
   startScreenShare({ target = '', surface = 'unknown', actor = null } = {}) {
     const name = String(target || '').trim();
     if (!name) throw new ConsoleError('BAD_REQUEST', '缺少共享目标', 400);
@@ -3099,6 +3437,9 @@ class ConsoleService {
     return { sessionId, target: name, surface: surfaceType, startedAt: this._iso(startedAt) };
   }
 
+  /**
+   * @param {any} [options]
+   */
   stopScreenShare({ sessionId, actor = null, role = null } = {}) {
     const id = String(sessionId || '').trim();
     const share = this._screenShares.get(id);
@@ -3128,6 +3469,9 @@ class ConsoleService {
 
   // ---------- 录音转写（2026-11-04：腾讯云一句话识别） ----------
   // 音频出端：只处理「公开」级录音；上传后由用户显式触发；转写文本仍按不可信输入过闸1。
+  /**
+   * @param {any} [options]
+   */
   saveAudio({ filename = '', data = '', title = '', level = '公开', actor = null } = {}) {
     if (!this.asr) {
       throw new ConsoleError('CONFLICT', '未配置 ASR（在 config.env 设 SAFE_OFFICE_ASR=1 并填腾讯云密钥）', 409);
@@ -3154,6 +3498,9 @@ class ConsoleService {
     return { audio: this._audioView(meta) };
   }
 
+  /**
+   * @param {any} a
+   */
   _audioView(a) {
     // 不回传磁盘路径：路径只在服务端使用
     return {
@@ -3162,6 +3509,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} [options]
+   */
   listAudios({ actor = null, role = null } = {}) {
     const all = ['管理员', '审计员'].includes(role);
     return [...this.audios.values()]
@@ -3169,6 +3519,9 @@ class ConsoleService {
       .map((a) => this._audioView(a));
   }
 
+  /**
+   * @param {any} [options]
+   */
   async transcribeAudioFile({ id, actor = null, role = null } = {}) {
     const a = this.audios.get(String(id || '').trim());
     if (!a) throw new ConsoleError('NOT_FOUND', `录音不存在：${id || ''}`, 404);
@@ -3192,6 +3545,7 @@ class ConsoleService {
 
   // ---------- 治理 ----------
   _policyMatrix() {
+    /** @type {Record<string, Record<string, any>>} */
     const matrix = {};
     for (const role of Object.keys(ROLE_DEFS)) {
       matrix[role] = {};
@@ -3202,9 +3556,12 @@ class ConsoleService {
     return matrix;
   }
 
+  /**
+   * @param {any} [options]
+   */
   getGovernance({ actor = null, role = null } = {}) {
     const canSeeAll = !actor || ['管理员', '审计员'].includes(role);
-    const operations = this.store.listOperations().filter((o) => this._operationVisible(o, actor, role));
+    const operations = this.store.listOperations().filter((/** @type {any} */ o) => this._operationVisible(o, actor, role));
     return {
       risk: {
         score: this.risk.score, threshold: this.risk.threshold, frozen: this.risk.frozen,
@@ -3239,7 +3596,7 @@ class ConsoleService {
       policy: this._policyMatrix(),
       tools: this.toolRegistry.publicList(),
       mailAccounts: typeof this.mailer.list === 'function' ? this.mailer.list() : [],
-      mcpServers: this.mcpConfig.map(({ token: _token, ...rest }) => rest),   // 永不回传 token
+      mcpServers: this.mcpConfig.map((/** @type {any} */ { token: _token, ...rest }) => rest),   // 永不回传 token
       mcpRestore: this.mcpRestore,
       mcpConfigError: this.mcpConfigError,
       bouncePoll: this.bouncePoller
@@ -3259,18 +3616,21 @@ class ConsoleService {
       perf: this.perf.report(),
       counts: {
         operations: operations.length,
-        executed: operations.filter((o) => o.state === 'executed').length,
-        rejected: operations.filter((o) => o.state === 'rejected').length,
-        emails: operations.filter((o) => o.protocolAction === 1).length,
+        executed: operations.filter((/** @type {any} */ o) => o.state === 'executed').length,
+        rejected: operations.filter((/** @type {any} */ o) => o.state === 'rejected').length,
+        emails: operations.filter((/** @type {any} */ o) => o.protocolAction === 1).length,
       },
     };
   }
 
+  /**
+   * @param {any} [options]
+   */
   listAudit({ after = 0, limit = 100, kind = '' } = {}) {
     const cursor = Number.isFinite(Number(after)) ? Number(after) : 0;
     const max = Math.min(500, Math.max(1, Number(limit) || 100));
     const items = this.audit.entries
-      .filter((e) => e.seq > cursor && (!kind || e.kind === kind))
+      .filter((/** @type {any} */ e) => e.seq > cursor && (!kind || e.kind === kind))
       .slice(0, max);
     return {
       ok: true,
@@ -3283,6 +3643,9 @@ class ConsoleService {
 
   // 附件保留策略：删除早于 days 天、且没有任何操作记录引用的附件内容。
   // 被历史操作引用的附件默认保留（否则回滚/复核会丢证据）；返回候选/删除/保留计数。
+  /**
+   * @param {any} [options]
+   */
   pruneAttachments({ days = 0, now = Date.now() } = {}) {
     const n = Number(days);
     if (!Number.isFinite(n) || n <= 0) {
@@ -3310,6 +3673,10 @@ class ConsoleService {
   }
 
   // 租户分链：管理员/审计员可读任意租户；普通用户只能读自己的。
+  /**
+   * @param {any} tenant
+   * @param {any} [options]
+   */
   getTenantAudit(tenant, { actor = null, role = null } = {}) {
     const canSeeAll = !actor || ['管理员', '审计员'].includes(role);
     if (!canSeeAll && actor !== tenant) {
@@ -3351,6 +3718,9 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} [options]
+   */
   reviewRisk({ by = '安全管理员', outcome = 'clear', note = '' } = {}) {
     if (outcome !== 'clear' && outcome !== 'escalate') {
       throw new ConsoleError('BAD_REQUEST', "outcome 必须是 'clear' 或 'escalate'");
@@ -3371,7 +3741,7 @@ class ConsoleService {
     if (!this.audit.entries.length) {
       return { ok: true, original: true, tampered: true, note: '审计为空，先执行一条命令' };
     }
-    const clone = this.audit.entries.map((e) => structuredClone(e));
+    const clone = this.audit.entries.map((/** @type {any} */ e) => structuredClone(e));
     const index = Math.floor(clone.length / 2);
     clone[index].detail = { ...(clone[index].detail || {}), tampered: '演示：这条记录被改过' };
     return {
@@ -3417,6 +3787,10 @@ class ConsoleService {
     };
   }
 
+  /**
+   * @param {any} outboxId
+   * @param {any} [options]
+   */
   reconcileOutbox(outboxId, { state, messageId = null, note = '', actor = null, role = null } = {}) {
     const outbox = this.store.getOutbox(outboxId);
     const operation = outbox ? this.store.getOperation(outbox.operationId) : null;
@@ -3428,23 +3802,26 @@ class ConsoleService {
       const updated = this.fulfillment.reconcile(outboxId, { state, messageId, note });
       const operation = this.store.getOperation(outbox.operationId);
       return { ok: true, outbox: updated, operation: operation ? this._operationView(operation) : null };
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       throw new ConsoleError('CONFLICT', err.message, 409);
     }
   }
 
+  /**
+   * @param {any} [options]
+   */
   listEmails({ actor = null, role = null } = {}) {
     const operations = this.store.listOperations()
-      .filter((o) => o.protocolAction === 1 && this._operationVisible(o, actor, role))
-      .map((o) => this._operationView(o));
+      .filter((/** @type {any} */ o) => o.protocolAction === 1 && this._operationVisible(o, actor, role))
+      .map((/** @type {any} */ o) => this._operationView(o));
     return {
       items: operations,
       counts: {
         total: operations.length,
-        frozen: operations.filter((o) => o.state === 'frozen').length,
-        sent: operations.filter((o) => o.outbox && o.outbox.state === 'sent').length,
-        unknown: operations.filter((o) => o.outbox && o.outbox.state === 'unknown').length,
-        bounced: operations.filter((o) => o.outbox && o.outbox.state === 'bounced').length,
+        frozen: operations.filter((/** @type {any} */ o) => o.state === 'frozen').length,
+        sent: operations.filter((/** @type {any} */ o) => o.outbox && o.outbox.state === 'sent').length,
+        unknown: operations.filter((/** @type {any} */ o) => o.outbox && o.outbox.state === 'unknown').length,
+        bounced: operations.filter((/** @type {any} */ o) => o.outbox && o.outbox.state === 'bounced').length,
       },
     };
   }
@@ -3452,6 +3829,9 @@ class ConsoleService {
   // ---------- v0.35 退信处理 ----------
   // 输入一封 .eml 退信原文（DSN），按 Original-Message-ID 回填发件记录。
   // 只登记，不重发；模糊/缺失的匹配一律不猜。
+  /**
+   * @param {any} [options]
+   */
   ingestBounce({ eml, by = null } = {}) {
     if (typeof eml !== 'string' || !eml.trim()) {
       throw new ConsoleError('BAD_REQUEST', '缺少退信原文（.eml）', 400);
@@ -3487,6 +3867,7 @@ class ConsoleService {
           continue;
         }
         // 依次尝试：Message-ID 优先，再用 X-Idempotency-Key 回退（QQ 会改写 Message-ID）
+        /** @type {any[]} */
         const attempts = [
           ...messageIds.map((k) => ({ messageId: k })),
           ...idemKeys.map((k) => ({ idempotencyKey: k })),
@@ -3528,7 +3909,7 @@ class ConsoleService {
         });
       }
 
-      for (const item of results) {
+      for (const item of /** @type {any[]} */ (results)) {
         const detail = {
           recipient: item.recipient,
           action: item.action,
@@ -3559,6 +3940,9 @@ class ConsoleService {
   //   - 管理员在治理页填地址 → 发现工具 → 勾选后注册进 ToolRegistry
   //   - 注册必须显式给角色策略与级别（未声明 = 拒绝）；沙箱档案固定 local
   //   - 只允许回环地址（防 SSRF）；确需远程开 SAFE_OFFICE_MCP_ALLOW_REMOTE=1
+  /**
+   * @param {any} url
+   */
   _normalizeMcpUrl(url) {
     let parsed;
     try {
@@ -3577,6 +3961,11 @@ class ConsoleService {
     return parsed.toString();
   }
 
+  /**
+   * @param {any} url
+   * @param {any} token
+   * @param {any} timeoutMs
+   */
   _mcpClient(url, token, timeoutMs) {
     const transport = createHttpTransport({
       url,
@@ -3586,19 +3975,22 @@ class ConsoleService {
     return new McpClient({ transport });
   }
 
+  /**
+   * @param {any} [options]
+   */
   async discoverMcp({ url, token = null, timeoutMs = 8000, by = null } = {}) {
     const target = this._normalizeMcpUrl(url);
     const client = this._mcpClient(target, token, timeoutMs);
     let init;
     try {
       init = await client.initialize();
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       throw new ConsoleError('MCP_ERROR', `连接 MCP 失败：${err.message}`, 502);
     }
     let tools;
     try {
       tools = await client.listTools();
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       throw new ConsoleError('MCP_ERROR', `读取工具列表失败：${err.message}`, 502);
     }
     this.mcpSessions.set(target, { client, token: token || null, at: this.now() });
@@ -3606,14 +3998,14 @@ class ConsoleService {
       this.audit.append('MCP 发现', {
         url: target,
         server: init && init.serverInfo ? init.serverInfo.name : null,
-        tools: tools.map((t) => t.name),
+        tools: tools.map((/** @type {any} */ t) => t.name),
       });
     });
     return {
       ok: true,
       url: target,
       server: init && init.serverInfo ? init.serverInfo : null,
-      tools: tools.map((t) => ({
+      tools: tools.map((/** @type {any} */ t) => ({
         name: t.name,
         description: t.description || '',
         required: t.inputSchema && Array.isArray(t.inputSchema.required) ? t.inputSchema.required : [],
@@ -3622,6 +4014,9 @@ class ConsoleService {
   }
 
   // 注册内核：只动注册表/策略/执行器，不写配置、不写审计（供注册与重启恢复共用）
+  /**
+   * @param {any} options
+   */
   async _applyMcpRegistration({
     url, token = null, tools = [], roles = [], level = 'L3',
     capability = 'MCP 外部工具', timeoutMs = 8000,
@@ -3660,7 +4055,7 @@ class ConsoleService {
       });
       registered = result.registered;
       for (const [name, executor] of result.executors) this.toolExecutors.set(name, executor);
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       const message = String(err && err.message ? err.message : err);
       if (/已注册|重复/.test(message)) {
         throw new ConsoleError('CONFLICT', message, 409);
@@ -3698,7 +4093,7 @@ class ConsoleService {
         });
       }
       return out;
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       this.mcpConfigError = err.message;
       return [];
     }
@@ -3714,7 +4109,7 @@ class ConsoleService {
         mode: 0o600,
       });
       fs.renameSync(tmp, this.mcpConfigFile);
-    } catch (err) {
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
       try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
       throw err;
     }
@@ -3736,7 +4131,7 @@ class ConsoleService {
           this.mcpRestore.restored += registered.length;
           this.mcpRestore.servers.push({ url: entry.url, tools: registered });
           this.audit.append('MCP 恢复', { url: entry.url, tools: registered });
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           const message = String(err && err.message ? err.message : err);
           this.mcpRestore.failed.push({ url: entry.url, error: message });
           this.audit.append('MCP 恢复失败', { url: entry.url, error: message });
@@ -3746,6 +4141,9 @@ class ConsoleService {
     });
   }
 
+  /**
+   * @param {any} [options]
+   */
   async registerMcp({
     url, token = null, tools = null, roles = [], level = 'L3',
     capability = 'MCP 外部工具', timeoutMs = 8000, by = null,
@@ -3760,8 +4158,8 @@ class ConsoleService {
     let persisted = false;
     let persistError = null;
     if (this.mcpConfigFile) {
-      const same = (a, b) => a.length === b.length && [...a].sort().join('\u0000') === [...b].sort().join('\u0000');
-      this.mcpConfig = this.mcpConfig.filter((e) => !(e.url === target && same(e.tools, rawTools)));
+      const same = (/** @type {any} */ a, /** @type {any} */ b) => a.length === b.length && [...a].sort().join('\u0000') === [...b].sort().join('\u0000');
+      this.mcpConfig = this.mcpConfig.filter((/** @type {any} */ e) => !(e.url === target && same(e.tools, rawTools)));
       const entry = {
         url: target,
         token: token ? String(token) : null,
@@ -3775,10 +4173,10 @@ class ConsoleService {
       try {
         this._saveMcpConfig();
         persisted = true;
-      } catch (err) {
+      } catch (errRaw) { const err = /** @type {any} */ (errRaw);
         persistError = String(err && err.message ? err.message : err);
         // 配置没落盘就不该出现在"已持久化"列表里；工具仍在内存注册表中
-        this.mcpConfig = this.mcpConfig.filter((e) => e !== entry);
+        this.mcpConfig = this.mcpConfig.filter((/** @type {any} */ e) => e !== entry);
         this.audit.append('MCP 配置保存失败', { file: this.mcpConfigFile, error: persistError });
       }
     }
@@ -3800,6 +4198,9 @@ class ConsoleService {
   }
 
   // ---------- 业务副作用（模拟） ----------
+  /**
+   * @param {any} operation
+   */
   async _applyBusinessAction(operation) {
     if (operation.protocolAction === 2) {
       // 真删除：导入库里的资料要真正删除，否则重启后会“复活”
@@ -3836,10 +4237,12 @@ class ConsoleService {
       return;
     }
     if (operation.protocolAction === 4) {
+      /** @type {any} */
       let args = {};
       try { args = JSON.parse(operation.body); } catch { args = {}; }
       const device = args.device || operation.recipient;
       const op = args.op || 'unknown';
+      /** @type {any} */
       const record = { operationId: operation.operationId, device, op, at: this._iso() };
       if (this.actuator) {
         try {
@@ -3856,7 +4259,7 @@ class ConsoleService {
           this._withAuditActor(operation.createdBy || null, () => this.audit.append('设备执行', {
             operationId: operation.operationId, device, op, pin: ack.pin, level: ack.level,
           }));
-        } catch (err) {
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           record.actuated = false;
           record.error = err.message;
           this.business.deviceCommands.push(record);

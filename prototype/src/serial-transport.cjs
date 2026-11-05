@@ -21,6 +21,7 @@ const TYPE_DECISION = 2;
 
 // 从任意字节流中切出完整 SFC1 帧；坏长度/前置噪声会自动重新同步
 class SerialFrameParser {
+  /** @param {{ maxFrameBytes?: number }} [options] */
   constructor({ maxFrameBytes = DEFAULT_MAX_FRAME } = {}) {
     if (!Number.isInteger(maxFrameBytes) || maxFrameBytes < MIN_FRAME) {
       throw new TypeError(`maxFrameBytes 必须是不小于 ${MIN_FRAME} 的整数`);
@@ -29,6 +30,7 @@ class SerialFrameParser {
     this.buffer = Buffer.alloc(0);
   }
 
+  /** @param {Buffer} chunk @returns {Buffer[]} */
   push(chunk) {
     if (!Buffer.isBuffer(chunk)) throw new TypeError('chunk 必须是 Buffer');
     if (chunk.length === 0) return [];
@@ -36,6 +38,7 @@ class SerialFrameParser {
       ? Buffer.concat([this.buffer, chunk])
       : Buffer.from(chunk);
 
+    /** @type {Buffer[]} */
     const frames = [];
     for (;;) {
       const index = this.buffer.indexOf(MAGIC);
@@ -69,6 +72,9 @@ class SerialFrameParser {
 }
 
 class SerialTransport {
+  /**
+   * @param {{ port?: any, timeoutMs?: number, replyType?: number, maxFrameBytes?: number, logger?: ((line: string) => void) | null }} [options]
+   */
   constructor({
     port,
     timeoutMs = 5000,
@@ -88,21 +94,26 @@ class SerialTransport {
     this.port = port;
     this.timeoutMs = timeoutMs;
     this.replyType = replyType;
+    /** @type {((line: string) => void) | null} */
     this.logger = typeof logger === 'function' ? logger : null;
     this.parser = new SerialFrameParser({ maxFrameBytes });
+    /** @type {any} */
     this.waiter = null;
+    /** @type {Promise<any>} */
     this.queue = Promise.resolve();
     this.closed = false;
 
-    this._onData = (chunk) => this._handleChunk(chunk);
-    this._onError = (err) => this._fail(err);
+    this._onData = (/** @type {Buffer} */ chunk) => this._handleChunk(chunk);
+    this._onError = (/** @type {any} */ err) => this._fail(err);
     this._onClose = () => this._fail(new Error('串口已关闭'));
     port.on('data', this._onData);
     port.on('error', this._onError);
     port.on('close', this._onClose);
   }
 
+  /** @param {Buffer} chunk */
   _handleChunk(chunk) {
+    /** @type {Buffer[]} */
     let frames;
     try {
       frames = this.parser.push(chunk);
@@ -126,6 +137,7 @@ class SerialTransport {
     }
   }
 
+  /** @param {any} err */
   _fail(err) {
     if (!this.waiter) {
       if (this.logger) this.logger(`串口错误（无等待请求）：${err && err.message ? err.message : err}`);
@@ -137,6 +149,7 @@ class SerialTransport {
     waiter.reject(err);
   }
 
+  /** @param {Buffer} frame @returns {Promise<Buffer | null>} */
   _sendOnce(frame) {
     if (this.closed) return Promise.reject(new Error('transport 已关闭'));
     return new Promise((resolve, reject) => {
@@ -158,6 +171,7 @@ class SerialTransport {
   }
 
   // 串行化：同一时刻只允许一个 CHALLENGE 在途，避免应答串台
+  /** @param {Buffer} frame @returns {Promise<Buffer | null>} */
   send(frame) {
     if (!Buffer.isBuffer(frame)) return Promise.reject(new TypeError('frame 必须是 Buffer'));
     if (this.closed) return Promise.reject(new Error('transport 已关闭'));
@@ -184,12 +198,17 @@ class SerialTransport {
   }
 }
 
+/** @param {any} options @returns {SerialTransport} */
 function createSerialTransport(options) {
   return new SerialTransport(options);
 }
 
 // 打开真实串口（v0.45）。serialport 是可选依赖：没装时明确报错，核心功能不受影响。
 // factory 注入用于测试（返回 EventEmitter + write + open）。
+/**
+ * @param {{ path?: string, baudRate?: number, factory?: ((opts: { path: string, baudRate: number }) => any) | null, openTimeoutMs?: number }} [options]
+ * @returns {Promise<any>}
+ */
 async function openSerialPort({
   path: portPath,
   baudRate = 115200,
@@ -220,8 +239,9 @@ async function openSerialPort({
   }
   if (port.isOpen === true) return port;
 
-  await new Promise((resolve, reject) => {
+  await new Promise((/** @type {(value?: void) => void} */ resolve, /** @type {(reason?: any) => void} */ reject) => {
     let done = false;
+    /** @param {any} [err] */
     const finish = (err) => {
       if (done) return;
       done = true;
@@ -234,7 +254,7 @@ async function openSerialPort({
       else resolve();
     };
     const onOpen = () => finish();
-    const onError = (err) => finish(err instanceof Error ? err : new Error(String(err)));
+    const onError = (/** @type {any} */ err) => finish(err instanceof Error ? err : new Error(String(err)));
     const timer = setTimeout(() => finish(new Error(`打开串口超时：${portPath}`)), openTimeoutMs);
     const on = typeof port.once === 'function' ? port.once.bind(port) : port.on.bind(port);
     on('open', onOpen);
