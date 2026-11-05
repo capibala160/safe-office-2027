@@ -1,0 +1,71 @@
+{
+  "version": "0.52.2",
+  "startedAt": "2026-11-05T02:21:23.801Z",
+  "finishedAt": "2026-11-05T02:21:44.214Z",
+  "elapsedMs": 20413,
+  "port": "COM11",
+  "device": "ws63-A",
+  "keySource": "table",
+  "scenes": [
+    {
+      "name": "软件多幕 demo.cjs",
+      "ok": true,
+      "detail": "exit=0",
+      "ms": 1122
+    },
+    {
+      "name": "设备执行：unlock → LED 亮",
+      "ok": true,
+      "detail": "pin=13 level=1",
+      "ms": 668
+    },
+    {
+      "name": "设备执行：lock → LED 灭",
+      "ok": true,
+      "detail": "pin=13 level=0",
+      "ms": 667
+    },
+    {
+      "name": "批准：短按 KEY2 → decision=1",
+      "ok": true,
+      "detail": "confirmationId=ws63-d17e5de…",
+      "ms": 3839
+    },
+    {
+      "name": "取消：长按 KEY2 ≥600ms → DECISION",
+      "ok": true,
+      "detail": "已拒绝（用户取消）",
+      "ms": 4060
+    },
+    {
+      "name": "超时：不按键 → TIMEOUT，板端自清 pending",
+      "ok": true,
+      "detail": "PC 侧超时，等待板端自动过期",
+      "ms": 6694
+    },
+    {
+      "name": "篡改：MAC 末字节翻转 → rejected: MAC",
+      "ok": true,
+      "detail": "板端拒绝：MAC",
+      "ms": 618
+    },
+    {
+      "name": "重放：过期后重发同一帧 → rejected: REPLAY",
+      "ok": true,
+      "detail": "板端拒绝：REPLAY",
+      "ms": 2741
+    }
+  ],
+  "passed": 8,
+  "failed": 0,
+  "monitored": true,
+  "serialBytes": 905,
+  "restartMarkers": [],
+  "rebootDetected": false,
+  "artifacts": {
+    "log": "C:\\Users\\Lenovo\\Desktop\\安全智慧办公2027\\prototype\\out\\demo-runthrough\\recording\\20261105-022123\\run.log",
+    "serialRaw": "C:\\Users\\Lenovo\\Desktop\\安全智慧办公2027\\prototype\\out\\demo-runthrough\\recording\\20261105-022123\\serial-raw.bin",
+    "serialText": "C:\\Users\\Lenovo\\Desktop\\安全智慧办公2027\\prototype\\out\\demo-runthrough\\recording\\20261105-022123\\serial.txt",
+    "summary": "C:\\Users\\Lenovo\\Desktop\\安全智慧办公2027\\prototype\\out\\demo-runthrough\\recording\\20261105-022123\\summary.json"
+  }
+}
