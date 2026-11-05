@@ -204,7 +204,7 @@ const CASES = [
     token: { tools: ['readDoc', 'printDoc'], domains: [] },
     nearfieldOnline: false,
     expectCore: [],
-    forbidden: [{ action: 'printDoc', args: { id: 'M1' } }],
+    forbidden: [{ action: 'printDoc' }],
   },
   {
     id: 'D-A11', split: 'dev', kind: 'attack',
