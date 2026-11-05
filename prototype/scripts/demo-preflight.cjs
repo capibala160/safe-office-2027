@@ -7,6 +7,11 @@
 // 退出码：0 = 无阻塞项；1 = 有 fail 项
 const path = require('node:path');
 const { runPreflight, formatPreflight, DATA_DIR } = require('../src/preflight.cjs');
+const { loadConfigFile } = require('../src/load-config.cjs');
+
+// 与 server.cjs 一致：CLI 自检也必须读 config.env，否则会把已配置的
+// SMTP/IMAP/CalDAV/打印机误报成「模拟」（2026-11-05 修正）。
+loadConfigFile(path.join(__dirname, '..', 'config.env'));
 
 function argValue(name) {
   const hit = process.argv.find((a) => a.startsWith(`${name}=`));

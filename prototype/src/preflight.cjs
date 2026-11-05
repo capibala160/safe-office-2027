@@ -128,36 +128,65 @@ function staticChecks({ env = process.env, dataDir = DATA_DIR, port = null, chec
     out.push(check('audit-external', '审计外部快照', STATUS.WARN, '未配置 SAFE_OFFICE_AUDIT_EXTERNAL_DIR'));
   }
 
+  // 端点和 key 必须同时配齐才会走 HttpLLM；只配端点会静默回退 MockLLM（llm.cjs）。
   const llmEndpoint = env.SAFE_OFFICE_LLM_ENDPOINT;
-  out.push(check(
-    'llm', '模型',
-    llmEndpoint ? STATUS.OK : STATUS.WARN,
-    llmEndpoint ? `真实模型端点 ${llmEndpoint}` : 'MockLLM（演示模式；真实模型需配 SAFE_OFFICE_LLM_ENDPOINT）',
-  ));
+  const llmKey = env.SAFE_OFFICE_LLM_KEY;
+  if (llmEndpoint && llmKey) {
+    out.push(check('llm', '模型', STATUS.OK, `真实模型端点 ${llmEndpoint}`));
+  } else if (llmEndpoint) {
+    out.push(check('llm', '模型', STATUS.WARN, '端点已配但缺 SAFE_OFFICE_LLM_KEY（会回退 MockLLM）'));
+  } else {
+    out.push(check('llm', '模型', STATUS.WARN, 'MockLLM（演示模式；真实模型需同时配 ENDPOINT + KEY）'));
+  }
 
-  const smtpOn = !!(env.SAFE_OFFICE_SMTP_HOST || env.SAFE_OFFICE_SMTP_ACCOUNTS);
+  const smtpHost = env.SAFE_OFFICE_SMTP_HOST;
+  const smtpAccounts = env.SAFE_OFFICE_SMTP_ACCOUNTS;
+  const smtpOn = !!(smtpHost || smtpAccounts);
+  const smtpReady = !!smtpAccounts || !!(smtpHost && env.SAFE_OFFICE_SMTP_USER && env.SAFE_OFFICE_SMTP_PASS);
   out.push(check(
     'smtp', '邮件发送',
-    smtpOn ? STATUS.OK : STATUS.WARN,
-    smtpOn ? `SMTP ${env.SAFE_OFFICE_SMTP_HOST || '多账号配置'}` : 'FakeMailer（模拟发送，不会真发）',
+    smtpOn ? (smtpReady ? STATUS.OK : STATUS.WARN) : STATUS.WARN,
+    smtpOn
+      ? (smtpReady
+        ? `SMTP ${smtpHost || '多账号配置'}`
+        : `SMTP ${smtpHost} 已配但缺 USER/PASS（启动会失败）`)
+      : 'FakeMailer（模拟发送，不会真发）',
   ));
 
   const imapOn = !!env.SAFE_OFFICE_IMAP_HOST;
+  const imapReady = !!(env.SAFE_OFFICE_IMAP_HOST && env.SAFE_OFFICE_IMAP_USER && env.SAFE_OFFICE_IMAP_PASS);
   out.push(check(
     'imap', '收件箱同步',
-    imapOn ? STATUS.OK : STATUS.WARN,
-    imapOn ? `IMAP ${env.SAFE_OFFICE_IMAP_HOST}` : '未配置（收件箱/退信轮询不可用）',
+    imapOn ? (imapReady ? STATUS.OK : STATUS.WARN) : STATUS.WARN,
+    imapOn
+      ? (imapReady ? `IMAP ${env.SAFE_OFFICE_IMAP_HOST}` : `IMAP ${env.SAFE_OFFICE_IMAP_HOST} 已配但缺 USER/PASS`)
+      : '未配置（收件箱/退信轮询不可用）',
   ));
 
+  // CalDAV 与本地目录是两条写入路径；配了 CalDAV 时本地目录可以只当副本。
   const calendarDir = env.SAFE_OFFICE_CALENDAR_DIR;
-  if (calendarDir) {
+  const caldavUrl = env.SAFE_OFFICE_CALDAV_URL;
+  if (caldavUrl) {
+    out.push(check('calendar', '日历写入', STATUS.OK, `CalDAV ${caldavUrl}（只校验配置，连通性看启动日志）`));
+  } else if (calendarDir) {
     out.push(check(
       'calendar', '日历落盘',
       dirWritable(calendarDir) ? STATUS.OK : STATUS.FAIL,
       dirWritable(calendarDir) ? calendarDir : `${calendarDir} 不可写`,
     ));
   } else {
-    out.push(check('calendar', '日历落盘', STATUS.WARN, '未配置（会议预约保持模拟）'));
+    out.push(check('calendar', '日历写入', STATUS.WARN, '未配置（会议预约保持模拟）'));
+  }
+
+  // 录音转写：SAFE_OFFICE_ASR=1 且腾讯云两个密钥齐全才会真实调用（asr.cjs）。
+  const asrOn = /^(1|true|yes|on)$/i.test(String(env.SAFE_OFFICE_ASR || ''));
+  const asrReady = !!(env.TENCENT_ASR_SECRET_ID && env.TENCENT_ASR_SECRET_KEY);
+  if (!asrOn) {
+    out.push(check('asr', '录音转写', STATUS.WARN, '未启用（转写保持模拟）'));
+  } else if (asrReady) {
+    out.push(check('asr', '录音转写', STATUS.OK, '腾讯云一句话识别'));
+  } else {
+    out.push(check('asr', '录音转写', STATUS.FAIL, 'SAFE_OFFICE_ASR=1 但缺少 TENCENT_ASR_SECRET_ID/KEY'));
   }
 
   const printer = env.SAFE_OFFICE_PRINTER;
