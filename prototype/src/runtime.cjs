@@ -25,9 +25,34 @@ const { ConfirmationService, digest } = require('./confirmation.cjs');
 const { classifyModelFault, asModelFault } = require('./faults.cjs');
 const { verifyAgentManifest } = require('./agents.cjs');
 
+// ---------- 注入接缝的契约（strict：调用方传错形状时在这里报错） ----------
+/**
+ * @typedef {object} RuntimeAsrLike
+ * @property {(filePath: string) => Promise<{ text: string, requestId?: string | null, engine?: string }>} transcribeFile
+ */
+/**
+ * @typedef {object} RuntimeCalendarWriter
+ * @property {(input: any) => Promise<any>} write
+ */
+/**
+ * @typedef {object} RuntimeOptions
+ * @property {any} [policy]
+ * @property {any} [audit]
+ * @property {any} [risk]
+ * @property {any} [planner]
+ * @property {any} [perf]
+ * @property {any} [toolRegistry]
+ * @property {any} [toolExecutors]
+ * @property {string[]} [disabledLayers]
+ * @property {((input: any) => Promise<any>) | null} [calendarWriter]
+ * @property {Map<string, any> | null} [audioStore]
+ * @property {RuntimeAsrLike | null} [asr]
+ * @property {((params: { step: any, operation: any, challenge: any, ctx: any }) => Promise<{ approved: boolean, method?: string, proof?: any }>) | null} [humanConfirm]
+ */
+
 class AgentRuntime {
   // disabledLayers：仅评测消融用（如 ['gate2','gate4']）。默认空集合，行为与之前完全一致。
-  /** @param {any} options */
+  /** @param {RuntimeOptions} options */
   constructor({
     policy, audit, risk, planner, perf, toolRegistry = null, toolExecutors = null,
     disabledLayers = [], calendarWriter = null,

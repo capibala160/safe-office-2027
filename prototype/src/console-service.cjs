@@ -101,6 +101,94 @@ function hashAuditEntries(/** @type {any} */ entries) {
   return ok;
 }
 
+// ---------- 注入接缝的契约（strict：调用方传错形状时在这里报错） ----------
+/**
+ * @typedef {object} MailerLike
+ * @property {(input: { operation: any, idempotencyKey?: string }) => Promise<any>} send
+ * @property {() => any[]} [list]
+ * @property {(name: string) => any} [getAccount]
+ * @property {any} [resolveIdentity]
+ * @property {any} [accounts]
+ * @property {string} [defaultName]
+ * @property {string} [behavior]
+ * @property {string} [messageId]
+ */
+/**
+ * @typedef {object} LlmLike
+ * @property {(command: string, blocks?: any[], meta?: any) => Promise<any[]>} plan
+ * @property {(command: string, blocks?: any[]) => Promise<string>} generate
+ */
+/**
+ * @typedef {object} NearfieldTransportLike
+ * @property {(frame: Buffer) => Promise<Buffer | null>} send
+ * @property {(() => any) | undefined} [close]
+ */
+/**
+ * @typedef {(() => Promise<NearfieldTransportLike>) & { close?: () => Promise<void> }} TransportFactory
+ */
+/**
+ * @typedef {object} ActuatorLike
+ * @property {(input: { device?: string, op?: string }) => Promise<any>} actuate
+ */
+/**
+ * @typedef {object} AsrLike
+ * @property {(filePath: string) => Promise<{ text: string, requestId?: string | null, engine?: string }>} transcribeFile
+ */
+/**
+ * `ConsoleService` 的依赖注入袋。核心接缝（mailer / llm / 确认传输 / 设备执行 / ASR）
+ * 有明确契约；其余为路径、开关、配额等标量配置，保持宽松类型。
+ * @typedef {object} ConsoleOptions
+ * @property {() => number} [now]
+ * @property {MailerLike} [mailer]
+ * @property {Buffer} [nearfieldKey]
+ * @property {string} [deviceId]
+ * @property {Buffer | null} [deviceIdBytes]
+ * @property {string} [deviceLabel]
+ * @property {TransportFactory | null} [nearfieldTransportFactory]
+ * @property {boolean} [gate4Nearfield]
+ * @property {number} [ttlSec]
+ * @property {number} [operationTtlMs]
+ * @property {number} [riskThreshold]
+ * @property {number} [autoSafeQuota]
+ * @property {number} [maxQueuedCommands]
+ * @property {number} [maxLiveRuns]
+ * @property {string[]} [autoSafeDomains]
+ * @property {any} [toolRegistry]
+ * @property {any} [toolExecutors]
+ * @property {boolean | null} [allowRemoteMcp]
+ * @property {string | null} [mcpConfigFile]
+ * @property {any} [bouncePoller]
+ * @property {any} [inboxReader]
+ * @property {any} [autoReplyPolicy]
+ * @property {string | null} [pairingCode]
+ * @property {LlmLike | null} [llm]
+ * @property {string} [storeFile]
+ * @property {string | null} [auditFile]
+ * @property {string | null} [auditCheckpointFile]
+ * @property {string | null} [auditTenantCheckpointFile]
+ * @property {string | null} [auditArchiveDir]
+ * @property {string | null} [auditExternalDir]
+ * @property {number} [auditRetentionDays]
+ * @property {number} [auditArchiveKeep]
+ * @property {number} [auditExportIntervalMs]
+ * @property {number} [auditExportKeep]
+ * @property {string | Buffer | null} [auditKey]
+ * @property {string | null} [auditPrivateKeyPem]
+ * @property {string | null} [auditPublicKeyPem]
+ * @property {string | null} [auditPrivateKeyFile]
+ * @property {string | null} [auditPublicKeyFile]
+ * @property {any} [documentsStore]
+ * @property {any} [blobStore]
+ * @property {string | null} [printer]
+ * @property {(input: any) => Promise<any>} [printAdapter]
+ * @property {string | null} [printPdfDir]
+ * @property {string | null} [calendarDir]
+ * @property {string | Buffer | null} [blobKey]
+ * @property {AsrLike | null} [asr]
+ * @property {string} [audioDir]
+ * @property {ActuatorLike | null} [actuator]
+ */
+
 class ConsoleService {
   // 工作区字段在 _initWorkspace() 中创建（TS 不分析跨方法赋值，显式声明为 any）
   /** @type {any} */ policy;
@@ -149,11 +237,16 @@ class ConsoleService {
   /** @type {any} */ _trustedTenantCheckpoints;
   /** @type {any} */ _tenantCheckpointError;
   /** @type {any} */ _tenantChainState;
+  // 审计路径在构造期归一化（null 表示未配置）；内部使用前都有 !this.auditFile 守卫，
+  // 这里按 any 处理路径拼接，避免把「配置可空」误当成「使用点可空」。
+  /** @type {any} */ auditFile;
+  /** @type {any} */ auditCheckpointFile;
+  /** @type {any} */ auditTenantCheckpointFile;
 
   /**
-   * 依赖注入入口：各模块按配置组合（Fake/SMTP 邮件、虚拟/真板确认、Mock/HTTP 模型等），
-   * 类型上按可替换实现处理（`any`），具体契约由各模块自身与调用点测试保证。
-   * @param {any} [options]
+   * 依赖注入入口：核心接缝（mailer / llm / 确认传输 / 设备执行 / ASR）有明确契约，
+   * 其余为路径、开关、配额等标量配置；具体实现由各模块自身与调用点测试保证。
+   * @param {ConsoleOptions} [options]
    */
   constructor({
     now = () => Date.now(),
