@@ -154,6 +154,56 @@ test('执行器：首次打开被占用 → 短暂重试后成功', async () => 
   assert.equal(calls, 2, '占用后应重试一次');
 });
 
+test('执行器：命令已写出后报 busy → 不重开串口、不重发（防重复执行）', async () => {
+  const key = Buffer.alloc(32, 21);
+  let opens = 0;
+  let writes = 0;
+  const actuator = createSerialActuator({
+    portPath: 'COM-TEST',
+    key,
+    openSerial: () => {
+      opens += 1;
+      const port = new EventEmitter();
+      port.write = () => {
+        writes += 1;
+        setImmediate(() => port.emit('error', new Error('Error: Device busy')));
+      };
+      port.close = (cb) => { if (cb) cb(); };
+      setImmediate(() => port.emit('open'));
+      return port;
+    },
+  });
+  await assert.rejects(actuator.actuate({ device: '门锁', op: 'unlock' }), /busy/);
+  assert.equal(opens, 1, '命令写出后失败不得重新打开串口重试');
+  assert.equal(writes, 1, '同一次操作只允许写出 1 条执行帧');
+});
+
+test('执行器：异常长度帧头不阻塞后续有效 ACK', async () => {
+  const key = Buffer.alloc(32, 22);
+  const actuator = createSerialActuator({
+    portPath: 'COM-TEST',
+    key,
+    timeoutMs: 500,
+    openSerial: () => {
+      const port = new EventEmitter();
+      port.write = (buf) => {
+        const { nonce } = decodeFrame(buf, key);
+        const ack = ackFrame({ nonce, status: 0, pin: 13, level: 1 }, key);
+        // 长度字段异常（0x7fff / 0）的假帧头 + 紧跟有效 ACK
+        const badLarge = Buffer.from([0x53, 0x46, 0x43, 0x31, 1, 0x22, 0, 0, 0xff, 0x7f]);
+        const badSmall = Buffer.from([0x53, 0x46, 0x43, 0x31, 1, 0x22, 0, 0, 0x00, 0x00]);
+        setImmediate(() => port.emit('data', Buffer.concat([badLarge, badSmall, ack])));
+      };
+      port.close = (cb) => { if (cb) cb(); };
+      setImmediate(() => port.emit('open'));
+      return port;
+    },
+  });
+  const ack = await actuator.actuate({ device: '门锁', op: 'unlock' });
+  assert.equal(ack.status, 0);
+  assert.equal(ack.level, 1);
+});
+
 test('映射：relayPin=12 时 unlock/lock 走继电器，未配置仍走 IO13 LED', () => {
   assert.deepEqual(mapDeviceOp('门锁', 'unlock', 12), { pin: 12, level: 1 });
   assert.deepEqual(mapDeviceOp('门锁', 'lock', 12), { pin: 12, level: 0 });

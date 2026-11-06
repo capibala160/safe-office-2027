@@ -57,11 +57,30 @@ function mapDeviceOp(device, op, relayPin = null) {
   return null;
 }
 
-/** @param {Buffer} buf @param {number} i @returns {boolean} */
-function isSfc1Header(buf, i) {
-  return buf[i] === 0x53 && buf[i + 1] === 0x46 && buf[i + 2] === 0x43 && buf[i + 3] === 0x31
-    && buf[i + 4] === 1 && buf[i + 6] === 0 && buf[i + 7] === 0
-    && (buf[i + 5] === 0x21 || buf[i + 5] === 0x22 || buf[i + 5] === 1 || buf[i + 5] === 2);
+const SFC1_HEADER_BYTES = 10;
+const SFC1_HMAC_BYTES = 32;
+// 各帧型的 payload 长度（ws63-protocol 编码器只会产出这些形状）。
+// 校验长度字段有两个作用：把假帧头当噪声跳过；异常长度不会把后面的有效帧「堵死」。
+const SFC1_PAYLOAD_RANGE = new Map([
+  [1, [66, 162]], // challenge：66 + summary（≤96）
+  [2, [37, 37]], // decision
+  [0x21, [18, 18]], // actuator
+  [0x22, [19, 19]], // actuator ack
+]);
+
+/**
+ * 合法帧头返回整帧字节数；不是帧头或长度字段异常返回 0（调用方继续向后找帧头）。
+ * @param {Buffer} buf @param {number} i @returns {number}
+ */
+function sfc1FrameLength(buf, i) {
+  if (i + SFC1_HEADER_BYTES > buf.length) return 0;
+  if (buf[i] !== 0x53 || buf[i + 1] !== 0x46 || buf[i + 2] !== 0x43 || buf[i + 3] !== 0x31) return 0;
+  if (buf[i + 4] !== 1 || buf[i + 6] !== 0 || buf[i + 7] !== 0) return 0;
+  const range = SFC1_PAYLOAD_RANGE.get(buf[i + 5]);
+  if (!range) return 0;
+  const payload = buf.readUInt16LE(i + 8) - SFC1_HMAC_BYTES;
+  if (payload < range[0] || payload > range[1]) return 0;
+  return SFC1_HEADER_BYTES + SFC1_HMAC_BYTES + payload;
 }
 
 /**
@@ -119,11 +138,15 @@ function createSerialActuator({
       }
       const nonce = crypto.randomBytes(16);
       let done = false;
+      // 命令帧是否已经交给串口。只有「确认没写出」的失败才允许重试，
+      // 否则板端可能已经执行过一次，重发会变成重复动作。
+      let sent = false;
       let buffer = Buffer.alloc(0);
       /** @param {any} [err] @param {any} [result] */
       const finish = (err, result) => {
         if (done) return;
         done = true;
+        if (err && typeof err === 'object') err.commandSent = sent;
         try { if (typeof port.close === 'function') port.close(() => {}); } catch { /* ignore */ }
         if (err) reject(err); else resolve(result);
       };
@@ -133,15 +156,18 @@ function createSerialActuator({
       port.on?.('error', (/** @type {any} */ err) => finish(err));
       port.on?.('open', () => {
         try {
+          // 先置位再写：即使 write 同步抛错也按「可能已写出」处理，宁可失败也不重发
+          sent = true;
           port.write(encodeActuator({ nonce, pin, level }, /** @type {Buffer} */ (key)));
         } catch (err) { finish(err); }
       });
       port.on?.('data', (/** @type {Buffer} */ chunk) => {
         buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
-        for (let i = 0; i + 10 <= buffer.length; i++) {
-          if (!isSfc1Header(buffer, i)) continue;
-          const total = 10 + buffer.readUInt16LE(i + 8);
-          if (buffer.length < i + total) break;
+        for (let i = 0; i + SFC1_HEADER_BYTES <= buffer.length; i++) {
+          // 长度字段异常的「帧头」直接跳过（不能 break，否则后面的有效 ACK 会被堵死）
+          const total = sfc1FrameLength(buffer, i);
+          if (!total) continue;
+          if (buffer.length < i + total) break; // 合法帧但还没收全：等下一块数据
           const frame = buffer.subarray(i, i + total);
           try {
             const decoded = decodeFrame(frame, /** @type {Buffer} */ (key));
@@ -190,7 +216,10 @@ function createSerialActuator({
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const busy = /Access denied|EBUSY|Resource busy|busy/i.test(message);
-        if (attempt >= 3 || !busy) throw err;
+        // 命令已经写出（或可能写出）时绝不重试：板端可能已执行，重发等于重复动作
+        const alreadySent = Boolean(err && typeof err === 'object'
+          && /** @type {{ commandSent?: boolean }} */ (err).commandSent);
+        if (attempt >= 3 || !busy || alreadySent) throw err;
         await new Promise((resolve) => setTimeout(resolve, 120));
       }
     }
