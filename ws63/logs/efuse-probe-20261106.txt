@@ -1,0 +1,15 @@
+
+> safe-office-prototype@0.52.3 efuse:probe
+> node scripts/efuse-probe.cjs --port COM11 --seconds 8
+
+=== EFUSE PROBE (READ-ONLY) ===
+user_area: abs=222 len=16
+user_read rc=0
+user_hex: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+direct_read rc=0
+direct_hex: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+match=yes
+ones=0 all_zero=yes
+=== END EFUSE PROBE ===
+[efuse-probe] 完整探测块已收到（271 字节）
+[efuse-probe] all_zero=true ones=0 match=true
