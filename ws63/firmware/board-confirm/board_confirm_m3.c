@@ -34,6 +34,7 @@
 #include "sfc1_key_store.h"
 #include "sfc1_provision.h"
 #include "efuse_probe.h"
+#include "efuse_kek.h"
 
 osThreadId_t task1_ID;
 
@@ -123,6 +124,20 @@ typedef struct {
 } pending_t;
 
 static pending_t g_pending;
+
+/* ---------------- eFuse KEK 一次性写入（docs/60 阶段 B） ----------------
+ * 命令只设置待确认状态，真正的写入在按键长按释放后执行；
+ * 串口命令本身不能触发写 eFuse。 */
+#define KEK_CMD_NONE  0
+#define KEK_CMD_BURN  1
+#define KEK_CMD_ADOPT 2
+#define KEK_HOLD_MS   2000u
+#define KEK_WINDOW_MS 30000u
+
+static int g_kek_cmd;
+static uint64_t g_kek_cmd_deadline;
+static uint8_t g_kek_burn_key[EFUSE_KEK_LEN];
+static uint8_t g_kek_burn_fp[4];
 
 /* 已消费 nonce 的环形窗口（重放拒绝） */
 static uint8_t g_used[PROTO_REPLAY_WINDOW][PROTO_NONCE_LEN];
@@ -217,6 +232,194 @@ static void show_pairing(const char *code)
     ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_0, "WS63 PROVISION", TEXT_SIZE_16);
     ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_1, "PAIR CODE", TEXT_SIZE_8);
     ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_2, (char *)code, TEXT_SIZE_16);
+}
+
+/* ---------------- eFuse KEK 命令（docs/60 阶段 B） ---------------- */
+static const char *kek_state_name(int state)
+{
+    switch (state) {
+        case EFUSE_KEK_STATE_BURNING: return "BURNING";
+        case EFUSE_KEK_STATE_OK:      return "OK";
+        case EFUSE_KEK_STATE_FAILED:  return "FAILED";
+        default:                      return "NONE";
+    }
+}
+
+static void kek_print_fp(const uint8_t fp[4])
+{
+    printf("%02x%02x%02x%02x", (unsigned)fp[0], (unsigned)fp[1],
+           (unsigned)fp[2], (unsigned)fp[3]);
+}
+
+static void kek_cmd_cancel(const char *why)
+{
+    (void)memset_s(g_kek_burn_key, sizeof(g_kek_burn_key), 0, sizeof(g_kek_burn_key));
+    (void)memset_s(g_kek_burn_fp, sizeof(g_kek_burn_fp), 0, sizeof(g_kek_burn_fp));
+    g_kek_cmd = KEK_CMD_NONE;
+    printf("SFC1 KEK: command cancelled (%s)\r\n", why);
+    show_result("KEK CANCEL");
+}
+
+/* 只设置待确认命令；真正的 eFuse 写入在长按 KEY2 释放后执行 */
+static void kek_begin(int cmd)
+{
+    uint8_t kek[EFUSE_KEK_LEN] = {0};
+    int state;
+    int blank;
+    int rc;
+
+    if (g_kek_cmd != KEK_CMD_NONE) {
+        printf("SFC1 KEK: command already armed, hold KEY2 or wait for timeout\r\n");
+        return;
+    }
+    if (g_pending.active) {
+        printf("SFC1 KEK: pending confirmation, finish it first\r\n");
+        return;
+    }
+
+    state = efuse_kek_state_get();
+    blank = efuse_kek_blank();
+    if (blank < 0) {
+        printf("SFC1 KEK: eFuse read failed\r\n");
+        return;
+    }
+
+    if (cmd == KEK_CMD_BURN) {
+        if (!g_provisioned) {
+            printf("SFC1 KEK: provision the device first\r\n");
+            return;
+        }
+        if (state == EFUSE_KEK_STATE_OK) {
+            printf("SFC1 KEK: already enabled (state=OK)\r\n");
+            return;
+        }
+        if (blank != 1) {
+            printf("SFC1 KEK: eFuse not blank; use 'kek-adopt' only if you trust the burned value\r\n");
+            return;
+        }
+        if (efuse_kek_generate(g_kek_burn_key) != 0 ||
+            efuse_kek_fingerprint(g_kek_burn_key, g_kek_burn_fp) != 0) {
+            printf("SFC1 KEK: TRNG/fingerprint failed\r\n");
+            (void)memset_s(g_kek_burn_key, sizeof(g_kek_burn_key), 0, sizeof(g_kek_burn_key));
+            return;
+        }
+    } else {
+        if (state == EFUSE_KEK_STATE_OK) {
+            printf("SFC1 KEK: already enabled (state=OK)\r\n");
+            return;
+        }
+        if (blank == 1) {
+            printf("SFC1 KEK: eFuse is blank, nothing to adopt\r\n");
+            return;
+        }
+        rc = efuse_kek_read(kek);
+        if (rc != 1) {
+            printf("SFC1 KEK: eFuse read failed\r\n");
+            return;
+        }
+        if (efuse_kek_fingerprint(kek, g_kek_burn_fp) != 0) {
+            (void)memset_s(kek, sizeof(kek), 0, sizeof(kek));
+            printf("SFC1 KEK: fingerprint failed\r\n");
+            return;
+        }
+        (void)memset_s(kek, sizeof(kek), 0, sizeof(kek));
+    }
+
+    g_kek_cmd = cmd;
+    g_kek_cmd_deadline = now_ms() + KEK_WINDOW_MS;
+    printf("SFC1 KEK: %s armed, fingerprint=", cmd == KEK_CMD_BURN ? "BURN" : "ADOPT");
+    kek_print_fp(g_kek_burn_fp);
+    printf("\r\nSFC1 KEK: hold KEY2 >=%ums within %us; eFuse write is IRREVERSIBLE\r\n",
+           (unsigned)KEK_HOLD_MS, (unsigned)(KEK_WINDOW_MS / 1000u));
+    show_result(cmd == KEK_CMD_BURN ? "HOLD KEY2" : "ADOPT KEY2");
+}
+
+static void kek_burn_run(void)
+{
+    uint8_t readback[EFUSE_KEK_LEN] = {0};
+    sfc1_key_record_t rec;
+    int rc;
+
+    if (efuse_kek_state_set(EFUSE_KEK_STATE_BURNING) != 0) {
+        printf("SFC1 KEK BURN: state write failed, no eFuse write\r\n");
+        show_result("KEK FAIL");
+        goto out;
+    }
+    rc = efuse_kek_burn(g_kek_burn_key, readback);
+    if (rc != 0) {
+        printf("SFC1 KEK BURN: FAIL rc=%d (eFuse may be partially written)\r\n", rc);
+        (void)efuse_kek_state_set(EFUSE_KEK_STATE_FAILED);
+        show_result("KEK FAIL");
+        goto out;
+    }
+    if (efuse_kek_state_set(EFUSE_KEK_STATE_OK) != 0) {
+        printf("SFC1 KEK BURN: readback OK but state write failed; keeping v1\r\n");
+        (void)efuse_kek_state_set(EFUSE_KEK_STATE_FAILED);
+        show_result("KEK FAIL");
+        goto out;
+    }
+
+    printf("SFC1 KEK BURN: eFuse readback OK, fingerprint=");
+    kek_print_fp(g_kek_burn_fp);
+    printf("\r\n");
+
+    if (g_provisioned) {
+        (void)memset_s(&rec, sizeof(rec), 0, sizeof(rec));
+        (void)memcpy_s(rec.key, sizeof(rec.key), g_key, SFC1_KEY_LEN);
+        rec.provisioned_at = (uint32_t)(now_ms() / 1000ULL);
+        if (sfc1_key_store_save(&rec, DEVICE_LABEL) == 0) {
+            printf("SFC1 KEK: current key rewrapped as v2\r\n");
+        } else {
+            printf("SFC1 KEK: v2 save failed; v1 kept, retry on next boot\r\n");
+        }
+        (void)memset_s(&rec, sizeof(rec), 0, sizeof(rec));
+    }
+    printf("SFC1 KEK BURN: OK\r\n");
+    show_result("KEK OK");
+
+out:
+    (void)memset_s(readback, sizeof(readback), 0, sizeof(readback));
+    (void)memset_s(g_kek_burn_key, sizeof(g_kek_burn_key), 0, sizeof(g_kek_burn_key));
+    (void)memset_s(g_kek_burn_fp, sizeof(g_kek_burn_fp), 0, sizeof(g_kek_burn_fp));
+}
+
+static void kek_adopt_run(void)
+{
+    uint8_t kek[EFUSE_KEK_LEN] = {0};
+    sfc1_key_record_t rec;
+    uint8_t fp[4] = {0};
+
+    if (efuse_kek_read(kek) != 1 || efuse_kek_fingerprint(kek, fp) != 0) {
+        printf("SFC1 KEK ADOPT: read/fingerprint failed\r\n");
+        show_result("KEK FAIL");
+        goto out;
+    }
+    if (efuse_kek_state_set(EFUSE_KEK_STATE_OK) != 0) {
+        printf("SFC1 KEK ADOPT: state write failed\r\n");
+        show_result("KEK FAIL");
+        goto out;
+    }
+    printf("SFC1 KEK ADOPT: OK fingerprint=");
+    kek_print_fp(fp);
+    printf("\r\n");
+
+    if (g_provisioned) {
+        (void)memset_s(&rec, sizeof(rec), 0, sizeof(rec));
+        (void)memcpy_s(rec.key, sizeof(rec.key), g_key, SFC1_KEY_LEN);
+        rec.provisioned_at = (uint32_t)(now_ms() / 1000ULL);
+        if (sfc1_key_store_save(&rec, DEVICE_LABEL) == 0) {
+            printf("SFC1 KEK: current key rewrapped as v2\r\n");
+        } else {
+            printf("SFC1 KEK: v2 save failed; v1 kept, retry on next boot\r\n");
+        }
+        (void)memset_s(&rec, sizeof(rec), 0, sizeof(rec));
+    }
+    show_result("KEK ADOPTED");
+
+out:
+    (void)memset_s(kek, sizeof(kek), 0, sizeof(kek));
+    (void)memset_s(fp, sizeof(fp), 0, sizeof(fp));
+    (void)memset_s(g_kek_burn_fp, sizeof(g_kek_burn_fp), 0, sizeof(g_kek_burn_fp));
 }
 
 static void show_challenge(const pending_t *p)
@@ -494,16 +697,42 @@ static void feed_byte(uint8_t b)
 
 /* ---------------- 串口 CLI ----------------
  * 只在没有正在组装的 SFC1 帧时解释可打印 ASCII 行，避免把二进制载荷当命令。
- * 当前只有只读命令，不提供任何写 eFuse 的入口。 */
+ * 写 eFuse 只能通过 kek-burn/kek-adopt，且必须再长按 KEY2 确认。 */
 static void cli_handle_line(void)
 {
     g_cli_line[g_cli_len] = '\0';
     if (strcmp(g_cli_line, "efuse") == 0) {
         efuse_probe_report();
+    } else if (strcmp(g_cli_line, "kek-status") == 0) {
+        uint8_t kek[EFUSE_KEK_LEN] = {0};
+        uint8_t fp[4] = {0};
+        int state = efuse_kek_state_get();
+        int blank = efuse_kek_blank();
+
+        printf("SFC1 KEK: state=%s blank=%s\r\n", kek_state_name(state),
+               blank < 0 ? "read-error" : (blank == 1 ? "yes" : "no"));
+        if (blank == 0 && efuse_kek_read(kek) == 1 && efuse_kek_fingerprint(kek, fp) == 0) {
+            printf("SFC1 KEK: fingerprint=");
+            kek_print_fp(fp);
+            printf("\r\n");
+        }
+        (void)memset_s(kek, sizeof(kek), 0, sizeof(kek));
+        (void)memset_s(fp, sizeof(fp), 0, sizeof(fp));
+    } else if (strcmp(g_cli_line, "kek-selftest") == 0) {
+        printf("SFC1 KEK SELFTEST: %s\r\n",
+               sfc1_key_store_selftest(DEVICE_LABEL) == 0 ? "PASS" : "FAIL");
+    } else if (strcmp(g_cli_line, "kek-burn") == 0) {
+        kek_begin(KEK_CMD_BURN);
+    } else if (strcmp(g_cli_line, "kek-adopt") == 0) {
+        kek_begin(KEK_CMD_ADOPT);
     } else if (strcmp(g_cli_line, "help") == 0) {
-        printf("CLI: efuse = read-only eFuse user-area probe\r\n");
+        printf("CLI: efuse = read-only eFuse probe\r\n");
+        printf("CLI: kek-status = state/blank/fingerprint (read-only)\r\n");
+        printf("CLI: kek-selftest = v2 record self-test (no eFuse write)\r\n");
+        printf("CLI: kek-burn = burn new KEK (requires KEY2 hold >=2000ms)\r\n");
+        printf("CLI: kek-adopt = adopt existing eFuse KEK (requires KEY2 hold >=2000ms)\r\n");
     } else {
-        printf("CLI: unknown '%s' (try 'efuse')\r\n", g_cli_line);
+        printf("CLI: unknown '%s' (try 'help')\r\n", g_cli_line);
     }
     g_cli_len = 0;
 }
@@ -616,7 +845,7 @@ static void key_task(const char *arg)
     printf("SFC1 relay: IO%u idle LOW\r\n", (unsigned)PIN_RELAY);
     uart_ret = sfc1_uart_init();
     printf("M3 SFC1 ready: uart=%d device=%s\r\n", (int)uart_ret, DEVICE_LABEL);
-    printf("CLI: 'efuse' = read-only eFuse probe\r\n");
+    printf("CLI: 'efuse' read-only; 'kek-status'/'kek-selftest' safe; 'kek-burn'/'kek-adopt' need KEY2 hold\r\n");
 
     /* 未配置：显示一次性配网码（此时 OLED 已初始化）；已配置则显示待机页 */
     if (!g_provisioned && g_prov.active) {
@@ -654,6 +883,9 @@ static void key_task(const char *arg)
             printf("SFC1 pending expired\r\n");
             show_result("EXPIRED");
         }
+        if (g_kek_cmd != KEK_CMD_NONE && now >= g_kek_cmd_deadline) {
+            kek_cmd_cancel("timeout");
+        }
 
         {
             int pin = read_active_pin();
@@ -672,7 +904,23 @@ static void key_task(const char *arg)
                 } else {
                     uint32_t held = (uint32_t)(now - press_start_ms);
                     pressed = 0;
-                    if (g_pending.active) {
+                    if (g_kek_cmd != KEK_CMD_NONE) {
+                        int cmd = g_kek_cmd;
+                        if (held >= KEK_HOLD_MS) {
+                            g_kek_cmd = KEK_CMD_NONE;
+                            printf("KEY HOLD %ums on IO%d -> KEK %s\r\n", held, pressed_pin,
+                                   cmd == KEK_CMD_BURN ? "BURN" : "ADOPT");
+                            if (cmd == KEK_CMD_BURN) {
+                                kek_burn_run();
+                            } else {
+                                kek_adopt_run();
+                            }
+                        } else {
+                            printf("SFC1 KEK: hold >=%ums (got %ums), command still armed\r\n",
+                                   (unsigned)KEK_HOLD_MS, held);
+                            show_result(cmd == KEK_CMD_BURN ? "HOLD KEY2" : "ADOPT KEY2");
+                        }
+                    } else if (g_pending.active) {
                         if (held >= LONG_PRESS_MS) {
                             printf("KEY LONG %ums on IO%d -> CANCEL\r\n", held, pressed_pin);
                             send_decision(0);

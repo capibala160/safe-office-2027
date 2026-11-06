@@ -35,6 +35,8 @@ const FILES = [
   { from: path.join(HERE, 'board-confirm/sfc1_provision.h'), to: 'sfc1_provision.h' },
   { from: path.join(HERE, 'board-confirm/efuse_probe.c'), to: 'efuse_probe.c' },
   { from: path.join(HERE, 'board-confirm/efuse_probe.h'), to: 'efuse_probe.h' },
+  { from: path.join(HERE, 'board-confirm/efuse_kek.c'), to: 'efuse_kek.c' },
+  { from: path.join(HERE, 'board-confirm/efuse_kek.h'), to: 'efuse_kek.h' },
   { from: path.join(REPO_WS63, 'protocol.c'), to: 'protocol.c' },
   { from: path.join(REPO_WS63, 'protocol.h'), to: 'protocol.h' },
 ];

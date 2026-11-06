@@ -1,0 +1,87 @@
+# eFuse KEK 一次性写入与回读记录（2026-11-06）
+
+环境：FS-Hi3863DB_V2 / COM11 / 115200
+首次 KEK 固件：ws63-liteos-app_all.fwpkg 1,502,120 B（含 AES-GCM v2 + kek-burn）
+最终固件：1,502,312 B（含 eFuse 脱敏 + v1 擦除失败日志）
+SHA-256：f435d30316db404b7bc6a776092330d23d523395d47eb5e27bc65566ea86786d
+
+## 1. 写入前（已有 v1 一机一钥，eFuse 全 0）
+
+$ node scripts/provision-device.cjs --port COM11 --code da07befe --label ws63-A
+{"ok":true,"deviceId":"1d889565919dce48","label":"ws63-A","file":"data/devices.json"}
+
+$ node scripts/serial-cli.cjs --port COM11 --cmd "kek-status" --seconds 4
+SFC1 KEK: state=NONE blank=yes
+
+$ node scripts/serial-cli.cjs --port COM11 --cmd "kek-selftest" --seconds 6
+SFC1 KEK SELFTEST: PASS
+
+## 2. 写入（命令 + KEY2 长按 3000ms）
+
+$ node scripts/serial-cli.cjs --port COM11 --cmd "kek-burn" --seconds 40 --watch
+SFC1 KEK: BURN armed, fingerprint=5ed5a8d3
+SFC1 KEK: hold KEY2 >=2000ms within 30s; eFuse write is IRREVERSIBLE
+KEY HOLD 3000ms on IO3 -> KEK BURN
+SFC1 KEK BURN: eFuse readback OK, fingerprint=5ed5a8d3
+SFC1 KEK: current key rewrapped as v2
+SFC1 KEK BURN: OK
+
+## 3. 写入后（v2 加载 + 真板确认）
+
+$ node scripts/serial-cli.cjs --port COM11 --cmd "kek-status" --seconds 4
+SFC1 KEK: state=OK blank=no
+SFC1 KEK: fingerprint=5ed5a8d3
+
+启动日志（复位后）：
+SFC1 KEY: provisioned v2/kek (at 62)
+SFC1 KEY: provisioned (at 62)
+SFC1 NV: restored 0 nonces
+
+$ node serial-confirm.cjs --port COM11 --device ws63-A --to partner@example.com --subject "KEK v2 verify" ...
+{"ok":true,"decision":1,"device":"ws63-A","operationId":"c6e71d78-...","confirmationId":"ws63-efe1ccbdddab221e-0b7fe7aa9241b55b7b8d4d81e5735886"}
+
+## 4. 整包重烧后的恢复（NV 清空，eFuse KEK 保留）
+
+$ node scripts/serial-cli.cjs --port COM11 --cmd "kek-status" --seconds 4
+SFC1 KEK: state=NONE blank=no
+SFC1 KEK: fingerprint=5ed5a8d3
+
+$ node scripts/serial-cli.cjs --port COM11 --cmd "efuse" --seconds 5
+user_hex: <redacted> fingerprint=5ed5a8d3
+direct_hex: <redacted> fingerprint=5ed5a8d3
+match=yes
+ones=59 all_zero=no
+
+$ node scripts/serial-cli.cjs --port COM11 --cmd "kek-adopt" --seconds 35 --watch
+SFC1 KEK: ADOPT armed, fingerprint=5ed5a8d3
+KEY HOLD 3900ms on IO3 -> KEK ADOPT
+SFC1 KEK ADOPT: OK fingerprint=5ed5a8d3
+
+重新配网（最终固件配对码 ec812f0e）后启动：
+SFC1 KEY: provisioned v2/kek (at 38)
+SFC1 KEY: provisioned (at 38)
+
+最终确认：
+{"ok":true,"decision":1,"device":"ws63-A","operationId":"fb20675b-...","confirmationId":"ws63-560ec6b5abe9a269-90992eba739139a75a22796e726ff727"}
+
+重放负向：
+REPLAY：过期后重发同一帧被拒 -> rejected: REPLAY
+
+最终固件 efuse 复验：
+user_hex: <redacted> fingerprint=5ed5a8d3
+direct_hex: <redacted> fingerprint=5ed5a8d3
+match=yes
+ones=59 all_zero=no
+
+v2 钥匙下重启（重放测试消费 nonce 后）：
+SFC1 KEY: provisioned v2/kek (at 38)
+SFC1 NV: restored 3 nonces
+
+踩坑：抓码后板子若再次复位，旧配网码会 `CHALLENGE MAC 校验失败`；
+必须用最后一次启动打印的码（本轮曾连续两次失败）。
+
+## 5. 回归
+
+npm test：599 项（597 通过 + 2 跳过，0 失败）
+npm run e2e：11/11 通过
+npm run lint：OK
