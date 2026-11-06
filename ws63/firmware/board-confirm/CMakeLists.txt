@@ -6,6 +6,7 @@ set(SOURCES_LIST
     ${CMAKE_CURRENT_SOURCE_DIR}/sfc1_nv.c
     ${CMAKE_CURRENT_SOURCE_DIR}/sfc1_key_store.c
     ${CMAKE_CURRENT_SOURCE_DIR}/sfc1_provision.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/efuse_probe.c
 )
 set(HEADER_LIST
     ${CMAKE_CURRENT_SOURCE_DIR}/hal_bsp_oled

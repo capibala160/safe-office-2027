@@ -35,6 +35,7 @@
     "bench:audit": "node bench/audit-checkpoints.cjs",
     "serial:confirm": "node serial-confirm.cjs",
     "serial:probe": "node scripts/serial-probe.cjs",
+    "efuse:probe": "node scripts/efuse-probe.cjs",
     "sfc1:neg": "node scripts/sfc1-negative.cjs",
     "console:serial": "node scripts/console-serial-check.cjs",
     "ws63:build": "node ../ws63/firmware/build-m3.cjs --build",

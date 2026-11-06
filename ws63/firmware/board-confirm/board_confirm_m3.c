@@ -33,6 +33,7 @@
 #include "sfc1_nv.h"
 #include "sfc1_key_store.h"
 #include "sfc1_provision.h"
+#include "efuse_probe.h"
 
 osThreadId_t task1_ID;
 
@@ -103,6 +104,11 @@ static int uart_ring_pop(uint8_t *out)
 static uint8_t g_frame[PROTO_CHALLENGE_MAX + 1u];
 static uint16_t g_frame_len;
 static uint16_t g_frame_need;
+static uint64_t g_last_rx_ms;
+
+/* ---------------- 串口 CLI（只读 eFuse 探测） ---------------- */
+static char g_cli_line[24];
+static uint8_t g_cli_len;
 
 /* ---------------- 待确认任务 ---------------- */
 typedef struct {
@@ -447,6 +453,8 @@ static void feed_byte(uint8_t b)
 {
     static const uint8_t MAGIC[4] = { 'S', 'F', 'C', '1' };
 
+    g_last_rx_ms = now_ms();
+
     if (g_frame_len < 4) {
         if (b == MAGIC[g_frame_len]) {
             g_frame[g_frame_len++] = b;
@@ -481,6 +489,41 @@ static void feed_byte(uint8_t b)
         handle_frame(g_frame, g_frame_len);
         g_frame_len = 0;
         g_frame_need = 0;
+    }
+}
+
+/* ---------------- 串口 CLI ----------------
+ * 只在没有正在组装的 SFC1 帧时解释可打印 ASCII 行，避免把二进制载荷当命令。
+ * 当前只有只读命令，不提供任何写 eFuse 的入口。 */
+static void cli_handle_line(void)
+{
+    g_cli_line[g_cli_len] = '\0';
+    if (strcmp(g_cli_line, "efuse") == 0) {
+        efuse_probe_report();
+    } else if (strcmp(g_cli_line, "help") == 0) {
+        printf("CLI: efuse = read-only eFuse user-area probe\r\n");
+    } else {
+        printf("CLI: unknown '%s' (try 'efuse')\r\n", g_cli_line);
+    }
+    g_cli_len = 0;
+}
+
+static void cli_feed(uint8_t b)
+{
+    if (b == '\r' || b == '\n') {
+        if (g_cli_len > 0) {
+            cli_handle_line();
+        }
+        return;
+    }
+    if (b < 0x20u || b > 0x7eu) {
+        g_cli_len = 0;
+        return;
+    }
+    if (g_cli_len + 1u < sizeof(g_cli_line)) {
+        g_cli_line[g_cli_len++] = (char)b;
+    } else {
+        g_cli_len = 0;
     }
 }
 
@@ -573,6 +616,7 @@ static void key_task(const char *arg)
     printf("SFC1 relay: IO%u idle LOW\r\n", (unsigned)PIN_RELAY);
     uart_ret = sfc1_uart_init();
     printf("M3 SFC1 ready: uart=%d device=%s\r\n", (int)uart_ret, DEVICE_LABEL);
+    printf("CLI: 'efuse' = read-only eFuse probe\r\n");
 
     /* 未配置：显示一次性配网码（此时 OLED 已初始化）；已配置则显示待机页 */
     if (!g_provisioned && g_prov.active) {
@@ -583,12 +627,27 @@ static void key_task(const char *arg)
 
     for (;;) {
         uint8_t b;
+        uint64_t now;
 
         while (uart_ring_pop(&b)) {
+            uint8_t before = g_frame_len;
             feed_byte(b);
+            if (before == 0) {
+                if (g_frame_len == 0) {
+                    cli_feed(b);
+                } else {
+                    g_cli_len = 0; /* 新帧开始，丢弃半行 CLI */
+                }
+            }
         }
 
-        uint64_t now = now_ms();
+        now = now_ms();
+        /* 半帧超时：避免残帧把 CLI 永久卡住（完整帧在 115200 下 <20ms） */
+        if (g_frame_len != 0 && (now - g_last_rx_ms) > 2000u) {
+            g_frame_len = 0;
+            g_frame_need = 0;
+            g_cli_len = 0;
+        }
         if (g_pending.active && now >= g_pending.deadline_ms) {
             mark_used(g_pending.nonce);
             g_pending.active = 0;
