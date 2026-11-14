@@ -140,8 +140,9 @@
 │   └── 13-工具注册表与MCP.md                 ← v0.13：可注册工具目录、MCP 骨架、默认拒绝、边界
 ├── ws63/                                    ← **当前编码主线**：双板确认协议核心（C，PC 可测）
 │   ├── protocol.h / protocol.c              ← CHALLENGE/DECISION 编解码 + MAC + nonce/过期/重放状态机
-│   ├── test_protocol.c                      ← PC 侧测试（gcc -Werror 全过）
-│   └── README.md                            ← 接入 fbb_ws63 / mbedTLS HMAC 步骤
+│   ├── link.h / link.c                      ← M2 双板心跳/超时/恢复状态机（传输无关）
+│   ├── test_protocol.c / test_link.c        ← PC 侧测试（gcc -Werror 全过）
+│   └── README.md                            ← 接入 fbb_ws63 / mbedTLS HMAC / SLE 步骤
 └── prototype/                               ← 核心机制原型 v0.13（Node 零依赖，平台无关）
     ├── server.cjs                           ← 办公套件控制台 HTTP 服务（node:http + 静态 + JSON API）
     ├── public/                              ← 控制台前端（原生 HTML/CSS/JS，无构建步骤）

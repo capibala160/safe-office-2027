@@ -35,6 +35,11 @@
 #include "sfc1_provision.h"
 #include "efuse_probe.h"
 #include "efuse_kek.h"
+#include "sfc1_build_config.h"
+#if SFC1_WITH_LINK
+#include "link.h"
+#include "sle_link.h"
+#endif
 
 osThreadId_t task1_ID;
 
@@ -110,6 +115,55 @@ static uint64_t g_last_rx_ms;
 /* ---------------- 串口 CLI（只读 eFuse 探测） ---------------- */
 static char g_cli_line[24];
 static uint8_t g_cli_len;
+
+#if SFC1_WITH_LINK
+/* ---------------- M2 SLE 链路（心跳/断线重连） ----------------
+ * SLE 回调在 BT 任务上下文，只做入队；解析/状态机/发送都在 key_task 里。 */
+#define SLE_RING_SIZE 512
+#define LINK_HEARTBEAT_MS 1000u
+#define LINK_TIMEOUT_MS 3500u
+
+static sfcl_link_t g_link;
+static sfcl_parser_t g_link_parser;
+static uint8_t g_sle_ring[SLE_RING_SIZE];
+static volatile uint32_t g_sle_head;
+static volatile uint32_t g_sle_tail;
+static volatile uint8_t g_sle_connected;
+
+static void sle_rx_push(const uint8_t *data, uint16_t len)
+{
+    uint16_t i;
+
+    if (data == NULL || len == 0) {
+        return;
+    }
+    for (i = 0; i < len; i++) {
+        uint32_t next = (g_sle_head + 1u) % SLE_RING_SIZE;
+        if (next == g_sle_tail) {
+            break; /* 满：丢新字节；心跳每 1s 重发，可在下一帧恢复 */
+        }
+        g_sle_ring[g_sle_head] = data[i];
+        g_sle_head = next;
+    }
+}
+
+static int sle_ring_pop(uint8_t *out)
+{
+    if (g_sle_tail == g_sle_head) {
+        return 0;
+    }
+    *out = g_sle_ring[g_sle_tail];
+    g_sle_tail = (g_sle_tail + 1u) % SLE_RING_SIZE;
+    return 1;
+}
+
+static void sle_state_changed(uint8_t connected)
+{
+    g_sle_connected = connected;
+}
+
+static void link_status_print(void);
+#endif
 
 /* ---------------- 待确认任务 ---------------- */
 typedef struct {
@@ -725,12 +779,19 @@ static void cli_handle_line(void)
         kek_begin(KEK_CMD_BURN);
     } else if (strcmp(g_cli_line, "kek-adopt") == 0) {
         kek_begin(KEK_CMD_ADOPT);
+#if SFC1_WITH_LINK
+    } else if (strcmp(g_cli_line, "link-status") == 0) {
+        link_status_print();
+#endif
     } else if (strcmp(g_cli_line, "help") == 0) {
         printf("CLI: efuse = read-only eFuse probe\r\n");
         printf("CLI: kek-status = state/blank/fingerprint (read-only)\r\n");
         printf("CLI: kek-selftest = v2 record self-test (no eFuse write)\r\n");
         printf("CLI: kek-burn = burn new KEK (requires KEY2 hold >=2000ms)\r\n");
         printf("CLI: kek-adopt = adopt existing eFuse KEK (requires KEY2 hold >=2000ms)\r\n");
+#if SFC1_WITH_LINK
+        printf("CLI: link-status = M2 SLE link state/counters\r\n");
+#endif
     } else {
         printf("CLI: unknown '%s' (try 'help')\r\n", g_cli_line);
     }
@@ -783,6 +844,106 @@ static int read_active_pin(void)
     }
     return -1;
 }
+
+#if SFC1_WITH_LINK
+static void link_status_print(void)
+{
+    printf("SFC1 LINK: status role=%s state=%s transport=%s peer=%s tx=%u rx=%u bad=%u gap=%u stale=%u "
+           "up=%u down=%u timeout=%u send_fail=%u\r\n",
+           sfcl_link_role_str((uint8_t)SFC1_LINK_ROLE), sfcl_link_state_str(g_link.state),
+           g_link.transport_up ? "up" : "down",
+           g_link.has_peer ? sfcl_link_role_str(g_link.peer_role) : "none",
+           (unsigned)g_link.tx_count, (unsigned)g_link.rx_count, (unsigned)g_link.rx_bad,
+           (unsigned)g_link.rx_gap, (unsigned)g_link.rx_stale, (unsigned)g_link.up_count,
+           (unsigned)g_link.down_count, (unsigned)g_link.timeout_count, (unsigned)g_link.send_fail_count);
+}
+
+static void board_link_init(void)
+{
+    int ret;
+
+    if (sfcl_link_init(&g_link, (uint8_t)SFC1_LINK_ROLE, LINK_HEARTBEAT_MS, LINK_TIMEOUT_MS) != SFCL_OK) {
+        printf("SFC1 LINK: init failed (role=%u)\r\n", (unsigned)SFC1_LINK_ROLE);
+        return;
+    }
+    sfcl_parser_init(&g_link_parser);
+    if ((uint8_t)SFC1_LINK_ROLE == SFCL_ROLE_CONFIRM) {
+        ret = sle_link_server_start(SFC1_SLE_NAME, sle_rx_push, sle_state_changed);
+    } else {
+        ret = sle_link_client_start(SFC1_SLE_NAME, sle_rx_push, sle_state_changed);
+    }
+    printf("SFC1 LINK: init role=%s ret=%d\r\n", sfcl_link_role_str((uint8_t)SFC1_LINK_ROLE), ret);
+    if (ret != 0) {
+        printf("SFC1 LINK: transport start FAILED\r\n");
+    }
+}
+
+/* 链路状态只在“屏幕没有更重要的东西”时上屏：
+ * 待确认任务、配网码、已武装的 KEK 命令都不能被 LINK ALIVE/LOST 覆盖。 */
+static int link_oled_idle(void)
+{
+    if (g_pending.active || g_kek_cmd != KEK_CMD_NONE) {
+        return 0;
+    }
+    if (!g_provisioned && g_prov.active) {
+        return 0; /* 配网码正在显示 */
+    }
+    return 1;
+}
+
+static void board_link_poll(uint64_t now)
+{
+    uint8_t b;
+    uint8_t frame[SFCL_FRAME_LEN];
+    uint8_t out[SFCL_FRAME_LEN];
+    sfcl_state_t before;
+    uint8_t connected = g_sle_connected ? 1u : 0u;
+    int sent;
+
+    /* 传输层连接/断开边沿（SLE 回调只置标志，这里落到状态机） */
+    if (connected && !g_link.transport_up) {
+        sfcl_link_transport_up(&g_link, now);
+        printf("SFC1 LINK: transport connected\r\n");
+    } else if (!connected && g_link.transport_up) {
+        sfcl_link_transport_down(&g_link, now);
+        printf("SFC1 LINK: transport disconnected\r\n");
+    }
+
+    /* 收：SLE 回调入队 → 字节流解析 → 心跳状态机 */
+    while (sle_ring_pop(&b)) {
+        if (sfcl_parser_feed(&g_link_parser, b, frame)) {
+            sfcl_state_t prev = g_link.state;
+            if (sfcl_link_on_frame(&g_link, frame, sizeof(frame), now) == SFCL_OK) {
+                if (prev != SFCL_STATE_ALIVE) {
+                    printf("SFC1 LINK: ALIVE peer=%s\r\n", sfcl_link_role_str(g_link.peer_role));
+                    if (link_oled_idle()) {
+                        show_result("LINK ALIVE");
+                    }
+                }
+            } else {
+                printf("SFC1 LINK: bad frame\r\n");
+            }
+        }
+    }
+
+    /* 发：到点就发心跳；tick 同时做超时判定 */
+    before = g_link.state;
+    sent = sfcl_link_tick(&g_link, now, out);
+    if (before == SFCL_STATE_ALIVE && g_link.state == SFCL_STATE_CONNECTED) {
+        printf("SFC1 LINK: peer lost (timeout %ums)\r\n", (unsigned)LINK_TIMEOUT_MS);
+        if (link_oled_idle()) {
+            show_result("LINK LOST");
+        }
+    }
+    if (sent) {
+        if (sle_link_send(out, sizeof(out)) != 0) {
+            sfcl_link_on_send_fail(&g_link);
+        } else if (g_link.tx_count <= 3u || (g_link.tx_count % 60u) == 0u) {
+            printf("SFC1 LINK: heartbeat tx seq=%u\r\n", (unsigned)(g_link.tx_seq - 1u));
+        }
+    }
+}
+#endif
 
 /* ---------------- 主任务 ---------------- */
 static errcode_t sfc1_uart_init(void)
@@ -854,6 +1015,10 @@ static void key_task(const char *arg)
         show_idle();
     }
 
+#if SFC1_WITH_LINK
+    board_link_init();
+#endif
+
     for (;;) {
         uint8_t b;
         uint64_t now;
@@ -871,6 +1036,9 @@ static void key_task(const char *arg)
         }
 
         now = now_ms();
+#if SFC1_WITH_LINK
+        board_link_poll(now);
+#endif
         /* 半帧超时：避免残帧把 CLI 永久卡住（完整帧在 115200 下 <20ms） */
         if (g_frame_len != 0 && (now - g_last_rx_ms) > 2000u) {
             g_frame_len = 0;

@@ -13,7 +13,7 @@
 | 蜂鸣器 | ⏸ 按用户要求不启用 | — |
 | SFC1 帧收发 / HMAC | ✅ **真机通过（M3，2026-11-04 晚）** | `board_confirm_m3.c` + `sfc1_hmac.c/h`；烧录 1,469,032B，批准/取消两条路径走通，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §6 |
 | Flash 掉电保存（M1） | ✅ **2026-11-04 晚** | `sfc1_nv.c/h`：已消费 nonce 窗口落 NV（key `0x0F01`，160B + HMAC 校验）；断电重上电后重发旧帧 → `REPLAY`，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §6.7 |
-| 双板 SLE / 断线重连 | ❌ 未做（M2） | 下一步 |
+| 双板 SLE / 断线重连 | ⏳ 代码就绪、待补板（2026-11-14） | `ws63/link.c` + `test_link.c` PC 全过；`sle_link.c` 适配器；`build-m3.cjs --link --role=` 两个镜像均编译通过；真机验收未做，见 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) |
 
 > 本目录的 `base_ssd1306_demo.c` 是在厂商样例 `vendor/Hqyj_Ws63/Farsight/base_03_ssd1306`
 > 基础上改的按键确认版；OLED 驱动 `hal_bsp_oled/` 仍由 SDK 提供，未复制进仓库。
@@ -118,3 +118,26 @@ npm run serial:probe -- --port COM11 --baud 115200 --seconds 120 --watch
 `WS63 PROVISION / PAIR CODE`，用 `cd prototype && npm run provision -- --port COM11 --code <码>` 配网。
 ⚠️ **烧完整 fwpkg 会写 `ws63_all_nv.bin`，把配网钥匙和 nonce 窗口清掉**——烧完必须重新配网，
 不要把"烧录后未配置"误判成固件缺陷。
+
+## 8. M2 双板 SLE 链路（2026-11-14 准备）
+
+> 等补板期间完成；真机未验证，验收清单见 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) §7。
+
+```bash
+# 确认端 B（SLE server）
+node ws63/firmware/build-m3.cjs --link --role=confirm --build
+
+# 执行端 A（SLE client）
+node ws63/firmware/build-m3.cjs --link --role=exec --build
+
+# 默认 M3（不编入 SLE 链路，体积与 docs/72 一致）
+node ws63/firmware/build-m3.cjs --build
+```
+
+- 两个角色镜像另存到 `ws63/firmware/out/`（已 gitignore），因为 SDK 产物路径每次构建都会被覆盖。
+- 本板启动日志一直有 `init_sle_mac failed!`（NV/eFuse 无工厂 SLE MAC）；适配器在 `enable_sle`
+  后显式设演示本地地址兜底（confirm `02:53:46:43:31:02` / exec `…:01`），该地址不是身份凭据。
+- 板端串口关键字：`SFC1 LINK: init role=...`、`SFC1 LINK: ALIVE peer=...`、
+  `SFC1 LINK: peer lost (timeout 3500ms)`；CLI `link-status` 查计数。
+- 双串口验收：`cd prototype && npm run link:verify -- --a COM_A --b COM_B --seconds 45 --expect-reconnect`。
+- 烧完整 fwpkg 会清 NV：需要重新配网 + `kek-adopt`（见 docs/72 §5）。

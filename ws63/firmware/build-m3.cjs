@@ -6,9 +6,13 @@
 //   3) 可选：调用 SDK build.py 编译 ws63-liteos-app
 //
 // 用法：
-//   node ws63/firmware/build-m3.cjs            # 只同步
+//   node ws63/firmware/build-m3.cjs            # 只同步（默认 M3，无 SLE 链路）
 //   node ws63/firmware/build-m3.cjs --build    # 同步并编译
 //   node ws63/firmware/build-m3.cjs --build --sdk=D:/fbb_ws63
+//
+// M2 双板 SLE 链路变体：
+//   node ws63/firmware/build-m3.cjs --link --role=confirm --build   # 确认端 B（server）
+//   node ws63/firmware/build-m3.cjs --link --role=exec --build      # 执行端 A（client）
 // ============================================================
 const fs = require('node:fs');
 const path = require('node:path');
@@ -16,6 +20,18 @@ const { spawnSync } = require('node:child_process');
 
 const args = process.argv.slice(2);
 const shouldBuild = args.includes('--build');
+const roleArg = args.find((a) => a.startsWith('--role='));
+const roleValue = roleArg ? roleArg.slice('--role='.length) : null;
+const linkEnabled = args.includes('--link') || roleValue !== null;
+if (args.includes('--link') && roleValue === null) {
+  console.error('[build-m3] --link 必须同时指定 --role=exec 或 --role=confirm');
+  process.exit(1);
+}
+if (roleValue !== null && roleValue !== 'exec' && roleValue !== 'confirm') {
+  console.error('[build-m3] --role 只能是 exec 或 confirm');
+  process.exit(1);
+}
+const linkRole = roleValue === 'exec' ? 0 : 1;
 const sdkArg = args.find((a) => a.startsWith('--sdk='));
 const SDK = sdkArg ? sdkArg.slice('--sdk='.length) : (process.env.WS63_SDK || 'D:/fbb_ws63');
 const SAMPLE_DIR = path.join(SDK, 'src/application/samples/base_03_ssd1306');
@@ -37,8 +53,13 @@ const FILES = [
   { from: path.join(HERE, 'board-confirm/efuse_probe.h'), to: 'efuse_probe.h' },
   { from: path.join(HERE, 'board-confirm/efuse_kek.c'), to: 'efuse_kek.c' },
   { from: path.join(HERE, 'board-confirm/efuse_kek.h'), to: 'efuse_kek.h' },
+  { from: path.join(HERE, 'board-confirm/sle_link.c'), to: 'sle_link.c' },
+  { from: path.join(HERE, 'board-confirm/sle_link.h'), to: 'sle_link.h' },
+  { from: path.join(HERE, 'board-confirm/sfc1_build_config.h'), to: 'sfc1_build_config.h' },
   { from: path.join(REPO_WS63, 'protocol.c'), to: 'protocol.c' },
   { from: path.join(REPO_WS63, 'protocol.h'), to: 'protocol.h' },
+  { from: path.join(REPO_WS63, 'link.c'), to: 'link.c' },
+  { from: path.join(REPO_WS63, 'link.h'), to: 'link.h' },
 ];
 
 function fail(message) {
@@ -57,6 +78,21 @@ for (const file of FILES) {
   if (!fs.existsSync(file.from)) fail(`缺少源文件：${file.from}`);
   fs.copyFileSync(file.from, path.join(SAMPLE_DIR, file.to));
   console.log(`[build-m3] 同步 ${path.basename(file.to)}`);
+}
+
+if (linkEnabled) {
+  const roleName = linkRole === 0 ? 'exec' : 'confirm';
+  const config = `#ifndef SFC1_BUILD_CONFIG_H
+#define SFC1_BUILD_CONFIG_H
+/* 由 build-m3.cjs --link --role=${roleName} 生成 */
+#define SFC1_WITH_LINK 1
+#define SFC1_LINK_ROLE ${linkRole}
+#endif /* SFC1_BUILD_CONFIG_H */
+`;
+  fs.writeFileSync(path.join(SAMPLE_DIR, 'sfc1_build_config.h'), config);
+  console.log(`[build-m3] M2 变体：SFC1_WITH_LINK=1 role=${roleName}（${linkRole === 0 ? 'SLE client / 执行端 A' : 'SLE server / 确认端 B'}）`);
+} else {
+  console.log('[build-m3] 默认 M3 变体：SFC1_WITH_LINK=0（行为与 docs/72 一致）');
 }
 
 // 旧样例源文件/目标文件必须清掉，否则 libsamples.a 仍链接旧对象
@@ -109,3 +145,13 @@ const fwpkg = path.join(SDK, 'src/output/ws63/fwpkg/ws63-liteos-app/ws63-liteos-
 if (!fs.existsSync(fwpkg)) fail(`编译完成但找不到产物：${fwpkg}`);
 const stat = fs.statSync(fwpkg);
 console.log(`[build-m3] 产物 ${fwpkg}（${stat.size} 字节）`);
+
+/* M2 两个角色共用同一个产物路径，编译后各留一份，板到齐后不必重建 */
+if (linkEnabled) {
+  const roleName = linkRole === 0 ? 'exec' : 'confirm';
+  const outDir = path.join(HERE, 'out');
+  fs.mkdirSync(outDir, { recursive: true });
+  const dest = path.join(outDir, `ws63-liteos-app-m2-${roleName}.fwpkg`);
+  fs.copyFileSync(fwpkg, dest);
+  console.log(`[build-m3] M2 镜像留存 ${dest}`);
+}

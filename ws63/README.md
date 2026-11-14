@@ -30,6 +30,23 @@ sh run_tests.sh
 
 > 测试里的 `test_mac` 是**确定性伪 MAC**，只用于验证帧和状态机，不是密码学 MAC。板端必须换成 mbedTLS 的 HMAC-SHA256。
 
+## M2 链路保活层（`link.c`，2026-11-14）
+
+`link.h` / `link.c` 是双板 SLE 的**心跳/超时/恢复状态机**，与 SDK 无关；板端由
+`firmware/board-confirm/sle_link.c` 接 SLE，PC 侧用假时钟/假链路驱动测试。
+
+```bash
+gcc -std=c11 -Wall -Wextra -Werror -O2 -o test_link link.c test_link.c
+./test_link
+# 期望输出：PASS: all link tests
+```
+
+- 16B 固定心跳帧，magic `SFCL`，默认 1000ms 间隔、3500ms 超时；
+- 丢 1–2 帧不掉线；超时后任意有效心跳直接恢复 `ALIVE`，不要求重连（丢包可恢复）；
+- 心跳**没有 MAC**，只做存活判定；批准/执行仍必须走 SFC1 HMAC 帧；
+- 双板真实 SLE 适配、构建变体与上板验收清单见
+  [docs/73](../docs/73-M2双板SLE准备-2026-11-14.md)。
+
 ## 帧格式（v0.1）
 
 ```

@@ -8,6 +8,8 @@ set(SOURCES_LIST
     ${CMAKE_CURRENT_SOURCE_DIR}/sfc1_provision.c
     ${CMAKE_CURRENT_SOURCE_DIR}/efuse_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/efuse_kek.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/link.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/sle_link.c
 )
 set(HEADER_LIST
     ${CMAKE_CURRENT_SOURCE_DIR}/hal_bsp_oled
