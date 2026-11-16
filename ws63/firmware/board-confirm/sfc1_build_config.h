@@ -13,5 +13,6 @@
 #define SFC1_WITH_LINK 0
 #define SFC1_LINK_ROLE 1 /* 0=exec/client，1=confirm/server；仅 SFC1_WITH_LINK=1 时生效 */
 #define SFC1_DEVICE_LABEL "ws63-A" /* 单板默认；M2/M3' 双板变体由脚本按角色生成 */
+#define SFC1_WITH_WIFI 0 /* 1=同时开 WiFi STA 并周期扫描（共存观测，不连 AP/不传数据） */
 
 #endif /* SFC1_BUILD_CONFIG_H */

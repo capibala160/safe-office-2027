@@ -10,6 +10,7 @@ set(SOURCES_LIST
     ${CMAKE_CURRENT_SOURCE_DIR}/efuse_kek.c
     ${CMAKE_CURRENT_SOURCE_DIR}/link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/sfc1_route.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/wifi_coexist.c
     ${CMAKE_CURRENT_SOURCE_DIR}/sle_link.c
 )
 set(HEADER_LIST

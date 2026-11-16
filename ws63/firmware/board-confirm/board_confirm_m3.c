@@ -36,6 +36,9 @@
 #include "efuse_probe.h"
 #include "efuse_kek.h"
 #include "sfc1_build_config.h"
+#if SFC1_WITH_WIFI
+#include "wifi_coexist.h"
+#endif
 #if SFC1_WITH_LINK
 #include "link.h"
 #include "sle_link.h"
@@ -1152,6 +1155,10 @@ static void key_task(const char *arg)
         now = now_ms();
 #if SFC1_WITH_LINK
         board_link_poll(now);
+#endif
+#if SFC1_WITH_WIFI
+        /* 共存观测：周期 WiFi 扫描，与 SLE 心跳并行 */
+        wifi_coexist_poll(now);
 #endif
         /* 半帧超时：避免残帧把 CLI 永久卡住（完整帧在 115200 下 <20ms） */
         if (g_frame_len != 0 && (now - g_last_rx_ms) > 2000u) {

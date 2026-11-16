@@ -13,6 +13,11 @@
 // M2 双板 SLE 链路变体：
 //   node ws63/firmware/build-m3.cjs --link --role=confirm --build   # 确认端 B（server）
 //   node ws63/firmware/build-m3.cjs --link --role=exec --build      # 执行端 A（client）
+//
+// WiFi 共存观测（可选，叠加在上面的变体上）：
+//   node ws63/firmware/build-m3.cjs --link --role=exec --wifi --build
+//   → SFC1_WITH_WIFI=1：开 WiFi STA，每 10s 扫描一次，与 SLE 心跳并行；
+//     不连 AP、不配 IP、不传数据（只测射频共存，不是 WiFi 业务共存）。
 // ============================================================
 const fs = require('node:fs');
 const path = require('node:path');
@@ -32,6 +37,7 @@ if (roleValue !== null && roleValue !== 'exec' && roleValue !== 'confirm') {
   process.exit(1);
 }
 const linkRole = roleValue === 'exec' ? 0 : 1;
+const wifiEnabled = args.includes('--wifi');
 const sdkArg = args.find((a) => a.startsWith('--sdk='));
 const SDK = sdkArg ? sdkArg.slice('--sdk='.length) : (process.env.WS63_SDK || 'D:/fbb_ws63');
 const SAMPLE_DIR = path.join(SDK, 'src/application/samples/base_03_ssd1306');
@@ -55,6 +61,8 @@ const FILES = [
   { from: path.join(HERE, 'board-confirm/efuse_kek.h'), to: 'efuse_kek.h' },
   { from: path.join(HERE, 'board-confirm/sle_link.c'), to: 'sle_link.c' },
   { from: path.join(HERE, 'board-confirm/sle_link.h'), to: 'sle_link.h' },
+  { from: path.join(HERE, 'board-confirm/wifi_coexist.c'), to: 'wifi_coexist.c' },
+  { from: path.join(HERE, 'board-confirm/wifi_coexist.h'), to: 'wifi_coexist.h' },
   { from: path.join(HERE, 'board-confirm/sfc1_build_config.h'), to: 'sfc1_build_config.h' },
   { from: path.join(REPO_WS63, 'protocol.c'), to: 'protocol.c' },
   { from: path.join(REPO_WS63, 'protocol.h'), to: 'protocol.h' },
@@ -92,12 +100,24 @@ if (linkEnabled) {
 #define SFC1_WITH_LINK 1
 #define SFC1_LINK_ROLE ${linkRole}
 #define SFC1_DEVICE_LABEL "${deviceLabel}"
+#define SFC1_WITH_WIFI ${wifiEnabled ? 1 : 0}
 #endif /* SFC1_BUILD_CONFIG_H */
 `;
   fs.writeFileSync(path.join(SAMPLE_DIR, 'sfc1_build_config.h'), config);
-  console.log(`[build-m3] M2 变体：SFC1_WITH_LINK=1 role=${roleName}（${linkRole === 0 ? 'SLE client / 执行端 A' : 'SLE server / 确认端 B'}）`);
+  console.log(`[build-m3] M2 变体：SFC1_WITH_LINK=1 role=${roleName}（${linkRole === 0 ? 'SLE client / 执行端 A' : 'SLE server / 确认端 B'}）`
+    + `${wifiEnabled ? ' + WiFi 扫描共存' : ''}`);
 } else {
-  console.log('[build-m3] 默认 M3 变体：SFC1_WITH_LINK=0（行为与 docs/72 一致）');
+  const config = `#ifndef SFC1_BUILD_CONFIG_H
+#define SFC1_BUILD_CONFIG_H
+/* 由 build-m3.cjs 生成（默认 M3 变体） */
+#define SFC1_WITH_LINK 0
+#define SFC1_LINK_ROLE 1
+#define SFC1_DEVICE_LABEL "ws63-A"
+#define SFC1_WITH_WIFI ${wifiEnabled ? 1 : 0}
+#endif /* SFC1_BUILD_CONFIG_H */
+`;
+  fs.writeFileSync(path.join(SAMPLE_DIR, 'sfc1_build_config.h'), config);
+  console.log(`[build-m3] 默认 M3 变体：SFC1_WITH_LINK=0${wifiEnabled ? ' + WiFi 扫描共存' : ''}`);
 }
 
 // 旧样例源文件/目标文件必须清掉，否则 libsamples.a 仍链接旧对象
