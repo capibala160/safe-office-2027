@@ -1,0 +1,42 @@
+双板完整链路：确认在 B、执行在 A（2026-11-16）
+=================================================
+
+拓扑：PC --UART(COM11)--> A(exec, ws63-A) --SLE--> B(confirm, ws63-B)
+镜像：
+  exec    ws63-liteos-app-m2-exec.fwpkg     1,507,176 B  SHA-256 c3e8fc85a35a75c00fdbf67051d9f0df2a7c95686afb1e651eb704b9fa40bd84
+  confirm ws63-liteos-app-m2-confirm.fwpkg  1,507,176 B  SHA-256 58ec334abda0c25b8cfc168de6b3f19b6b863f8a9084514711f4327bae79dbbd
+标签：构建期按角色分配——exec=ws63-A、confirm=ws63-B（两板 device_id 不再相同）
+设备表（只列 id/label，钥匙不入库）：
+  1d889565919dce48  ws63-A
+  e3e890b611a16df6  ws63-B
+KEK：A 板 kek-adopt 后启动 provisioned v2/kek（指纹 5ed5a8d3）；B 板为 v1（未烧 KEK）
+
+一、批准 + 开锁方向（level=1）
+$ node serial-confirm.cjs --port COM11 --device ws63-B --to partner@example.com \
+    --subject "M3-double actuator" --ttl 90 --timeout 75000 \
+    --actuator-device ws63-A --actuator-pin 12 --actuator-level 1
+操作 c849000d-8d42-4e64-a59f-698a6bd37b6d 已冻结：外发｜M3-double actuator｜→ partner@example.com
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-517def9617c15a36-35809904206e3cf97853a58589b56c2e
+执行结果：status=0 pin=12 level=1
+
+二、关锁方向（level=0）
+$ node serial-confirm.cjs --port COM11 --device ws63-B --to partner@example.com \
+    --subject "M3-double actuator off" --ttl 90 --timeout 75000 \
+    --actuator-device ws63-A --actuator-pin 12 --actuator-level 0
+确认结果：decision=1 device=ws63-B
+执行结果：status=0 pin=12 level=0
+
+三、链路计数（测试后）
+A exec   : state=ALIVE transport=up peer=confirm tx=80 rx=79 bad=0 gap=0 stale=0 up=1 down=0 timeout=0 send_fail=0
+B confirm: state=ALIVE transport=up peer=exec    tx=86 rx=87 bad=0 gap=0 stale=0 up=1 down=0 timeout=0 send_fail=0
+
+四、自动化测试
+prototype: 608 项（606 通过 + 2 跳过），新增 serial-actuator-step 4 项
+ws63: test_protocol / test_link / test_route 全 PASS
+
+五、边界
+- 执行帧由 PC 用 A 的钥匙签发；A 验 MAC、查重放后驱动 IO12，回 ACK（0x22）。
+- 确认帧由 PC 用 B 的钥匙签发；B 验 MAC、按键后回 DECISION，经 A 中继回 PC。
+- 两个设备现在各有独立钥匙与 device_id；仍是演示级 PSK，钥匙在设备表/NV 里，不是 HUKS/TEE。
+- 没有继电器/锁体实物：ACK 证明「板子执行了引脚动作」，不证明真实开锁。

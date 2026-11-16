@@ -84,11 +84,14 @@ for (const file of FILES) {
 
 if (linkEnabled) {
   const roleName = linkRole === 0 ? 'exec' : 'confirm';
+  /* 双板变体按角色分配设备标签：两板 device_id 不同，设备表不会互相覆盖 */
+  const deviceLabel = linkRole === 0 ? 'ws63-A' : 'ws63-B';
   const config = `#ifndef SFC1_BUILD_CONFIG_H
 #define SFC1_BUILD_CONFIG_H
 /* 由 build-m3.cjs --link --role=${roleName} 生成 */
 #define SFC1_WITH_LINK 1
 #define SFC1_LINK_ROLE ${linkRole}
+#define SFC1_DEVICE_LABEL "${deviceLabel}"
 #endif /* SFC1_BUILD_CONFIG_H */
 `;
   fs.writeFileSync(path.join(SAMPLE_DIR, 'sfc1_build_config.h'), config);

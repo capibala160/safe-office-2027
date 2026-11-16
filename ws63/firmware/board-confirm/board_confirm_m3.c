@@ -63,7 +63,12 @@ static const uint8_t DEMO_KEY[SFC1_KEY_LEN] = {
     0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
     0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
 };
-#define DEVICE_LABEL "ws63-A"
+/* 设备标签来自构建配置（sfc1_build_config.h）：默认 ws63-A；
+ * M3' 双板变体里 exec=ws63-A、confirm=ws63-B，避免两板 device_id 相同。 */
+#ifndef SFC1_DEVICE_LABEL
+#define SFC1_DEVICE_LABEL "ws63-A"
+#endif
+#define DEVICE_LABEL SFC1_DEVICE_LABEL
 
 static uint8_t g_device_id[SFC1_DEVICE_ID_LEN];
 

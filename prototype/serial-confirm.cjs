@@ -22,6 +22,7 @@ const { NearfieldConfirmer, buildSummary } = require('./src/nearfield-confirm.cj
 const { openSerialPort, SerialTransport } = require('./src/serial-transport.cjs');
 
 const { resolveDeviceKey } = require('./src/device-keys.cjs');
+const { createSerialActuator } = require('./src/device-actuator.cjs');
 const ACTION_MAP = {
   sendExternalEmail: 1,
   deleteDoc: 2,
@@ -112,6 +113,49 @@ async function runSerialConfirmation({
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 确认通过后，用“执行端设备”的钥匙发 SFC1 执行帧（双板拓扑：挑战端 B、执行端 A）。
+ * 只在确认成功后调用；串口与确认用的是同一个物理口（先关后开），所以带重试。
+ * @returns {Promise<{status: number, pin: number, level: number, keySource: string}>}
+ */
+async function runActuatorStep({
+  portPath,
+  label = 'ws63-A',
+  pin = 12,
+  level = 1,
+  timeoutMs = 4000,
+  deviceTableFile = undefined,
+  actuatorFactory = createSerialActuator,
+  logger = () => {},
+} = {}) {
+  if (!portPath) throw new TypeError('缺少串口路径');
+  if (!Number.isInteger(pin) || pin < 0 || pin > 31) throw new TypeError('--actuator-pin 必须是 0–31 的整数');
+  if (level !== 0 && level !== 1) throw new TypeError('--actuator-level 只能是 0 或 1');
+
+  const resolved = resolveDeviceKey({ label, file: deviceTableFile });
+  const actuator = actuatorFactory({ portPath, key: resolved.key, timeoutMs });
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const ack = await actuator.send(pin, level);
+      logger(`执行结果：status=${ack.status} pin=${ack.pin} level=${ack.level}`);
+      return { ...ack, keySource: resolved.source };
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 3 && /Access denied|EBUSY|busy/i.test(String(err && err.message))) {
+        await sleep(250);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error('执行失败');
+}
+
 async function main() {
   const { values } = parseArgs({
     options: {
@@ -126,6 +170,11 @@ async function main() {
       timeout: { type: 'string', default: String(DEFAULT_TIMEOUT_MS) },
       key: { type: 'string' },
       'demo-key': { type: 'boolean', default: false },
+      /* 双板拓扑：确认通过后再用“执行端 A”的钥匙发执行帧；不传则不执行 */
+      'actuator-device': { type: 'string' },
+      'actuator-pin': { type: 'string', default: '12' },
+      'actuator-level': { type: 'string', default: '1' },
+      'actuator-timeout': { type: 'string', default: '4000' },
       json: { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
     },
@@ -178,6 +227,37 @@ async function main() {
       timeoutMs,
       logger: log,
     });
+    let actuatorAck = null;
+    if (values['actuator-device']) {
+      const pin = Number(values['actuator-pin']);
+      const level = Number(values['actuator-level']);
+      const actTimeout = Number(values['actuator-timeout']);
+      if (!Number.isInteger(actTimeout) || actTimeout <= 0) throw new Error('--actuator-timeout 必须是正整数');
+      try {
+        actuatorAck = await runActuatorStep({
+          portPath: values.port,
+          label: String(values['actuator-device']),
+          pin,
+          level,
+          timeoutMs: actTimeout,
+          logger: log,
+        });
+      } catch (err) {
+        if (values.json) {
+          console.log(JSON.stringify({
+            ok: false,
+            stage: 'actuator',
+            code: err.code || null,
+            message: err.message,
+          }, null, 2));
+        } else {
+          console.error(`执行失败：${err.code || 'ERROR'} ${err.message}`);
+        }
+        store.close();
+        return 1;
+      }
+    }
+
     if (values.json) {
       console.log(JSON.stringify({
         ok: true,
@@ -185,6 +265,7 @@ async function main() {
         device: approval.deviceLabel,
         operationId: prepared.operationId,
         confirmationId: approval.confirmationId,
+        actuator: actuatorAck,
       }, null, 2));
     } else {
       log(`确认结果：decision=${approval.decision}（1=批准 0=取消）device=${approval.deviceLabel}`);
@@ -218,4 +299,5 @@ module.exports = {
   DEFAULT_TIMEOUT_MS,
   buildOperation,
   runSerialConfirmation,
+  runActuatorStep,
 };

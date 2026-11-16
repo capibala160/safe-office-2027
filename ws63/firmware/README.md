@@ -14,7 +14,7 @@
 | SFC1 帧收发 / HMAC | ✅ **真机通过（M3，2026-11-04 晚）** | `board_confirm_m3.c` + `sfc1_hmac.c/h`；烧录 1,469,032B，批准/取消两条路径走通，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §6 |
 | Flash 掉电保存（M1） | ✅ **2026-11-04 晚** | `sfc1_nv.c/h`：已消费 nonce 窗口落 NV（key `0x0F01`，160B + HMAC 校验）；断电重上电后重发旧帧 → `REPLAY`，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §6.7 |
 | 双板 SLE / 断线重连 | ✅ **真机通过（2026-11-16）** | A=exec COM11 / B=confirm COM12：配对 `status=0x0`、MTU 251、双向 `ALIVE`、`link-status` `bad=0 send_fail=0`；KEY1 复位触发 `peer lost` → 恢复 `ALIVE`（A: up=2 down=1 timeout=1）。证据见 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) §10 |
-| M3' 业务帧上 SLE | ✅ **真机端到端（2026-11-16）** | `sfc1_route.c` 分流 SFCL/SFC1；PC→A(COM11)→SLE→B(COM12)→KEY2→DECISION→PC，批准/取消均过；A 不持钥只转发。见 [docs/74](../../docs/74-M3prime-业务帧上SLE-2026-11-16.md) |
+| M3' 业务帧上 SLE | ✅ **真机端到端（2026-11-16）** | `sfc1_route.c` 分流 SFCL/SFC1；PC→A(COM11)→SLE→B(COM12)→KEY2→DECISION→PC，批准/取消均过；**双板执行**（B 钥匙确认、A 钥匙驱动 IO12、回 ACK）也已打通；A 不持钥只转发。见 [docs/74](../../docs/74-M3prime-业务帧上SLE-2026-11-16.md) |
 
 > 本目录的 `base_ssd1306_demo.c` 是在厂商样例 `vendor/Hqyj_Ws63/Farsight/base_03_ssd1306`
 > 基础上改的按键确认版；OLED 驱动 `hal_bsp_oled/` 仍由 SDK 提供，未复制进仓库。
@@ -152,5 +152,9 @@ A 再原样写回 UART。PC 侧脚本**无需改动**（仍是 `serial-confirm.c
 - 分流模块 `ws63/sfc1_route.c`（`SFCL` 心跳 / `SFC1` 业务帧），PC 测试 `ws63/test_route.c`；
 - 决策原路返回由 `pending.via_sle` 决定——直连 UART 的板子行为不变；
 - 板端关键字：`SFC1 RELAY: pc->peer challenge`、`SFC1 RELAY: peer->pc`、`SFC1 RELAY: decision -> peer`；
-- 只给 B 配网即可（A 是中继，不需要钥匙）；两块板 `device_id` 目前相同（编译期 label），
-  正式使用前需按板区分。详见 [docs/74](../../docs/74-M3prime-业务帧上SLE-2026-11-16.md)。
+- 构建期按角色分配设备标签：exec=`ws63-A`、confirm=`ws63-B`（`SFC1_DEVICE_LABEL`），
+  两板 `device_id` 不同，设备表可同时保存两把钥匙。
+- **双板执行**：`node serial-confirm.cjs --port COM11 --device ws63-B ... --actuator-device ws63-A
+  --actuator-pin 12 --actuator-level 1`——确认用 B 的钥匙、执行用 A 的钥匙，A 验签后驱动 IO12 并回 ACK。
+- 只做确认时可以不给 A 配网（A 只是中继）；要做双板执行则 A 必须持自己的钥匙。
+  详见 [docs/74](../../docs/74-M3prime-业务帧上SLE-2026-11-16.md)。

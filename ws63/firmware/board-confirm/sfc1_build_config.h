@@ -12,5 +12,6 @@
 
 #define SFC1_WITH_LINK 0
 #define SFC1_LINK_ROLE 1 /* 0=exec/client，1=confirm/server；仅 SFC1_WITH_LINK=1 时生效 */
+#define SFC1_DEVICE_LABEL "ws63-A" /* 单板默认；M2/M3' 双板变体由脚本按角色生成 */
 
 #endif /* SFC1_BUILD_CONFIG_H */
