@@ -42,6 +42,7 @@
     "console:serial": "node scripts/console-serial-check.cjs",
     "ws63:build": "node ../ws63/firmware/build-m3.cjs --build",
     "provision": "node scripts/provision-device.cjs",
+    "ping": "node scripts/ping-device.cjs",
     "demo:runthrough": "node scripts/demo-runthrough.cjs"
   },
   "dependencies": {

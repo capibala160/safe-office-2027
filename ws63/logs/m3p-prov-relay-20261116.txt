@@ -1,0 +1,37 @@
+配网与探活走 SLE（2026-11-16）
+=================================================
+
+拓扑：PC --UART(COM11)--> A(exec, ws63-A) --SLE--> B(confirm, ws63-B)
+镜像：
+  exec    233396c66ccddbec3fc6838ed952097ee8aa7177af152f44a8feb15ca7938eb0  1,507,304 B
+  confirm ce3f10f42b2152446c2d88dfe6d3d76a75d1281a7824f5da1af2d7555263d9c0  1,507,304 B
+说明：A 是唯一接 PC 的板子；B 的串口全程不参与操作（配对码在 B 的 OLED 第 3 行显示）。
+
+一、A 直连配网（新板第一次必须直连）
+$ npm run provision -- --port COM11 --code adcbc595 --label ws63-A
+配网成功：device_id=1d889565919dce48 label=ws63-A
+
+二、B 经 A 中继配网（PC 只开 COM11）
+$ npm run provision -- --port COM11 --code 2dc0ea15 --label ws63-B
+配网成功：device_id=e3e890b611a16df6 label=ws63-B
+（INIT → CHALLENGE → COMMIT → OK 四类帧全部经 SLE 往返；A 只在 A 已配网后转发 PROV 帧）
+
+三、探活：PING 本地 + 中继
+$ node scripts/ping-device.cjs --port COM11 --device ws63-A --timeout 8000
+✓ ws63-A PONG device_id=1d889565919dce48
+$ node scripts/ping-device.cjs --port COM11 --device ws63-B --timeout 8000
+✓ ws63-B PONG device_id=e3e890b611a16df6
+
+四、确认+执行回归（配网中继之后）
+$ node serial-confirm.cjs --port COM11 --device ws63-B --to partner@example.com \
+    --subject "M3-double after prov-relay" --ttl 90 --timeout 75000 \
+    --actuator-device ws63-A --actuator-pin 12 --actuator-level 1
+确认结果：decision=1 device=ws63-B
+执行结果：status=0 pin=12 level=1
+
+五、实现要点与坑
+- PING 帧**没有 device_id**（payload 只有 16B nonce），不能按 id 路由。
+  A 的转发判据改为：用**本板钥匙验 MAC**——验得过就是给 A 的（本地回 PONG），否则转给 B。
+  最初按 device_id 读 offset 10 的写法会把 A 自己的 PING 转走，表现为 A 本地 PING 超时。
+- PROV INIT/COMMIT 只有在 A **已配网**后才转发；新板（A 自身）掉电重烧后要先直连 UART 配网。
+- 回包路径统一走 send_reply()：SLE 来的请求原路回 SLE，UART 来的回 UART。

@@ -179,8 +179,59 @@ static int relay_to_sle(const uint8_t *frame, size_t len)
     return sle_link_send(frame, (uint16_t)len) == 0 ? 0 : -1;
 }
 
+/* A（exec）的中继策略：
+ *   - CHALLENGE(0x01)：总是转给 confirm 端（A 不持 B 的钥匙）
+ *   - PING(0x20)：**用自己的钥匙验 MAC**——验得过就是给本板的，本地回 PONG；
+ *     验不过（或本板未配网）转给对端。PING 帧里没有 device_id，不能按 id 路由。
+ *   - PROV INIT/COMMIT(0x10/0x12)：只有 A 已配网后才转发；
+ *     新板自己要先直连 UART 完成配网，避免把"给自己配网"的帧转走。
+ * 其余类型（ACTUATOR/ACTUATOR_ACK 等）本地处理。 */
+static int relay_should_forward(const uint8_t *frame, size_t len)
+{
+    uint8_t type;
+    uint8_t mac[PROTO_MAC_LEN];
+
+    if (frame == NULL || len < (size_t)(PROTO_HEADER_LEN + PROTO_MAC_LEN)) {
+        return 0;
+    }
+    type = frame[5];
+    if (type == PROTO_TYPE_CHALLENGE) {
+        return 1;
+    }
+    if (type == 0x20) { /* PING：用本板钥匙试算 MAC */
+        if (!g_provisioned) {
+            return 0;
+        }
+        if (sfc1_hmac_sha256(frame, len - PROTO_MAC_LEN, mac, (void *)g_key) != 0) {
+            return 0;
+        }
+        return memcmp(mac, frame + len - PROTO_MAC_LEN, PROTO_MAC_LEN) != 0;
+    }
+    if (type == 0x10 || type == 0x12) { /* 配网 INIT / COMMIT */
+        return g_provisioned ? 1 : 0;
+    }
+    return 0;
+}
+
 static void link_status_print(void);
 #endif
+
+/* 回包路径：从 SLE 来的请求（via_sle=1）原路回 SLE，其余走 UART。
+ * 只有 confirm 角色会把请求回给对端；exec 角色仍然写自己的 UART。 */
+static void send_reply(const uint8_t *data, size_t len, int via_sle)
+{
+#if SFC1_WITH_LINK
+    if (via_sle && (uint8_t)SFC1_LINK_ROLE == SFCL_ROLE_CONFIRM) {
+        if (relay_to_sle(data, len) != 0) {
+            printf("SFC1 RELAY: link down, reply dropped\r\n");
+        }
+        return;
+    }
+#else
+    (void)via_sle;
+#endif
+    (void)uapi_uart_write(UART_BUS_0, data, (uint32_t)len, 0);
+}
 
 /* ---------------- 待确认任务 ---------------- */
 typedef struct {
@@ -554,7 +605,7 @@ static void send_decision(int approve)
 
 /* 配网恢复探活（docs/60 复核问题 2）：PING(0x20) -> PONG(0x21)，用当前设备密钥验签/签名。
  * 回执丢失后主机用它确认"板子到底有没有写进这把钥匙"，不依赖配网窗口。 */
-static void handle_ping(const uint8_t *frame, size_t len)
+static void handle_ping(const uint8_t *frame, size_t len, int via_sle)
 {
     uint8_t expected[32];
     uint8_t mac[32];
@@ -579,7 +630,7 @@ static void handle_ping(const uint8_t *frame, size_t len)
         return;
     }
     (void)memcpy_s(out + 34, sizeof(out) - 34, mac, 32);
-    (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)sizeof(out), 0);
+    send_reply(out, sizeof(out), via_sle);
 }
 
 /* ---------------- 挑战处理 ---------------- */
@@ -654,7 +705,7 @@ static void handle_frame(const uint8_t *frame, size_t len, int via_sle)
 
     /* 配网恢复探活：不依赖配网窗口 */
     if (frame[5] == 0x20) {
-        handle_ping(frame, len);
+        handle_ping(frame, len, via_sle);
         return;
     }
 
@@ -664,7 +715,7 @@ static void handle_frame(const uint8_t *frame, size_t len, int via_sle)
         size_t out_len = 0;
         int handled = sfc1_prov_handle(&g_prov, frame, len, now_ms(), out, sizeof(out), &out_len);
         if (handled > 0 && out_len > 0) {
-            (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)out_len, 0);
+            send_reply(out, out_len, via_sle);
         }
         if (g_prov.has_new_key) {
             (void)memcpy_s(g_key, sizeof(g_key), g_prov.new_key, SFC1_KEY_LEN);
@@ -776,13 +827,14 @@ static void feed_byte(uint8_t b)
     g_frame[g_frame_len++] = b;
     if (g_frame_len >= g_frame_need) {
 #if SFC1_WITH_LINK
-        /* M3'：A（执行端）不持 B 的钥匙，CHALLENGE 原样转发给对端；
-         * 其余类型（ACTUATOR/PING/配网）仍由本板处理。 */
-        if ((uint8_t)SFC1_LINK_ROLE == SFCL_ROLE_EXEC && g_frame[5] == PROTO_TYPE_CHALLENGE) {
+        /* M3'：A（执行端）按 relay_should_forward 决定是否原样转发；
+         * 其余类型（ACTUATOR/自己的 PING/自己的配网）仍由本板处理。 */
+        if ((uint8_t)SFC1_LINK_ROLE == SFCL_ROLE_EXEC && relay_should_forward(g_frame, g_frame_len)) {
             if (relay_to_sle(g_frame, g_frame_len) == 0) {
-                printf("SFC1 RELAY: pc->peer challenge %u bytes\r\n", (unsigned)g_frame_len);
+                printf("SFC1 RELAY: pc->peer type=0x%02x %u bytes\r\n",
+                       (unsigned)g_frame[5], (unsigned)g_frame_len);
             } else {
-                printf("SFC1 RELAY: link down, challenge dropped\r\n");
+                printf("SFC1 RELAY: link down, type=0x%02x dropped\r\n", (unsigned)g_frame[5]);
             }
         } else {
             handle_frame(g_frame, g_frame_len, 0);

@@ -157,4 +157,7 @@ A 再原样写回 UART。PC 侧脚本**无需改动**（仍是 `serial-confirm.c
 - **双板执行**：`node serial-confirm.cjs --port COM11 --device ws63-B ... --actuator-device ws63-A
   --actuator-pin 12 --actuator-level 1`——确认用 B 的钥匙、执行用 A 的钥匙，A 验签后驱动 IO12 并回 ACK。
 - 只做确认时可以不给 A 配网（A 只是中继）；要做双板执行则 A 必须持自己的钥匙。
+- **配网/探活也可走 SLE**（A 已配网后）：`npm run provision -- --port COM11 --code <B 的码>`
+  直接给 B 配网；`npm run ping -- --port COM11 --device ws63-B` 验证 B 的钥匙。
+  A 自己重烧后（未配网）必须先直连 A 配网。
   详见 [docs/74](../../docs/74-M3prime-业务帧上SLE-2026-11-16.md)。
