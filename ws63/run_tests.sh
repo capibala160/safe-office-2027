@@ -6,3 +6,5 @@ gcc -std=c11 -Wall -Wextra -Werror -O2 -o test_protocol protocol.c test_protocol
 ./test_protocol
 gcc -std=c11 -Wall -Wextra -Werror -O2 -o test_link link.c test_link.c
 ./test_link
+gcc -std=c11 -Wall -Wextra -Werror -O2 -o test_route link.c sfc1_route.c test_route.c
+./test_route

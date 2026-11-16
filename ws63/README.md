@@ -195,7 +195,7 @@ if (proto_decode_decision(rx, rx_len, &d, board_hmac, (void *)PRE_SHARED_KEY) ==
 ## 还没做的（下一步）
 
 - [x] **SLE 链路层接入**（2026-11-16 双板真机通过：配对/MTU 251/心跳 ALIVE/KEY1 复位重连，见 [docs/73](../docs/73-M2双板SLE准备-2026-11-14.md) §10）
-- [ ] SLE 承载 **SFC1 业务帧**（CHALLENGE/DECISION 上双板，即 M3'，未做）
+- [x] **SLE 承载 SFC1 业务帧**（M3'，2026-11-16 真机端到端通过：PC→A→SLE→B→KEY2→DECISION→PC；`sfc1_route.c` 分流 + A 不持钥中继，见 [docs/74](../docs/74-M3prime-业务帧上SLE-2026-11-16.md)）
 - [ ] GPIO 按键 + LED/蜂鸣器
 - [ ] 2.8" 屏/OLED 显示操作摘要（有驱动再用）
 - [ ] Flash 审计环形缓冲

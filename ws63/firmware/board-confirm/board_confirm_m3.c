@@ -39,6 +39,7 @@
 #if SFC1_WITH_LINK
 #include "link.h"
 #include "sle_link.h"
+#include "sfc1_route.h"
 #endif
 
 osThreadId_t task1_ID;
@@ -125,6 +126,7 @@ static uint8_t g_cli_len;
 
 static sfcl_link_t g_link;
 static sfcl_parser_t g_link_parser;
+static sfc1_route_t g_sle_route; /* M3'：SLE 上的心跳/业务帧分流 */
 static uint8_t g_sle_ring[SLE_RING_SIZE];
 static volatile uint32_t g_sle_head;
 static volatile uint32_t g_sle_tail;
@@ -162,6 +164,16 @@ static void sle_state_changed(uint8_t connected)
     g_sle_connected = connected;
 }
 
+/* M3'：SFC1 业务帧经 SLE 转发。不解析、不验签——本板只做通道。
+ * 只统计链路发送失败，不改心跳状态机的语义。 */
+static int relay_to_sle(const uint8_t *frame, size_t len)
+{
+    if (frame == NULL || len == 0 || len > 0xFFFFu || !g_link.transport_up) {
+        return -1;
+    }
+    return sle_link_send(frame, (uint16_t)len) == 0 ? 0 : -1;
+}
+
 static void link_status_print(void);
 #endif
 
@@ -174,6 +186,7 @@ typedef struct {
     uint8_t target_hash[PROTO_HASH_LEN];
     char summary[PROTO_SUMMARY_MAX + 1];
     uint8_t summary_len;
+    uint8_t via_sle; /* M3'：挑战来自 SLE（回决策也走 SLE），否则走 UART */
     uint64_t deadline_ms;
 } pending_t;
 
@@ -513,7 +526,20 @@ static void send_decision(int approve)
         printf("SFC1 encode decision failed\r\n");
         return;
     }
+#if SFC1_WITH_LINK
+    if (g_pending.via_sle) {
+        /* M3'：挑战是从 SLE 来的，决策原路回给对端（A 再转给 PC） */
+        if (relay_to_sle(out, n) == 0) {
+            printf("SFC1 RELAY: decision -> peer %u bytes\r\n", (unsigned)n);
+        } else {
+            printf("SFC1 RELAY: link down, decision dropped\r\n");
+        }
+    } else {
+        (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)n, 0);
+    }
+#else
     (void)uapi_uart_write(UART_BUS_0, out, (uint32_t)n, 0);
+#endif
 
     mark_used(g_pending.nonce);
     g_pending.active = 0;
@@ -615,7 +641,7 @@ static void handle_actuator(const uint8_t *frame, size_t len)
     }
 }
 
-static void handle_frame(const uint8_t *frame, size_t len)
+static void handle_frame(const uint8_t *frame, size_t len, int via_sle)
 {
     proto_challenge_t ch;
     uint32_t ttl;
@@ -691,6 +717,7 @@ static void handle_frame(const uint8_t *frame, size_t len)
 
     (void)memset_s(&g_pending, sizeof(g_pending), 0, sizeof(g_pending));
     g_pending.active = 1;
+    g_pending.via_sle = (uint8_t)(via_sle ? 1 : 0);
     (void)memcpy_s(g_pending.task_id, sizeof(g_pending.task_id), ch.task_id, PROTO_TASK_ID_LEN);
     (void)memcpy_s(g_pending.nonce, sizeof(g_pending.nonce), ch.nonce, PROTO_NONCE_LEN);
     g_pending.action = ch.action;
@@ -743,7 +770,21 @@ static void feed_byte(uint8_t b)
     }
     g_frame[g_frame_len++] = b;
     if (g_frame_len >= g_frame_need) {
-        handle_frame(g_frame, g_frame_len);
+#if SFC1_WITH_LINK
+        /* M3'：A（执行端）不持 B 的钥匙，CHALLENGE 原样转发给对端；
+         * 其余类型（ACTUATOR/PING/配网）仍由本板处理。 */
+        if ((uint8_t)SFC1_LINK_ROLE == SFCL_ROLE_EXEC && g_frame[5] == PROTO_TYPE_CHALLENGE) {
+            if (relay_to_sle(g_frame, g_frame_len) == 0) {
+                printf("SFC1 RELAY: pc->peer challenge %u bytes\r\n", (unsigned)g_frame_len);
+            } else {
+                printf("SFC1 RELAY: link down, challenge dropped\r\n");
+            }
+        } else {
+            handle_frame(g_frame, g_frame_len, 0);
+        }
+#else
+        handle_frame(g_frame, g_frame_len, 0);
+#endif
         g_frame_len = 0;
         g_frame_need = 0;
     }
@@ -867,6 +908,7 @@ static void board_link_init(void)
         return;
     }
     sfcl_parser_init(&g_link_parser);
+    sfc1_route_init(&g_sle_route);
     if ((uint8_t)SFC1_LINK_ROLE == SFCL_ROLE_CONFIRM) {
         ret = sle_link_server_start(SFC1_SLE_NAME, sle_rx_push, sle_state_changed);
     } else {
@@ -909,9 +951,14 @@ static void board_link_poll(uint64_t now)
         printf("SFC1 LINK: transport disconnected\r\n");
     }
 
-    /* 收：SLE 回调入队 → 字节流解析 → 心跳状态机 */
+    /* 收：SLE 回调入队 → 分流（SFCL 心跳 / SFC1 业务帧） */
     while (sle_ring_pop(&b)) {
-        if (sfcl_parser_feed(&g_link_parser, b, frame)) {
+        const uint8_t *biz = NULL;
+        uint16_t biz_len = 0;
+        uint8_t biz_type = 0;
+        sfc1_route_ev_t ev = sfc1_route_feed(&g_sle_route, b, frame, &biz, &biz_len, &biz_type);
+
+        if (ev == SFC1_ROUTE_EV_LINK) {
             sfcl_state_t prev = g_link.state;
             if (sfcl_link_on_frame(&g_link, frame, sizeof(frame), now) == SFCL_OK) {
                 if (prev != SFCL_STATE_ALIVE) {
@@ -922,6 +969,16 @@ static void board_link_poll(uint64_t now)
                 }
             } else {
                 printf("SFC1 LINK: bad frame\r\n");
+            }
+        } else if (ev == SFC1_ROUTE_EV_BIZ) {
+            if ((uint8_t)SFC1_LINK_ROLE == SFCL_ROLE_EXEC) {
+                /* A：不持钥中继，原样转给 PC（DECISION 等） */
+                (void)uapi_uart_write(UART_BUS_0, biz, (uint32_t)biz_len, 0);
+                printf("SFC1 RELAY: peer->pc %u bytes type=0x%02x\r\n",
+                       (unsigned)biz_len, (unsigned)biz_type);
+            } else {
+                /* B：挑战在 SLE 上到达，走同一套 SFC1 校验与按键流程 */
+                handle_frame(biz, biz_len, 1);
             }
         }
     }

@@ -1,0 +1,39 @@
+M3' SLE 业务帧中继 · 真机证据（2026-11-16）
+=================================================
+
+拓扑：PC --UART(COM11)--> A(exec, SLE client) --SLE--> B(confirm, SLE server, COM12)
+镜像：
+  ws63-liteos-app-m2-exec.fwpkg     1,507,176 B  SHA-256 c3e8fc85a35a75c00fdbf67051d9f0df2a7c95686afb1e651eb704b9fa40bd84
+  ws63-liteos-app-m2-confirm.fwpkg  1,507,176 B  SHA-256 3884523845527ad6a5b4a0fafe59f1497e048f38cfcdf7f8890e974d8305068f
+烧录：hsflash write -b 115200 --before-reset --after-reset --burn-interval 5（两块均一次成功）
+配网：仅 B（COM12）按 docs/60 配网，device_id=1d889565919dce48；A 未配网——中继路径不需要钥匙。
+
+一、批准路径（PC 只接 A，B 仅经 SLE 可达）
+$ node serial-confirm.cjs --port COM11 --device ws63-A --to partner@example.com \
+    --subject "M3-prime relay test" --ttl 90 --timeout 75000
+操作 2f721f08-0a37-4238-b901-d3d9a79520b9 已冻结：外发｜M3-prime relay test｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+确认结果：decision=1（1=批准 0=取消）device=ws63-A
+confirmationId=ws63-612b7f0f2e88107c-971b4c7d9ffcbf97e7ed84517ff6bb2c
+
+二、取消路径（长按 KEY2 ≥600ms）
+$ node serial-confirm.cjs --port COM11 --device ws63-A --to partner@example.com \
+    --subject "M3-prime cancel test" --ttl 90 --timeout 75000
+确认失败：DECISION 用户取消
+（退出码 1，符合预期）
+
+三、B 侧串口证据（COM12 在测试期间独立抓取）
+SFC1 challenge: action=1 ttl=45s summary=外发｜M3-prime evidence2｜→ partner@example.com
+SFC1 RELAY: decision -> peer
+SFC1 decision=1 sent (…)
+
+四、链路计数（端到端测试后，两板 link-status）
+A exec   : state=ALIVE transport=up peer=confirm tx=195 rx=193 bad=0 gap=0 stale=0 up=1 down=0 timeout=0 send_fail=0
+B confirm: state=ALIVE transport=up peer=exec    tx=200 rx=201 bad=0 gap=0 stale=0 up=1 down=0 timeout=0 send_fail=0
+
+五、边界
+- 心跳仍未认证；SLE 本地地址是演示固定值（docs/73 §8 全部不变）。
+- A 不持有 B 的钥匙，但 CHALLENGE 摘要明文经过 A——中继可读摘要，不等于机密；
+  A 无法伪造 DECISION（没有 B 的钥匙）。
+- 本轮只验证 CHALLENGE/DECISION 经 SLE 中继；ACTUATOR 仍由 A 用自己钥匙在 UART 侧处理，
+  未在双板拓扑下联调。

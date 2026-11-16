@@ -60,6 +60,8 @@ const FILES = [
   { from: path.join(REPO_WS63, 'protocol.h'), to: 'protocol.h' },
   { from: path.join(REPO_WS63, 'link.c'), to: 'link.c' },
   { from: path.join(REPO_WS63, 'link.h'), to: 'link.h' },
+  { from: path.join(REPO_WS63, 'sfc1_route.c'), to: 'sfc1_route.c' },
+  { from: path.join(REPO_WS63, 'sfc1_route.h'), to: 'sfc1_route.h' },
 ];
 
 function fail(message) {

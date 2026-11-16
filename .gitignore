@@ -16,6 +16,8 @@ ws63/test_protocol
 ws63/test_protocol.exe
 ws63/test_link
 ws63/test_link.exe
+ws63/test_route
+ws63/test_route.exe
 ws63/*.o
 ws63/build/
 ws63/firmware/out/
