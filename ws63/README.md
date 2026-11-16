@@ -194,7 +194,8 @@ if (proto_decode_decision(rx, rx_len, &d, board_hmac, (void *)PRE_SHARED_KEY) ==
 
 ## 还没做的（下一步）
 
-- [ ] SLE 收发接入（用 fbb_ws63 的 SLE 例程改）
+- [x] **SLE 链路层接入**（2026-11-16 双板真机通过：配对/MTU 251/心跳 ALIVE/KEY1 复位重连，见 [docs/73](../docs/73-M2双板SLE准备-2026-11-14.md) §10）
+- [ ] SLE 承载 **SFC1 业务帧**（CHALLENGE/DECISION 上双板，即 M3'，未做）
 - [ ] GPIO 按键 + LED/蜂鸣器
 - [ ] 2.8" 屏/OLED 显示操作摘要（有驱动再用）
 - [ ] Flash 审计环形缓冲

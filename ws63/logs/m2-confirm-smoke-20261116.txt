@@ -1,0 +1,225 @@
+[打开] COM12 @115200，监听 150s（现在可以复位/断电重上电）
+[+6.7s @115200] 32B
+    | APP|[SYS INFO] mem: used:98536, 
+[+6.7s @115200] 32B
+    | free:264700; log: drop/all[0/0],
+[+6.7s @115200] 13B
+    |  at_recv 0.
+    | 
+[+16.7s @115200] 32B
+    | APP|[SYS INFO] mem: used:98536, 
+[+16.7s @115200] 32B
+    | free:264700; log: drop/all[0/0],
+[+16.7s @115200] 13B
+    |  at_recv 0.
+    | 
+[+25.2s @115200] 7B
+    | boot.
+    | 
+[+25.3s @115200] 32B
+    | Flash Init Fail! ret = 0x8000134
+[+25.3s @115200] 32B
+    | 1
+    | verify_public_rootkey secure 
+[+25.3s @115200] 32B
+    | verify disable!
+    | verify_params_k
+[+25.3s @115200] 32B
+    | ey_area secure verify disable!
+    | 
+[+25.3s @115200] 32B
+    | verify_params_area_info secure v
+[+25.3s @115200] 32B
+    | erify disable!
+    | verify_image_key
+[+25.3s @115200] 32B
+    | _area secure verify disable!
+    | ve
+[+25.3s @115200] 32B
+    | rify_image_code_info secure veri
+[+25.3s @115200] 13B
+    | fy disable!
+    | 
+[+25.4s @115200] 22B
+    | APP|dbg uart init ok.
+    | 
+[+25.6s @115200] 16B
+    | [UPG] init OK!
+    | 
+[+25.7s @115200] 26B
+    | APP|init_sle_mac failed!
+    | 
+[+25.8s @115200] 32B
+    | APP|mac_addr:0xd7,0x 0,0x73,0xe4
+[+25.8s @115200] 32B
+    | ,0x**,0x**,
+    | xo_trim_temp_comp v
+[+25.8s @115200] 8B
+    | al:0 0
+    | 
+[+25.8s @115200] 32B
+    | los_at_plt_cmd_register EXCUTE
+    | 
+[+25.9s @115200] 27B
+    | Enter board confirm (M3)!
+    | 
+[+26.2s @115200] 32B
+    | SFC1 KEY: DEMO (unprovisioned)
+    | 
+[+26.2s @115200] 32B
+    | SFC1 PROV: pairing code 3c6692fe
+[+26.2s @115200] 23B
+    |  (10 min, 3 attempts)
+    | 
+[+26.4s @115200] 32B
+    | SFC1 NV: no record
+    | SFC1 NV: emp
+[+26.4s @115200] 32B
+    | ty replay window
+    | ID = 10566456,
+[+26.4s @115200] 32B
+    |  Create KeyTask is OK!
+    | cpu 0 en
+[+26.4s @115200] 32B
+    | tering scheduler
+    | APP|EM_SIZE: 32
+[+26.4s @115200] 24B
+    |  k
+    | APP|support mesh:0
+    | 
+[+26.4s @115200] 16B
+    | APP|cali_is on
+    | 
+[+26.4s @115200] 32B
+    | APP|btc open
+    | I2C SSD1306 Init s
+[+26.4s @115200] 32B
+    | ucc!
+    | [RADAR_LOG] radar_timer_in
+[+26.4s @115200] 32B
+    | it succ
+    | [RADAR_LOG] alg ctrl re
+[+26.4s @115200] 32B
+    | ad from nv [1][2][0][0][1][1][20
+[+26.4s @115200] 32B
+    | ]
+    | device_main_init: 0!
+    | ===hal_
+[+26.4s @115200] 32B
+    | initialize_phy===226===
+    | device_
+[+26.4s @115200] 32B
+    | module_init:: succ!
+    | cali_set_ca
+[+26.5s @115200] 32B
+    | li_mask:old[0x0] -> new[0x1fa2]
+[+26.5s @115200] 32B
+    | 
+    | 
+    | fe_rf_initialize
+    | cali_offlin
+[+26.5s @115200] 20B
+    | e_cali_entry enter
+    | 
+[+26.5s @115200] 32B
+    | cali_set_cali_done_flag:old[0x0]
+[+26.5s @115200] 32B
+    |  -> new[0x1]
+    | 
+    | rf cali OK. time
+[+26.5s @115200] 17B
+    |  cost:21, ret:0
+    | 
+[+26.5s @115200] 32B
+    | ssd1306_init ret=0
+    | SFC1 relay: 
+[+26.5s @115200] 32B
+    | IO12 idle LOW
+    | M3 SFC1 ready: ua
+[+26.5s @115200] 32B
+    | rt=0 device=ws63-A
+    | CLI: 'efuse'
+[+26.5s @115200] 32B
+    |  read-only; 'kek-status'/'kek-se
+[+26.6s @115200] 32B
+    | lftest' safe; 'kek-burn'/'kek-ad
+[+26.6s @115200] 21B
+    | opt' need KEY2 hold
+    | 
+[+27.3s @115200] 32B
+    | [ACore] sle enable cbk in, resul
+[+27.3s @115200] 32B
+    | t:0
+    | sle enable
+    | [SFC1 SLE] loca
+[+27.3s @115200] 32B
+    | l addr 02:53:46:43:31:02
+    | [ACore
+[+27.3s @115200] 32B
+    | ] sle set announce param, handle
+[+27.3s @115200] 32B
+    | :1, mode:3, min_interval:c8, max
+[+27.3s @115200] 32B
+    | _interval:c8, tx_power: 18
+    | [ACo
+[+27.3s @115200] 32B
+    | re] sle set announce param, own 
+[+27.3s @115200] 32B
+    | addr:0x02:**:**:**:31:02
+    | [ACore
+[+27.3s @115200] 32B
+    | ] sle start announce in, adv_id:
+[+27.3s @115200] 32B
+    | 1
+    | [ACore] sle adv cbk in, event
+[+27.3s @115200] 32B
+    | :0 status:0
+    | [ACore] sle adv cbk
+[+27.3s @115200] 32B
+    |  in, event:1 status:0
+    | [ACore] s
+[+27.3s @115200] 32B
+    | le adv cbk in, event:2 status:0
+[+27.3s @115200] 32B
+    | 
+    | [ACore] sle adv cbk in, event:3
+[+27.3s @115200] 32B
+    |  status:0
+    | [SFC1 SLE] announce e
+[+27.3s @115200] 32B
+    | nable id=1 status=0x0
+    | [SFC1 SLE
+[+27.3s @115200] 32B
+    | ] role=server ready name=sfc1-co
+[+27.3s @115200] 32B
+    | nfirm
+    | SFC1 LINK: init role=conf
+[+27.3s @115200] 11B
+    | irm ret=0
+    | 
+[+30.4s @115200] 32B
+    | xo update temp:3,diff:0,xo:0x308
+[+30.4s @115200] 4B
+    | 3c
+    | 
+[+37.5s @115200] 32B
+    | APP|[SYS INFO] mem: used:98532, 
+[+37.5s @115200] 32B
+    | free:264704; log: drop/all[0/0],
+[+37.5s @115200] 13B
+    |  at_recv 0.
+    | 
+[+47.5s @115200] 32B
+    | APP|[SYS INFO] mem: used:98536, 
+[+47.5s @115200] 32B
+    | free:264700; log: drop/all[0/0],
+[+47.5s @115200] 13B
+    |  at_recv 0.
+    | 
+[+57.5s @115200] 32B
+    | APP|[SYS INFO] mem: used:98684, 
+[+57.5s @115200] 32B
+    | free:264552; log: drop/all[0/0],
+[+57.5s @115200] 13B
+    |  at_recv 0.
+    | 

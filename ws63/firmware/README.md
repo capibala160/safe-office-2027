@@ -13,7 +13,7 @@
 | 蜂鸣器 | ⏸ 按用户要求不启用 | — |
 | SFC1 帧收发 / HMAC | ✅ **真机通过（M3，2026-11-04 晚）** | `board_confirm_m3.c` + `sfc1_hmac.c/h`；烧录 1,469,032B，批准/取消两条路径走通，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §6 |
 | Flash 掉电保存（M1） | ✅ **2026-11-04 晚** | `sfc1_nv.c/h`：已消费 nonce 窗口落 NV（key `0x0F01`，160B + HMAC 校验）；断电重上电后重发旧帧 → `REPLAY`，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §6.7 |
-| 双板 SLE / 断线重连 | ⏳ 代码就绪、待补板（2026-11-14） | `ws63/link.c` + `test_link.c` PC 全过；`sle_link.c` 适配器；`build-m3.cjs --link --role=` 两个镜像均编译通过；真机验收未做，见 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) |
+| 双板 SLE / 断线重连 | ✅ **真机通过（2026-11-16）** | A=exec COM11 / B=confirm COM12：配对 `status=0x0`、MTU 251、双向 `ALIVE`、`link-status` `bad=0 send_fail=0`；KEY1 复位触发 `peer lost` → 恢复 `ALIVE`（A: up=2 down=1 timeout=1）。证据见 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) §10 |
 
 > 本目录的 `base_ssd1306_demo.c` 是在厂商样例 `vendor/Hqyj_Ws63/Farsight/base_03_ssd1306`
 > 基础上改的按键确认版；OLED 驱动 `hal_bsp_oled/` 仍由 SDK 提供，未复制进仓库。
@@ -119,9 +119,10 @@ npm run serial:probe -- --port COM11 --baud 115200 --seconds 120 --watch
 ⚠️ **烧完整 fwpkg 会写 `ws63_all_nv.bin`，把配网钥匙和 nonce 窗口清掉**——烧完必须重新配网，
 不要把"烧录后未配置"误判成固件缺陷。
 
-## 8. M2 双板 SLE 链路（2026-11-14 准备）
+## 8. M2 双板 SLE 链路（2026-11-16 真机通过）
 
-> 等补板期间完成；真机未验证，验收清单见 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) §7。
+> 代码 2026-11-14 完成，2026-11-16 补板后按 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) §7
+> 验收通过（§10 有证据）。**断线用 KEY1 复位触发**——S1 断电会连 CH340 一起消失，该端日志会丢。
 
 ```bash
 # 确认端 B（SLE server）
