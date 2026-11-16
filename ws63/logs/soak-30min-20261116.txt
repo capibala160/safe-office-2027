@@ -1,0 +1,24 @@
+30 分钟长稳（2026-11-16 21:34–22:04）
+=================================================
+
+拓扑：A(exec, COM11) --SLE--> B(confirm, COM12)，心跳 1000ms / 超时 3500ms
+镜像：exec 233396c6… / confirm ce3f10f4…
+方法：每 5 分钟一轮——PING A（本地）、PING B（经 A 中继）、两端 link-status；共 6 轮。
+
+一、每轮结果
+
+t=5min   A PONG ✓  B PONG ✓  A tx=709  rx=709  bad=0  | B tx=1018 rx=1007 bad=0
+t=10min  A PONG ✓  B PONG ✓  A tx=1027 rx=1026 bad=0  | B tx=1336 rx=1325 bad=0
+t=15min  A PONG ✓  B PONG ✓  A tx=1344 rx=1344 bad=0  | B tx=1654 rx=1643 bad=0
+t=20min  A PONG ✓  B PONG ✓  A tx=1662 rx=1662 bad=0  | B tx=1971 rx=1960 bad=0
+t=25min  A PONG ✓  B PONG ✓  A tx=1980 rx=1979 bad=0  | B tx=2289 rx=2278 bad=0
+t=30min  A PONG ✓  B PONG ✓  A tx=2297 rx=2297 bad=0  | B tx=2606 rx=2595 bad=0
+
+A 侧全程：state=ALIVE transport=up up=1 down=0 timeout=0 send_fail=0（新增计数全 0）
+B 侧计数 up=3 down=2 timeout=2 在 t=5min 已存在、6 轮不变——来自长稳开始前的
+A 板重烧/复位，不是本轮断链。本轮期间 B 没有新增 up/down/timeout。
+
+二、结论
+- 30 分钟心跳持续（A 约 1600 帧、B 约 1600 帧区间）、零坏帧、零超时、零发送失败；
+- 12 次 PING（含 6 次经 SLE 中继）全部 PONG；
+- 未做：>1h 长稳、WiFi 与 SLE 共存（当前固件不启用 WiFi，无法测）。
