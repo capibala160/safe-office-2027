@@ -43,6 +43,7 @@
     "ws63:build": "node ../ws63/firmware/build-m3.cjs --build",
     "provision": "node scripts/provision-device.cjs",
     "ping": "node scripts/ping-device.cjs",
+    "relay:test": "node scripts/relay-lock-test.cjs",
     "demo:runthrough": "node scripts/demo-runthrough.cjs"
   },
   "dependencies": {
