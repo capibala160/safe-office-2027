@@ -245,6 +245,13 @@ typedef struct {
     uint8_t target_hash[PROTO_HASH_LEN];
     char summary[PROTO_SUMMARY_MAX + 1];
     uint8_t summary_len;
+    /* v2 结构化摘要（硬件按字段显示，不依赖摘要文字） */
+    char recipient[PROTO_RECIPIENT_MAX + 1];
+    uint8_t recipient_len;
+    uint8_t level;
+    uint8_t attachment_count;
+    uint8_t page;      /* OLED 分页 0..2，自动轮播 */
+    uint64_t page_ms;
     uint8_t via_sle; /* M3'：挑战来自 SLE（回决策也走 SLE），否则走 UART */
     uint64_t deadline_ms;
 } pending_t;
@@ -548,19 +555,92 @@ out:
     (void)memset_s(g_kek_burn_fp, sizeof(g_kek_burn_fp), 0, sizeof(g_kek_burn_fp));
 }
 
-static void show_challenge(const pending_t *p)
+#define PAGE_COUNT 3u
+#define PAGE_MS 1500u
+
+static const char *level_label(uint8_t level)
+{
+    switch (level) {
+        case PROTO_LEVEL_PUBLIC:       return "PUBLIC";
+        case PROTO_LEVEL_INTERNAL:     return "INTERNAL";
+        case PROTO_LEVEL_CONFIDENTIAL: return "CONFIDENTIAL";
+        default:                       return "UNKNOWN";
+    }
+}
+
+/* 摘要按页切两段，每段最多 OLED_LINE_CHARS 个 ASCII 字符 */
+static void summary_slice(const pending_t *p, size_t offset, char *dst, size_t cap)
+{
+    char full[OLED_LINE_CHARS * 2u + 1u];
+    size_t len;
+
+    ascii_only(full, sizeof(full), p->summary, p->summary_len);
+    len = strlen(full);
+    if (offset >= len) {
+        dst[0] = '\0';
+        return;
+    }
+    {
+        const char *src = full + offset;
+        size_t n = strlen(src);
+        size_t i;
+        if (n > OLED_LINE_CHARS) n = OLED_LINE_CHARS;
+        for (i = 0; i < n && i + 1u < cap; i++) {
+            dst[i] = src[i];
+        }
+        dst[i] = '\0';
+    }
+}
+
+/* 按 p->page 画一页：0=对象/动作 1=密级/附件 2=摘要/目标哈希 */
+static void show_page(const pending_t *p)
 {
     char line[OLED_LINE_CHARS + 1];
     char hint[24];
-    uint64_t left_ms = p->deadline_ms > now_ms() ? p->deadline_ms - now_ms() : 0;
 
     oled_clear_line();
-    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_0, "WS63 CONFIRM", TEXT_SIZE_16);
-    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_1, (char *)action_label(p->action), TEXT_SIZE_16);
-    ascii_only(line, sizeof(line), p->summary, p->summary_len);
+    if (p->page == 0u) {
+        ascii_only(line, sizeof(line), p->recipient, p->recipient_len);
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_0, "WS63 CONFIRM", TEXT_SIZE_16);
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_1, (char *)action_label(p->action), TEXT_SIZE_16);
+        (void)sprintf_s(hint, sizeof(hint), "TO:%s", line);
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_2, hint, TEXT_SIZE_8);
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_3, "1/3 SHORT=OK LONG=NO", TEXT_SIZE_8);
+        return;
+    }
+    if (p->page == 1u) {
+        (void)sprintf_s(line, sizeof(line), "LEVEL:%s", level_label(p->level));
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_0, (char *)action_label(p->action), TEXT_SIZE_16);
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_1, line, TEXT_SIZE_8);
+        (void)sprintf_s(line, sizeof(line), "ATTACH:%u", (unsigned)p->attachment_count);
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_2, line, TEXT_SIZE_8);
+        ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_3, "2/3 SHORT=OK LONG=NO", TEXT_SIZE_8);
+        return;
+    }
+    /* page 2：摘要第二段 + 目标哈希前 12 个 hex */
+    summary_slice(p, OLED_LINE_CHARS, line, sizeof(line));
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_0, "TARGET HASH", TEXT_SIZE_16);
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_1, line, TEXT_SIZE_8);
+    (void)sprintf_s(line, sizeof(line), "HASH %02x%02x%02x%02x%02x%02x",
+                    p->target_hash[0], p->target_hash[1], p->target_hash[2],
+                    p->target_hash[3], p->target_hash[4], p->target_hash[5]);
     ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_2, line, TEXT_SIZE_8);
-    (void)sprintf_s(hint, sizeof(hint), "OK:SHORT NO:LONG %us", (unsigned)(left_ms / 1000u));
-    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_3, hint, TEXT_SIZE_8);
+    ssd1306_show_str(OLED_TEXT16_COLUMN_0, OLED_TEXT16_LINE_3, "3/3 SHORT=OK LONG=NO", TEXT_SIZE_8);
+}
+
+static void page_tick(pending_t *p)
+{
+    uint64_t now;
+
+    if (p == NULL || !p->active) {
+        return;
+    }
+    now = now_ms();
+    if ((now - p->page_ms) >= PAGE_MS) {
+        p->page = (uint8_t)((p->page + 1u) % PAGE_COUNT);
+        p->page_ms = now;
+        show_page(p);
+    }
 }
 
 /* ---------------- 决策 ---------------- */
@@ -785,11 +865,19 @@ static void handle_frame(const uint8_t *frame, size_t len, int via_sle)
     g_pending.summary_len = ch.summary_len;
     (void)memcpy_s(g_pending.summary, sizeof(g_pending.summary), ch.summary, ch.summary_len);
     g_pending.summary[ch.summary_len] = '\0';
-    g_pending.deadline_ms = now_ms() + (uint64_t)ttl * 1000ULL;
+    g_pending.recipient_len = ch.recipient_len;
+    (void)memcpy_s(g_pending.recipient, sizeof(g_pending.recipient), ch.recipient, ch.recipient_len);
+    g_pending.recipient[ch.recipient_len] = '\0';
+    g_pending.level = ch.level;
+    g_pending.attachment_count = ch.attachment_count;
+    g_pending.page = 0;
+    g_pending.page_ms = now_ms();
+    g_pending.deadline_ms = g_pending.page_ms + (uint64_t)ttl * 1000ULL;
 
-    printf("SFC1 challenge: action=%u ttl=%us summary=%s\r\n",
-           (unsigned)ch.action, (unsigned)ttl, g_pending.summary);
-    show_challenge(&g_pending);
+    printf("SFC1 challenge: action=%u ttl=%us level=%u attach=%u to=%s summary=%s\r\n",
+           (unsigned)ch.action, (unsigned)ttl, (unsigned)ch.level,
+           (unsigned)ch.attachment_count, g_pending.recipient, g_pending.summary);
+    show_page(&g_pending);
 }
 
 static void feed_byte(uint8_t b)
@@ -1160,6 +1248,10 @@ static void key_task(const char *arg)
         /* 共存观测：周期 WiFi 扫描，与 SLE 心跳并行 */
         wifi_coexist_poll(now);
 #endif
+        /* 硬件结构化摘要分页：待确认任务存在时每 1.5s 轮播一页 */
+        if (g_pending.active) {
+            page_tick(&g_pending);
+        }
         /* 半帧超时：避免残帧把 CLI 永久卡住（完整帧在 115200 下 <20ms） */
         if (g_frame_len != 0 && (now - g_last_rx_ms) > 2000u) {
             g_frame_len = 0;

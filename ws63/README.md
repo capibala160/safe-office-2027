@@ -47,15 +47,18 @@ gcc -std=c11 -Wall -Wextra -Werror -O2 -o test_link link.c test_link.c
 - 双板真实 SLE 适配、构建变体与上板验收清单见
   [docs/73](../docs/73-M2双板SLE准备-2026-11-14.md)。
 
-## 帧格式（v0.1）
+## 帧格式（v0.2，2026-11-17）
 
 ```
 header(10B) + payload + mac(32B)
-header: magic "SFC1" | version 0x01 | type | flags | reserved | length_le16
+header: magic "SFC1" | version 0x02 | type | flags | reserved | length_le16
 length = payload_len + 32（含 MAC）
 ```
 
-- CHALLENGE：task_id(8) + nonce(16) + action(1) + target_hash(32) + issued_at(4) + expires_at(4) + summary_len(1) + summary(≤96)
+- CHALLENGE：task_id(8) + nonce(16) + action(1) + target_hash(32) + issued_at(4) + expires_at(4) +
+  summary_len(1) + summary(≤96) + recipient_len(1) + recipient(≤32, ASCII) + level(1) + attachment_count(1)
+- 版本 v2 与 v1 **不兼容**：板子与 PC 工具必须同版本；配网帧是独立小协议，不受影响
+- 硬件结构化摘要（收件人/密级/附件数）见 [docs/76](../docs/76-硬件结构化摘要-2026-11-17.md)
 - DECISION：task_id(8) + nonce(16) + decision(1) + device_id(8) + decided_at(4)
 - MAC 覆盖 header + payload（不含 MAC 本身）
 - 全部小端；显式编解码，不依赖结构体对齐

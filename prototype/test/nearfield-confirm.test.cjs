@@ -77,6 +77,26 @@ async function rejectsCode(promise, code) {
   });
 }
 
+test('v2 结构化摘要：密级编码与附件数随挑战帧下发', () => {
+  let nowSec = BASE_SEC;
+  const clock = () => nowSec;
+  const operation = sealed({
+    level: '机密',
+    recipient: 'partner@example.com',
+    attachments: [
+      { name: 'a.txt', sha256: 'a'.repeat(64), size: 3 },
+      { name: 'b.txt', sha256: 'b'.repeat(64), size: 4 },
+    ],
+  });
+  const probe = confirmerFor(clock);
+  const { frame } = probe.beginChallenge(operation);
+  const challenge = decodeFrame(frame, KEY);
+  assert.equal(challenge.level, 2, '机密 → 2');
+  assert.equal(challenge.attachmentCount, 2);
+  assert.equal(challenge.recipient, 'partner@example.com');
+  probe.abort();
+});
+
 test('正常闭环：设备确认 → 冻结记录 confirmed → 发送 sent', async (t) => {
   let nowSec = BASE_SEC;
   const clock = () => nowSec;
@@ -93,6 +113,10 @@ test('正常闭环：设备确认 → 冻结记录 confirmed → 发送 sent', a
   const challenge = decodeFrame(frame, KEY);
   assert.equal(challenge.type, 'challenge');
   assert.equal(challenge.summary, buildSummary(operation));
+  /* v2 结构化摘要：屏幕按字段显示，不依赖摘要文字 */
+  assert.equal(challenge.recipient, operation.recipient);
+  assert.equal(challenge.level, 1, '内部级 → 1');
+  assert.equal(challenge.attachmentCount, operation.attachments.length);
   assert.deepEqual(challenge.operationHash, Buffer.from(operation.operationHash, 'hex'));
   assert.deepEqual(challenge.taskId, pending.taskId);
   assert.deepEqual(challenge.nonce, pending.nonce);

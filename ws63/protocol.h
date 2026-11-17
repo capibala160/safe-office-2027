@@ -32,7 +32,7 @@ extern "C" {
 #define PROTO_MAGIC_2 'C'
 #define PROTO_MAGIC_3 '1'
 
-#define PROTO_VERSION 0x01u
+#define PROTO_VERSION 0x02u /* v2：CHALLENGE 追加收件人/密级/附件数（硬件结构化摘要） */
 #define PROTO_TYPE_CHALLENGE 0x01u
 #define PROTO_TYPE_DECISION 0x02u
 /* 执行帧（v0.52）：确认通过后由主机下发，板端验 MAC 后驱动 GPIO，再回 ACK */
@@ -45,7 +45,13 @@ extern "C" {
 #define PROTO_HASH_LEN 32u
 #define PROTO_MAC_LEN 32u
 #define PROTO_SUMMARY_MAX 96u
+#define PROTO_RECIPIENT_MAX 32u
 #define PROTO_REPLAY_WINDOW 8u
+
+/* 硬件结构化摘要用的密级编码（与 Node 侧一致） */
+#define PROTO_LEVEL_PUBLIC 0u
+#define PROTO_LEVEL_INTERNAL 1u
+#define PROTO_LEVEL_CONFIDENTIAL 2u
 
 /* action 只允许 1–4（两端必须一致；新增动作需升级协议版本） */
 #define PROTO_ACTION_SEND_EXTERNAL 1u
@@ -55,9 +61,11 @@ extern "C" {
 #define PROTO_ACTION_MIN PROTO_ACTION_SEND_EXTERNAL
 #define PROTO_ACTION_MAX PROTO_ACTION_DEVICE
 
-#define PROTO_CHALLENGE_PAYLOAD_FIXED (PROTO_TASK_ID_LEN + PROTO_NONCE_LEN + 1u + PROTO_HASH_LEN + 4u + 4u + 1u)
+#define PROTO_CHALLENGE_PAYLOAD_FIXED \
+    (PROTO_TASK_ID_LEN + PROTO_NONCE_LEN + 1u + PROTO_HASH_LEN + 4u + 4u + 1u + 1u + 1u + 1u)
 #define PROTO_DECISION_PAYLOAD_LEN (PROTO_TASK_ID_LEN + PROTO_NONCE_LEN + 1u + 8u + 4u)
-#define PROTO_CHALLENGE_MAX (PROTO_HEADER_LEN + PROTO_CHALLENGE_PAYLOAD_FIXED + PROTO_SUMMARY_MAX + PROTO_MAC_LEN)
+#define PROTO_CHALLENGE_MAX \
+    (PROTO_HEADER_LEN + PROTO_CHALLENGE_PAYLOAD_FIXED + PROTO_SUMMARY_MAX + PROTO_RECIPIENT_MAX + PROTO_MAC_LEN)
 #define PROTO_DECISION_MAX (PROTO_HEADER_LEN + PROTO_DECISION_PAYLOAD_LEN + PROTO_MAC_LEN)
 
 typedef enum {
@@ -91,6 +99,10 @@ typedef struct {
     uint32_t expires_at;
     uint8_t summary_len;
     char summary[PROTO_SUMMARY_MAX + 1]; /* 解码时补 '\0' */
+    uint8_t recipient_len;
+    char recipient[PROTO_RECIPIENT_MAX + 1]; /* 结构化摘要：收件人/对象（ASCII） */
+    uint8_t level;                           /* PROTO_LEVEL_* */
+    uint8_t attachment_count;                /* 0–255 */
     uint8_t mac[PROTO_MAC_LEN];
 } proto_challenge_t;
 

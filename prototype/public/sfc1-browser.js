@@ -17,7 +17,7 @@
   const MIN_FRAME = HEADER_LEN + MAC_LEN;
   const MAX_FRAME = 1024;
   const MAGIC = new Uint8Array([0x53, 0x46, 0x43, 0x31]); // "SFC1"
-  const VERSION = 1;
+  const VERSION = 2; // v2：CHALLENGE 追加收件人/密级/附件数
   const TYPE_CHALLENGE = 1;
   const TYPE_DECISION = 2;
   const ACTION_MIN = 1;
@@ -240,13 +240,28 @@
       if (p.length !== 37 || p[24] > 1) throw new Error('invalid decision');
       return { type: 'decision', ...common, decision: p[24], deviceId: p.slice(25, 33), decidedAt: readU32le(p, 33) };
     }
-    if (p.length < 66 || p[65] > SUMMARY_MAX_BYTES || p.length !== 66 + p[65]) throw new Error('invalid challenge');
+    if (p.length < 67 || p[65] > SUMMARY_MAX_BYTES) throw new Error('invalid challenge');
     if (p[24] < ACTION_MIN || p[24] > ACTION_MAX) throw new Error('invalid action');
     const issuedAt = readU32le(p, 57);
     const expiresAt = readU32le(p, 61);
     if (expiresAt <= issuedAt) throw new Error('invalid lifetime');
-    const summary = new TextDecoder('utf-8', { fatal: true }).decode(p.subarray(66));
-    return { type: 'challenge', ...common, action: p[24], operationHash: p.slice(25, 57), issuedAt, expiresAt, summary };
+    const summaryEnd = 66 + p[65];
+    if (summaryEnd + 1 > p.length) throw new Error('invalid challenge');
+    const summaryBytes = p.subarray(66, summaryEnd);
+    const summary = new TextDecoder('utf-8', { fatal: true }).decode(summaryBytes);
+    const recipientLen = p[summaryEnd];
+    if (recipientLen > 32 || p.length !== summaryEnd + 1 + recipientLen + 2) throw new Error('invalid recipient');
+    const recipient = new TextDecoder('utf-8', { fatal: true }).decode(
+      p.subarray(summaryEnd + 1, summaryEnd + 1 + recipientLen),
+    );
+    if (!/^[\x20-\x7e]*$/.test(recipient)) throw new Error('invalid recipient');
+    const level = p[summaryEnd + 1 + recipientLen];
+    const attachmentCount = p[summaryEnd + 1 + recipientLen + 1];
+    if (level > 2) throw new Error('invalid level');
+    return {
+      type: 'challenge', ...common, action: p[24], operationHash: p.slice(25, 57),
+      issuedAt, expiresAt, summary, recipient, level, attachmentCount,
+    };
   }
 
   async function deriveDeviceId(/** @type {any} */ value) {

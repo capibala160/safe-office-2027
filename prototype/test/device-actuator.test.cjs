@@ -8,7 +8,7 @@ const { createSerialActuator, mapDeviceOp } = require('../src/device-actuator.cj
 const { encodeActuator, decodeFrame } = require('../src/ws63-protocol.cjs');
 
 function ackFrame({ nonce = crypto.randomBytes(16), status = 0, pin = 13, level = 1 } = {}, key) {
-  const header = Buffer.from([0x53, 0x46, 0x43, 0x31, 1, 0x22, 0, 0, 0, 0]);
+  const header = Buffer.from([0x53, 0x46, 0x43, 0x31, 2, 0x22, 0, 0, 0, 0]);
   header.writeUInt16LE(19 + 32, 8);
   const data = Buffer.concat([header, nonce, Buffer.from([status, pin, level])]);
   return Buffer.concat([data, crypto.createHmac('sha256', key).update(data).digest()]);
@@ -190,8 +190,8 @@ test('执行器：异常长度帧头不阻塞后续有效 ACK', async () => {
         const { nonce } = decodeFrame(buf, key);
         const ack = ackFrame({ nonce, status: 0, pin: 13, level: 1 }, key);
         // 长度字段异常（0x7fff / 0）的假帧头 + 紧跟有效 ACK
-        const badLarge = Buffer.from([0x53, 0x46, 0x43, 0x31, 1, 0x22, 0, 0, 0xff, 0x7f]);
-        const badSmall = Buffer.from([0x53, 0x46, 0x43, 0x31, 1, 0x22, 0, 0, 0x00, 0x00]);
+        const badLarge = Buffer.from([0x53, 0x46, 0x43, 0x31, 2, 0x22, 0, 0, 0xff, 0x7f]);
+        const badSmall = Buffer.from([0x53, 0x46, 0x43, 0x31, 2, 0x22, 0, 0, 0x00, 0x00]);
         setImmediate(() => port.emit('data', Buffer.concat([badLarge, badSmall, ack])));
       };
       port.close = (cb) => { if (cb) cb(); };

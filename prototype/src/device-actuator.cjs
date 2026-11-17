@@ -75,7 +75,7 @@ const SFC1_PAYLOAD_RANGE = new Map([
 function sfc1FrameLength(buf, i) {
   if (i + SFC1_HEADER_BYTES > buf.length) return 0;
   if (buf[i] !== 0x53 || buf[i + 1] !== 0x46 || buf[i + 2] !== 0x43 || buf[i + 3] !== 0x31) return 0;
-  if (buf[i + 4] !== 1 || buf[i + 6] !== 0 || buf[i + 7] !== 0) return 0;
+  if (buf[i + 4] !== 2 || buf[i + 6] !== 0 || buf[i + 7] !== 0) return 0;
   const range = SFC1_PAYLOAD_RANGE.get(buf[i + 5]);
   if (!range) return 0;
   const payload = buf.readUInt16LE(i + 8) - SFC1_HMAC_BYTES;

@@ -42,6 +42,18 @@ static int ct_equal(const uint8_t *a, const uint8_t *b, size_t n)
 
 /* 拒绝 NUL 与非法 UTF-8，与 Node TextDecoder(fatal) 的行为对齐。
  * 摘要会显示在确认端，坏字节应尽早拒绝，而不是留给 UI。 */
+/* 收件人/对象标识只允许可打印 ASCII（会原样上 OLED，避免字库缺字） */
+static int recipient_valid(const uint8_t *s, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (s[i] < 0x20u || s[i] > 0x7Eu) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int summary_valid(const uint8_t *s, size_t n)
 {
     size_t i = 0;
@@ -167,8 +179,15 @@ size_t proto_encode_challenge(const proto_challenge_t *c, uint8_t *out, size_t c
     if (!summary_valid((const uint8_t *)c->summary, c->summary_len)) {
         return 0;
     }
+    if (c->recipient_len > PROTO_RECIPIENT_MAX ||
+        !recipient_valid((const uint8_t *)c->recipient, c->recipient_len)) {
+        return 0;
+    }
+    if (c->level > PROTO_LEVEL_CONFIDENTIAL) {
+        return 0;
+    }
 
-    payload_len = (uint16_t)(PROTO_CHALLENGE_PAYLOAD_FIXED + c->summary_len);
+    payload_len = (uint16_t)(PROTO_CHALLENGE_PAYLOAD_FIXED + c->summary_len + c->recipient_len);
     total = (size_t)PROTO_HEADER_LEN + payload_len + PROTO_MAC_LEN;
     if (total > cap) {
         return 0;
@@ -191,6 +210,14 @@ size_t proto_encode_challenge(const proto_challenge_t *c, uint8_t *out, size_t c
     if (c->summary_len > 0) {
         memcpy(p, c->summary, c->summary_len);
     }
+    p += c->summary_len;
+    *p++ = c->recipient_len;
+    if (c->recipient_len > 0) {
+        memcpy(p, c->recipient, c->recipient_len);
+    }
+    p += c->recipient_len;
+    *p++ = c->level;
+    *p++ = c->attachment_count;
 
     if (finish_frame(out, total, cap, payload_len, mac, ctx) != PROTO_OK) {
         return 0;
@@ -234,6 +261,7 @@ int proto_decode_challenge(const uint8_t *buf, size_t len, proto_challenge_t *ou
     uint16_t payload_len = 0;
     const uint8_t *p;
     uint8_t summary_len;
+    uint8_t recipient_len;
     int rc;
 
     if (out == NULL) {
@@ -246,13 +274,19 @@ int proto_decode_challenge(const uint8_t *buf, size_t len, proto_challenge_t *ou
         return rc;
     }
     if (payload_len < PROTO_CHALLENGE_PAYLOAD_FIXED ||
-        payload_len > PROTO_CHALLENGE_PAYLOAD_FIXED + PROTO_SUMMARY_MAX) {
+        payload_len > PROTO_CHALLENGE_PAYLOAD_FIXED + PROTO_SUMMARY_MAX + PROTO_RECIPIENT_MAX) {
         return PROTO_ERR_FRAME;
     }
 
     p = buf + PROTO_HEADER_LEN;
     summary_len = p[PROTO_TASK_ID_LEN + PROTO_NONCE_LEN + 1u + PROTO_HASH_LEN + 4u + 4u];
-    if ((uint16_t)(PROTO_CHALLENGE_PAYLOAD_FIXED + summary_len) != payload_len) {
+    if (summary_len > PROTO_SUMMARY_MAX ||
+        (uint16_t)(PROTO_CHALLENGE_PAYLOAD_FIXED + summary_len) > payload_len) {
+        return PROTO_ERR_FRAME;
+    }
+    recipient_len = p[PROTO_TASK_ID_LEN + PROTO_NONCE_LEN + 1u + PROTO_HASH_LEN + 4u + 4u + 1u + summary_len];
+    if (recipient_len > PROTO_RECIPIENT_MAX ||
+        (uint16_t)(PROTO_CHALLENGE_PAYLOAD_FIXED + summary_len + recipient_len) != payload_len) {
         return PROTO_ERR_FRAME;
     }
 
@@ -280,10 +314,23 @@ int proto_decode_challenge(const uint8_t *buf, size_t len, proto_challenge_t *ou
         memcpy(out->summary, p, out->summary_len);
     }
     out->summary[out->summary_len] = '\0';
+    p += out->summary_len;
+    out->recipient_len = *p++;
+    if (out->recipient_len > 0 && out->recipient_len <= PROTO_RECIPIENT_MAX) {
+        memcpy(out->recipient, p, out->recipient_len);
+    }
+    out->recipient[out->recipient_len <= PROTO_RECIPIENT_MAX ? out->recipient_len : 0] = '\0';
+    p += out->recipient_len;
+    out->level = *p++;
+    out->attachment_count = *p++;
     if (out->expires_at <= out->issued_at) {
         return PROTO_ERR_FRAME;
     }
     if (!summary_valid((const uint8_t *)out->summary, out->summary_len)) {
+        return PROTO_ERR_FRAME;
+    }
+    if (!recipient_valid((const uint8_t *)out->recipient, out->recipient_len) ||
+        out->level > PROTO_LEVEL_CONFIDENTIAL) {
         return PROTO_ERR_FRAME;
     }
     memcpy(out->mac, buf + PROTO_HEADER_LEN + payload_len, PROTO_MAC_LEN);

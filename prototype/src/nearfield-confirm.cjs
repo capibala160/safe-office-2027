@@ -28,6 +28,9 @@ const { PROTOCOL_ACTIONS, verifyOperation } = require('./operation.cjs');
  * @property {number} issuedAt
  * @property {number} expiresAt
  * @property {string} summary
+ * @property {string} recipient
+ * @property {number} level
+ * @property {number} attachmentCount
  * @property {string} operationId
  */
 /**
@@ -213,7 +216,7 @@ class NearfieldConfirmer {
   _decodeDecision(buffer) {
     if (buffer.length >= 6) {
       if (!buffer.subarray(0, 4).equals(SFC1_MAGIC)) throw new NearfieldError('FRAME', '帧头 magic 非法');
-      if (buffer[4] !== 1) throw new NearfieldError('VERSION', '协议版本不支持');
+      if (buffer[4] !== 2) throw new NearfieldError('VERSION', '协议版本不支持');
       if (buffer[5] !== 1 && buffer[5] !== 2) throw new NearfieldError('TYPE', '未知帧类型');
     }
     let frame;
@@ -276,6 +279,11 @@ class NearfieldConfirmer {
       issuedAt: now,
       expiresAt,
       summary: buildSummary(operation),
+      /* v2 结构化摘要：硬件屏幕按这些字段显示，不依赖摘要文字 */
+      /* 设备名可能含中文：上屏用 ASCII 占位，长度按字节截断（与固件 ascii_only 一致） */
+      recipient: String(operation.recipient || '').replace(/[^\x20-\x7e]/g, '?').slice(0, 32),
+      level: operation.level === '公开' ? 0 : operation.level === '机密' ? 2 : 1,
+      attachmentCount: Array.isArray(operation.attachments) ? operation.attachments.length : 0,
       operationId: operation.operationId,
     });
     const frame = encodeChallenge({
@@ -286,6 +294,9 @@ class NearfieldConfirmer {
       issuedAt: pending.issuedAt,
       expiresAt: pending.expiresAt,
       summary: pending.summary,
+      recipient: pending.recipient,
+      level: pending.level,
+      attachmentCount: pending.attachmentCount,
     }, this.key);
 
     this.pending = pending;

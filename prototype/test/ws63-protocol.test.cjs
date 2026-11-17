@@ -9,7 +9,9 @@ const { spawnSync } = require('node:child_process');
 const { encodeChallenge, encodeDecision, decodeFrame } = require('../src/ws63-protocol.cjs');
 const key = Buffer.alloc(32, 0x42);
 const challenge = { taskId: Buffer.alloc(8, 1), nonce: Buffer.alloc(16, 2), action: 1,
-  operationHash: crypto.createHash('sha256').update('final document').digest(), issuedAt: 1000, expiresAt: 1030, summary: '发送纪要给 partner@example.com' };
+  operationHash: crypto.createHash('sha256').update('final document').digest(), issuedAt: 1000, expiresAt: 1030,
+  summary: '发送纪要给 partner@example.com',
+  recipient: 'partner@example.com', level: 1, attachmentCount: 2 };
 const decision = { ...challenge, decision: 1, deviceId: Buffer.alloc(8, 3), decidedAt: 1005 };
 test('WS63 codec: round trips, UTF-8 byte limit, malformed and tampered frames', () => {
   for (const [value, encode] of [[challenge, encodeChallenge], [decision, encodeDecision]]) {
