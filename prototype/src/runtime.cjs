@@ -25,6 +25,14 @@ const { ConfirmationService, digest } = require('./confirmation.cjs');
 const { classifyModelFault, asModelFault } = require('./faults.cjs');
 const { verifyAgentManifest } = require('./agents.cjs');
 
+/* 密级排序：未知密级按最高处理（fail-closed） */
+/** @type {Record<string, number>} */
+const LEVEL_RANK = { '公开': 0, '内部': 1, '机密': 2 };
+/** @param {string} level @returns {number} */
+function levelRank(level) {
+  return Object.prototype.hasOwnProperty.call(LEVEL_RANK, level) ? LEVEL_RANK[level] : 3;
+}
+
 // ---------- 注入接缝的契约（strict：调用方传错形状时在这里报错） ----------
 /**
  * @typedef {object} RuntimeAsrLike
@@ -108,6 +116,41 @@ class AgentRuntime {
    */
   _isOutbound(action) {
     return this.toolRegistry ? this.toolRegistry.isOutbound(action) : OUTBOUND_ACTIONS.has(action);
+  }
+
+  /**
+   * 跨步骤来源闭包：沿 sourceIds 递归到根源，汇总来源 / 最高密级 / 污点 / 变换链。
+   * 用于「改名、摘要、转附件、复制、转写」之后限制仍随内容走。
+   * @param {string} id 知识库条目 id
+   * @returns {{sources: string[], maxLevel: string, tainted: boolean, transforms: string[]}}
+   */
+  _provenanceOf(id) {
+    const sources = new Set();
+    const transforms = new Set();
+    let maxLevel = '公开';
+    let tainted = false;
+    const seen = new Set();
+    const visit = (/** @type {string} */ cur) => {
+      if (seen.has(cur)) return;
+      seen.add(cur);
+      const entry = this.knowledge[cur];
+      if (!entry) {
+        sources.add(cur); // 已被删除/外部条目：按根源处理，授权仍需覆盖
+        return;
+      }
+      if (entry.tainted) tainted = true;
+      if (levelRank(entry.level) > levelRank(maxLevel)) maxLevel = entry.level;
+      if (Array.isArray(entry.transforms)) entry.transforms.forEach((/** @type {string} */ t) => transforms.add(t));
+      const parents = Array.isArray(entry.sourceIds) && entry.sourceIds.length ? entry.sourceIds : null;
+      if (parents === null) {
+        sources.add(cur); /* 根源条目：自身即来源 */
+      } else {
+        for (const p of parents) visit(p);
+      }
+    };
+    visit(id);
+    if (transforms.size === 0 && this.knowledge[id] && this.knowledge[id].generated) transforms.add('generate');
+    return { sources: [...sources], maxLevel, tainted, transforms: [...transforms] };
   }
 
   /**
@@ -391,10 +434,34 @@ class AgentRuntime {
     }
     const sourceId = action === 'summarize' ? args.of : action === 'printDoc' ? args.id : args.docId;
     if (!gate2Off && sourceId) {
-      const sources = this.knowledge[sourceId]?.sourceIds || [sourceId];
-      if (!sources.every((/** @type {any} */ id) => ctx.token.documentIds.includes(id))) {
-        this.audit.append('数据访问拒绝', { action, sourceId });
-        return `  [${n}] ${action} ⛔ 数据访问拒绝：源资源未授权`;
+      /* 跨步骤来源闭包：不只是本条记录，派生链上的所有根源都必须被令牌覆盖 */
+      const prov = this._provenanceOf(sourceId);
+      const missing = prov.sources.filter((id) => !ctx.token.documentIds.includes(id));
+      if (missing.length > 0) {
+        this.audit.append('来源闭包拒绝', { n, action, sourceId, missing });
+        return `  [${n}] ${action} ⛔ 闸2拒绝：来源未授权（${missing.join(',')}）`;
+      }
+      const entry = this.knowledge[sourceId];
+      const outward = this._isOutbound(action) || action === 'printDoc';
+      if (entry && outward && !this._ablate('gate3')) {
+        /* 污点闭包：派生自被隔离输入的内容，不允许出站/打印 */
+        if (prov.tainted) {
+          this.risk.add(25, `来源污点拦截：${action}`);
+          this.risk.observe({ kind: 'blocked', action });
+          this.audit.append('闸3拒绝', {
+            n, action, sourceId, reason: '来源受污染（注入隔离）', sources: prov.sources,
+          });
+          return `  [${n}] ${action} ⛔ 闸3拒绝：内容来源受污染（派生自被隔离的输入）`;
+        }
+        /* 等级单调：转换不得把来源密级降下来 */
+        if (levelRank(prov.maxLevel) > levelRank(entry.level)) {
+          this.risk.add(20, `来源密级降级拦截：${action}`);
+          this.audit.append('闸3拒绝', {
+            n, action, sourceId, reason: '来源密级高于内容密级',
+            sources: prov.sources, maxLevel: prov.maxLevel, level: entry.level,
+          });
+          return `  [${n}] ${action} ⛔ 闸3拒绝：来源密级=${prov.maxLevel} 高于内容密级=${entry.level}（转换不得降级）`;
+        }
       }
     }
     if (!gate2Off && this._isOutbound(action)) {
@@ -622,6 +689,9 @@ class AgentRuntime {
       if (!doc) {
         effect = `生成摘要（源 ${args.of} 未读入，空）`;
       } else {
+        /* 派生内容继承来源闭包：密级取最高、污点取并集、变换链追加 summarize */
+        const prov = this._provenanceOf(doc.id);
+        const inheritedLevel = levelRank(prov.maxLevel) > levelRank(doc.level) ? prov.maxLevel : doc.level;
         const prepared = prepareModelInput(this.planner.llm, ctx.command || '整理正式纪要',
           [{ ...doc, body: doc.cleaned || doc.body }], ctx);
         if (prepared.blocks.some(b => b.withheld)) {
@@ -640,16 +710,25 @@ class AgentRuntime {
         }
         const oc = this._ablate('gate5')
           ? { allowed: true, content: draft }
-          : this.perf.measure('闸5 输出检测', () => checkAgentOutput(draft, { level: doc.level }));
+          : this.perf.measure('闸5 输出检测', () => checkAgentOutput(draft, { level: inheritedLevel }));
         if (!oc.allowed) {
           this.risk.add(20, `闸5 拦截生成内容：${oc.reasons.join('、')}`);
           this.audit.append('闸5拒绝', { n, action, reasons: oc.reasons });
           effect = `生成内容未通过输出检测（${oc.reasons.join('、')}）→ 已拦截，不输出`;
         } else {
           const id = `draft_${doc.id}`;
-          this.knowledge[id] = { id, title: `${doc.title}（正式稿）`, level: doc.level,
-            body: oc.content, cleaned: oc.content, sourceIds: doc.sourceIds || [doc.id], generated: true, owner: ctx.operator || '' };
-          this.audit.append('生成稿', { id, sourceIds: this.knowledge[id].sourceIds, level: doc.level });
+          this.knowledge[id] = {
+            id, title: `${doc.title}（正式稿）`, level: inheritedLevel,
+            body: oc.content, cleaned: oc.content,
+            sourceIds: prov.sources, generated: true,
+            tainted: Boolean(doc.tainted || prov.tainted),
+            transforms: [...prov.transforms, 'summarize'],
+            owner: ctx.operator || '',
+          };
+          this.audit.append('生成稿', {
+            id, sourceIds: prov.sources, level: inheritedLevel,
+            tainted: this.knowledge[id].tainted, transforms: this.knowledge[id].transforms,
+          });
           effect = `生成正式稿 ${id}《${doc.title}》`;
         }
       }
