@@ -15,7 +15,7 @@
 | Flash 掉电保存（M1） | ✅ **2026-11-04 晚** | `sfc1_nv.c/h`：已消费 nonce 窗口落 NV（key `0x0F01`，160B + HMAC 校验）；断电重上电后重发旧帧 → `REPLAY`，见 [docs/57](../../docs/57-M3板端SFC1与串口CLI-2026-11-04.md) §6.7 |
 | 双板 SLE / 断线重连 | ✅ **真机通过（2026-11-16）** | A=exec COM11 / B=confirm COM12：配对 `status=0x0`、MTU 251、双向 `ALIVE`、`link-status` `bad=0 send_fail=0`；KEY1 复位触发 `peer lost` → 恢复 `ALIVE`（A: up=2 down=1 timeout=1）。证据见 [docs/73](../../docs/73-M2双板SLE准备-2026-11-14.md) §10 |
 | M3' 业务帧上 SLE | ✅ **真机端到端（2026-11-16）** | `sfc1_route.c` 分流 SFCL/SFC1；PC→A(COM11)→SLE→B(COM12)→KEY2→DECISION→PC，批准/取消均过；**双板执行**（B 钥匙确认、A 钥匙驱动 IO12、回 ACK）也已打通；A 不持钥只转发。见 [docs/74](../../docs/74-M3prime-业务帧上SLE-2026-11-16.md) |
-| 硬件结构化摘要（协议 v2） | ⚠️ 实现+真机跑通、**屏幕肉眼未验** | 挑战帧 v2 追加 `recipient/level/attachment_count`；OLED 每 1.5s 轮播 3 页（对象/密级附件数/摘要哈希）。B 日志确认字段到达，批准/取消/执行均过；分页显示未由人确认。见 [docs/76](../../docs/76-硬件结构化摘要-2026-11-17.md) |
+| 硬件结构化摘要（协议 v2） | ✅ **真机 + 屏幕人工确认（2026-11-17）** | 挑战帧 v2 追加 `recipient/level/attachment_count`；OLED 每 1.5s 轮播 3 页（对象/密级附件数/摘要哈希）。批准/取消/执行均过，操作者确认三页内容正确（TO/LEVEL:INTERNAL/ATTACH:0/HASH）。见 [docs/76](../../docs/76-硬件结构化摘要-2026-11-17.md) |
 
 > 本目录的 `base_ssd1306_demo.c` 是在厂商样例 `vendor/Hqyj_Ws63/Farsight/base_03_ssd1306`
 > 基础上改的按键确认版；OLED 驱动 `hal_bsp_oled/` 仍由 SDK 提供，未复制进仓库。
