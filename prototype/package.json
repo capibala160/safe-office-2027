@@ -43,12 +43,15 @@
     "ws63:build": "node ../ws63/firmware/build-m3.cjs --build",
     "provision": "node scripts/provision-device.cjs",
     "ping": "node scripts/ping-device.cjs",
-    "relay:test": "node scripts/relay-lock-test.cjs",
-    "demo:runthrough": "node scripts/demo-runthrough.cjs"
+    "relay:test": "node scripts/relay-lock-check.cjs",
+    "demo:runthrough": "node scripts/demo-runthrough.cjs",
+    "coverage": "node --test --experimental-test-coverage",
+    "audit": "npm audit --registry=https://registry.npmjs.org --audit-level=high",
+    "release": "node scripts/release.cjs"
   },
   "dependencies": {
     "imapflow": "^2.10.0",
-    "nodemailer": "^6.10.1"
+    "nodemailer": "^10.6.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

@@ -4,10 +4,18 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  # 跨平台单元/集成测试（Node 24：项目依赖 node:sqlite，20/22 不支持）
   test:
-    name: Node tests + browser E2E
-    runs-on: ubuntu-latest
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     defaults:
       run:
         working-directory: prototype
@@ -23,22 +31,83 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Chromium (E2E)
-        run: npx playwright install --with-deps chromium
+      - name: Unit / integration tests + coverage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: node --test --experimental-test-coverage | tee coverage.txt
 
-      - name: Lint + typecheck
-        run: npm run lint && npm run typecheck && npm run typecheck:strict
-
-      - name: Unit / integration tests
+      - name: Unit / integration tests (Windows)
+        if: matrix.os == 'windows-latest'
         run: npm test
 
-      - name: Browser E2E
-        run: npm run e2e
-
-      - name: Upload artifacts on failure
-        if: failure()
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: test-artifacts
-          path: prototype/out
-          if-no-files-found: ignore
+          name: coverage
+          path: prototype/coverage.txt
+          if-no-files-found: error
+
+  # 静态检查 + 浏览器 E2E
+  quality:
+    name: Lint / typecheck / E2E
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: prototype
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: prototype/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run lint
+      - run: npm run typecheck && npm run typecheck:strict
+      - run: npm run e2e
+
+  # 依赖审计（高危阻断）
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: prototype
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: prototype/package-lock.json
+      - run: npm ci
+      - run: npm run audit
+
+  # 部署产物冒烟：构建镜像 → 起容器 → /api/health
+  docker:
+    name: Docker build + health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t safe-office:ci .
+      - name: Run and probe health
+        run: |
+          docker run -d --name safe-office-ci -p 17812:7812 safe-office:ci
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:17812/api/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          echo "--- health response ---"
+          curl -fsS http://127.0.0.1:17812/api/health || true
+          echo
+          if [ "$ok" != "1" ]; then
+            echo "health check failed; container logs:"
+            docker logs safe-office-ci
+            docker rm -f safe-office-ci
+            exit 1
+          fi
+          docker logs safe-office-ci | tail -20
+          docker rm -f safe-office-ci
