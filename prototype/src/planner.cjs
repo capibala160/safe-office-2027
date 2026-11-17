@@ -210,6 +210,8 @@ function validatePlan(rawSteps, {
     }
     }
     if (delegationAllowed) {
+      /* 非枚举标记：执行前必须用当时的委托验证器再核一次（过期/撤销即停） */
+      Object.defineProperty(s, 'delegationVerified', { value: true, enumerable: false, configurable: true });
       notes.push({
         level: 'info',
         reason: `委托令牌放行：${s.action} → ${(s.args && s.args.to) || '(未指定)'}`,

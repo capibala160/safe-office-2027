@@ -647,3 +647,35 @@ test('UI：审计员按策略自动回信（固定模板，不读来信正文）
   }, null, { timeout: 20000 });
   assert.match(await page.textContent('#auto-reply-result'), /扫描 \d+ 封/);
 });
+
+test('UI：任务回放页展示批准/回执与审计完整性', { timeout: 60000 }, async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('alice', '员工')] });
+  const started = await startServer({ port: 0, auth, documentsStore: new DocumentStore(':memory:') });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+
+  await e2eLogin(page, started.url, 'alice');
+  await page.waitForSelector('[data-sample="normal-minutes"]');
+  await page.click('[data-sample="normal-minutes"]');
+  await page.waitForSelector('#toast.show');
+
+  assert.equal(await page.locator('a[href="#/replay"]').count(), 1, '侧栏应有任务回放入口');
+  await page.goto(`${started.url}/#/replay`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(
+    () => {
+      const el = document.getElementById('replay-out');
+      return el && el.textContent.trim().length > 0;
+    },
+    null,
+    { timeout: 20000 },
+  );
+  const text = await page.textContent('#replay-out');
+  assert.match(text, /批准与回执/, `回放内容：${text.slice(0, 300)}`);
+  assert.match(text, /审计链通过/, `回放内容：${text.slice(0, 300)}`);
+  assert.match(text, /闸与风险事件/);
+});

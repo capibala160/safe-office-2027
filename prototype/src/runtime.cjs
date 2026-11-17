@@ -362,6 +362,19 @@ class AgentRuntime {
           return lines;
         }
         try {
+          /* 执行期委托复核：规划期放行过的步骤，执行前再验一次（过期/撤销即停） */
+          if (steps[i] && steps[i].delegationVerified) {
+            const verdict = typeof delegationVerifier === 'function'
+              ? delegationVerifier(delegation, { to: steps[i].args && steps[i].args.to, action: steps[i].action })
+              : { allow: false, reason: '未持委托令牌' };
+            if (!verdict.allow) {
+              this.audit.append('委托复核拒绝', {
+                atStep: i + 1, action: steps[i].action, reason: verdict.reason,
+              });
+              lines.push(`  [${i + 1}] ${steps[i].action} ⛔ 执行期委托复核拒绝：${verdict.reason}`);
+              continue;
+            }
+          }
           if (onStage) onStage('执行', { step: i + 1, total: steps.length });
           lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred, operator, taskId }));
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);

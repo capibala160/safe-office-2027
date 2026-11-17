@@ -17,11 +17,12 @@
     { route: 'approvals', label: '审批与确认', icon: '⛨' },
     { route: 'device', label: '设备', icon: '◉' },
     { route: 'governance', label: '治理审计', icon: '◎' },
+    { route: 'replay', label: '任务回放', icon: '↺' },
   ];
   const TITLES = {
     dashboard: '工作台', command: '命令台', minutes: '纪要中心', mail: '邮件',
     calendar: '日历', contacts: '通讯录', files: '文件', approvals: '审批与确认',
-    device: '设备', governance: '治理审计',
+    device: '设备', governance: '治理审计', replay: '任务回放',
   };
 
   const store = {

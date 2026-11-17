@@ -4,6 +4,25 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DelegationService } = require('../src/agents.cjs');
+const { AgentRuntime } = require('../src/runtime.cjs');
+const { PolicyEngine, AuditLog, RiskMeter } = require('../src/governance.cjs');
+const { CapabilityToken } = require('../src/guard.cjs');
+
+function runtimeWithPlan(steps) {
+  const audit = new AuditLog();
+  const risk = new RiskMeter(1000);
+  const policy = new PolicyEngine();
+  const planner = { makePlan: async () => ({ steps, findings: [], notes: [] }) };
+  return { rt: new AgentRuntime({ policy, audit, risk, planner }), audit, risk };
+}
+
+function token() {
+  return new CapabilityToken({
+    tools: ['readDoc', 'sendExternalEmail'],
+    documentIds: ['M2'],
+    allowedExternalDomains: ['partner-example.com'],
+  });
+}
 
 function setup() {
   let now = 1_000_000;
@@ -103,4 +122,41 @@ test('无父令牌时保持原有行为（可自由签发）', () => {
   const { service } = setup();
   const token = service.issue({ from: '管理员', to: '员工A', actions: ['printDoc'], ttlMs: 1000 });
   assert.equal(service.verify(token, { to: '员工A', action: 'printDoc' }).allow, true);
+});
+
+test('执行期委托复核：规划放行后令牌失效 → 步骤被拦截', async () => {
+  const steps = [{
+    action: 'sendExternalEmail',
+    args: { to: 'partner@partner-example.com', docId: 'M2' },
+    delegationVerified: true,
+  }];
+  const { rt, audit } = runtimeWithPlan(steps);
+  const out = await rt.runCommand('代发周例会纪要给 partner@partner-example.com', {
+    role: '员工',
+    token: token(),
+    nearfieldOnline: true,
+    delegation: { id: 'del-1' },
+    delegationVerifier: () => ({ allow: false, reason: '委托令牌已过期' }),
+  });
+  assert.match(out.join('\n'), /执行期委托复核拒绝/);
+  assert.equal(rt.outbox.length, 0, '被拒绝的步骤不应产生副作用');
+  assert.ok(audit.entries.some((e) => e.kind === '委托复核拒绝'));
+});
+
+test('执行期委托复核：令牌仍有效 → 步骤正常执行', async () => {
+  const steps = [
+    { action: 'readDoc', args: { id: 'M2' }, reason: '前置读取' },
+    { action: 'sendExternalEmail', args: { to: 'partner@partner-example.com', docId: 'M2' }, delegationVerified: true },
+  ];
+  const { rt, audit } = runtimeWithPlan(steps);
+  const out = await rt.runCommand('代发周例会纪要给 partner@partner-example.com', {
+    role: '员工',
+    token: token(),
+    nearfieldOnline: true,
+    delegation: { id: 'del-2' },
+    delegationVerifier: () => ({ allow: true, reason: 'ok' }),
+  });
+  assert.match(out.join('\n'), /已发送/);
+  assert.equal(rt.outbox.length, 1);
+  assert.ok(!audit.entries.some((e) => e.kind === '委托复核拒绝'));
 });

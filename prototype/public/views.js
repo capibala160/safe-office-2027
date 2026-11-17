@@ -1451,7 +1451,66 @@
     });
   }
 
+  // ---------- 任务回放（2026-11-17） ----------
+  async function replay(root, c) {
+    let runs = [];
+    try { runs = (await API.get('/api/commands')).items || []; } catch { runs = []; }
+    const options = runs.map((r) => `<option value="${esc(r.runId)}">${esc(r.runId)} · ${esc(String(r.command || '').slice(0, 36))}</option>`).join('');
+    root.innerHTML = `
+      ${page('任务回放', '要求 → 计划/批准 → 闸与风险 → 实际调用 → 回执；含审计链与冻结记录校验')}
+      <div class="card">
+        <div class="row">
+          <select id="replay-run" class="input">${options || '<option value="">暂无已完成任务</option>'}</select>
+          <button class="btn" id="replay-load">载入回放</button>
+        </div>
+        <div id="replay-out" class="mt12"></div>
+      </div>`;
+
+    const out = root.querySelector('#replay-out');
+    async function load(runId) {
+      if (!runId) { out.innerHTML = '<div class="notice info">先运行一次命令，再回来回放。</div>'; return; }
+      out.innerHTML = '<div class="sub-text">载入中…</div>';
+      try {
+        const r = await API.get(`/api/runs/${encodeURIComponent(runId)}/replay`);
+        const auditOk = Boolean(r.integrity && r.integrity.auditVerified);
+        const approvals = (r.approvals || []).length
+          ? `<table class="table"><thead><tr><th>操作</th><th>动作</th><th>对象</th><th>状态</th><th>确认 / 设备</th><th>回执</th></tr></thead><tbody>${
+            r.approvals.map((a) => `<tr>
+              <td>${esc(String(a.operationId).slice(0, 8))}…</td>
+              <td>${esc(a.action)}</td>
+              <td>${esc(a.recipient)}</td>
+              <td>${badge(a.state)}</td>
+              <td>${esc(a.confirmationId || '—')}<div class="sub-text">${esc(a.deviceId || '')}</div></td>
+              <td>${a.receipt ? `${badge(a.receipt.state)}<div class="sub-text">${esc(a.receipt.messageId || '')}</div>` : '—'}</td>
+            </tr>`).join('')}</tbody></table>`
+          : '<div class="sub-text">没有冻结操作</div>';
+        const calls = (r.calls || []).length
+          ? `<ul class="list">${r.calls.map((x) => `<li>[${esc(x.n)}] ${esc(x.action)} → ${esc(String(x.outcome || '').slice(0, 100))}</li>`).join('')}</ul>`
+          : '<div class="sub-text">没有执行记录</div>';
+        const gates = (r.gates || []).length
+          ? `<ul class="list">${r.gates.slice(0, 30).map((g) => `<li>#${esc(g.seq)} ${esc(g.kind)}：${esc(summarize(g.detail))}</li>`).join('')}</ul>`
+          : '<div class="sub-text">无</div>';
+        const warnings = (r.warnings || []).length
+          ? `<div class="notice block mt12">${r.warnings.map((w) => esc(w)).join('<br>')}</div>`
+          : '';
+        out.innerHTML = `
+          <div class="spread">
+            <div><h3>${esc(r.runId)}</h3><div class="sub-text">${esc(r.command)}</div></div>
+            <div><span class="badge ${auditOk ? 'executed' : 'failed'}">审计链${auditOk ? '通过' : '未通过'}</span></div>
+          </div>
+          <h4 class="mt12">批准与回执</h4>${approvals}
+          <h4 class="mt12">实际调用</h4>${calls}
+          <h4 class="mt12">闸与风险事件</h4>${gates}
+          ${warnings}`;
+      } catch (err) {
+        out.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
+      }
+    }
+    root.querySelector('#replay-load')?.addEventListener('click', () => load(root.querySelector('#replay-run').value));
+    if (runs[0]) load(runs[0].runId);
+  }
+
   window.Views = {
-    dashboard, command, minutes, mail, calendar, contacts, files, approvals, device, governance,
+    dashboard, command, minutes, mail, calendar, contacts, files, approvals, device, governance, replay,
   };
 })();
