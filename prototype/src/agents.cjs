@@ -75,7 +75,8 @@ const { IMAGES, AUDIOS, allDocuments } = require('./scenario.cjs');
  * @property {string} [to]
  * @property {string[]} [actions]
  * @property {number} [ttlMs]
- * @property {string} [scope]
+ * @property {string} [scope] 逗号/空格分隔的范围标签；父令牌有标签时子令牌必须是其子集
+ * @property {DelegationToken | null} [parent] 父委托令牌：存在时强制「只能收窄」
  */
 /**
  * 工具注册表的最小结构（只用到按角色取工具）
@@ -146,6 +147,20 @@ function uniqueStrings(list, name) {
     if (!out.includes(v)) out.push(v);
   }
   return out;
+}
+
+/**
+ * 范围标签：逗号/中文逗号/空白分隔，忽略大小写重复。
+ * 空字符串 = 不限范围（只有父令牌也空时才允许子令牌为空）。
+ * @param {unknown} scope @returns {Set<string>}
+ */
+function splitScopeTags(scope) {
+  return new Set(
+    String(scope === undefined || scope === null ? '' : scope)
+      .split(/[,，\s]+/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
 }
 
 /** @param {AgentManifestInput} manifest @returns {string} */
@@ -283,19 +298,62 @@ class DelegationService {
   }
 
   /** @param {DelegationInput} [input] @returns {DelegationToken} */
-  issue({ from, to, actions, ttlMs = 5 * 60 * 1000, scope = '' } = {}) {
+  issue({ from, to, actions, ttlMs = 5 * 60 * 1000, scope = '', parent = null } = {}) {
     if (!from || !to) throw new Error('委托令牌缺少 from/to');
     const acts = uniqueStrings(actions, 'actions');
     if (acts.length === 0) throw new Error('委托令牌至少覆盖一个动作');
+    const expiresAt = this.now() + ttlMs;
+
+    /* 委托只能收窄：动作、有效期、范围标签都不能超过父令牌 */
+    if (parent) {
+      const base = this._verifyBase(parent, { to: from });
+      if (!base.allow) throw new Error(`父委托不可用：${base.reason}`);
+      const widenedActions = acts.filter((a) => !parent.actions.includes(a));
+      if (widenedActions.length > 0) {
+        throw new Error(`委托不能扩大动作范围：${widenedActions.join(',')}`);
+      }
+      if (expiresAt > parent.expiresAt) {
+        throw new Error('委托不能延长有效期（超过父令牌）');
+      }
+      const parentTags = splitScopeTags(parent.scope);
+      const childTags = splitScopeTags(scope);
+      if (parentTags.size > 0) {
+        const widened = [...childTags].filter((t) => !parentTags.has(t));
+        if (widened.length > 0) throw new Error(`委托不能扩大范围：${widened.join(',')}`);
+        if (childTags.size === 0) {
+          throw new Error('父委托有限定范围，子委托必须显式给出更窄的范围（不能留空）');
+        }
+      }
+    }
+
     /** @type {DelegationToken} */
     const token = {
       id: crypto.randomBytes(12).toString('hex'),
       from, to, actions: acts,
-      expiresAt: this.now() + ttlMs,
+      expiresAt,
       scope,
     };
     token.mac = this._mac(token);
     return token;
+  }
+
+  /**
+   * 只校验签名/撤销/过期/主体（不看动作），供签发子委托时复核父令牌。
+   * @param {DelegationToken} token
+   * @param {{to?: string, now?: number}} [options]
+   * @returns {{allow: boolean, reason: string}}
+   */
+  _verifyBase(token, { to, now = this.now() } = {}) {
+    if (!token || typeof token !== 'object') return { allow: false, reason: '缺少委托令牌' };
+    if (this.revoked.has(token.id)) return { allow: false, reason: '委托令牌已撤销' };
+    if (!token.expiresAt || token.expiresAt <= now) return { allow: false, reason: '委托令牌已过期' };
+    if (token.to !== to) return { allow: false, reason: '委托令牌主体不匹配' };
+    const expected = Buffer.from(this._mac(token), 'hex');
+    const actual = Buffer.from(String(token.mac || ''), 'hex');
+    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+      return { allow: false, reason: '委托令牌签名无效' };
+    }
+    return { allow: true, reason: 'ok' };
   }
 
   /**
@@ -304,17 +362,10 @@ class DelegationService {
    * @returns {{allow: boolean, reason: string}}
    */
   verify(token, { to, action, now = this.now() } = {}) {
-    if (!token || typeof token !== 'object') return { allow: false, reason: '缺少委托令牌' };
-    if (this.revoked.has(token.id)) return { allow: false, reason: '委托令牌已撤销' };
-    if (!token.expiresAt || token.expiresAt <= now) return { allow: false, reason: '委托令牌已过期' };
-    if (token.to !== to) return { allow: false, reason: '委托令牌主体不匹配' };
+    const base = this._verifyBase(token, { to, now });
+    if (!base.allow) return base;
     if (!Array.isArray(token.actions) || !token.actions.includes(/** @type {string} */ (action))) {
       return { allow: false, reason: `委托令牌不覆盖动作「${action}」` };
-    }
-    const expected = Buffer.from(this._mac(token), 'hex');
-    const actual = Buffer.from(String(token.mac || ''), 'hex');
-    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
-      return { allow: false, reason: '委托令牌签名无效' };
     }
     return { allow: true, reason: 'ok' };
   }
