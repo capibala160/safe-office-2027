@@ -789,6 +789,14 @@ function createConsoleServer({
       if (opMatch && method === 'GET') {
         return sendJson(res, 200, { ok: true, ...service.getOperation(decodeURIComponent(opMatch[1]), userContext(req)) });
       }
+      const runReplay = pathname.match(/^\/api\/runs\/([^/]+)\/replay$/);
+      if (runReplay) requireRole(req, ROLE_OP_READ, '读取任务回放');
+      if (runReplay && method === 'GET') {
+        return sendJson(res, 200, {
+          ok: true,
+          ...service.getTaskReplay(decodeURIComponent(runReplay[1]), userContext(req)),
+        });
+      }
       const opBody = pathname.match(/^\/api\/operations\/([^/]+)\/body$/);
       if (opBody) requireRole(req, ROLE_DOC_READ, '读取操作正文');
       if (opBody && method === 'GET') {

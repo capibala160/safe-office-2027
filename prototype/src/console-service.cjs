@@ -39,6 +39,7 @@ const { createBouncePollerFromEnv } = require('./imap-poller.cjs');
 const { parseAutoReplyConfig, evaluateAutoReply } = require('./auto-reply.cjs');
 const { scanAttachment } = require('./file-scan.cjs');
 const { analyzeAttachment, checkAttachmentPolicy } = require('./attachment-provenance.cjs');
+const { buildTaskReplay } = require('./task-replay.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
 } = require('./nearfield-confirm.cjs');
@@ -2158,6 +2159,29 @@ class ConsoleService {
       result: done,
       error: null,
     };
+  }
+
+  /**
+   * 任务证据回放：要求 → 计划/批准 → 实际调用 → 回执 + 完整性校验。
+   * 只对已完成运行提供；运行中返回 404 语义（尚未形成证据）。
+   * @param {any} runId
+   * @param {{actor?: string|null, role?: string|null}} [options]
+   */
+  getTaskReplay(runId, { actor = null, role = null } = {}) {
+    const done = this.runs.find((r) => r.runId === runId);
+    if (!done || !this._runVisible(done, actor, role)) {
+      throw new ConsoleError('NOT_FOUND', `任务不存在或尚未完成：${runId}`, 404);
+    }
+    const from = done.audit && Number.isInteger(done.audit.from) ? Math.max(0, done.audit.from - 1) : 0;
+    const to = done.audit && Number.isInteger(done.audit.to) ? done.audit.to : this.audit.entries.length;
+    const operations = this.store.listOperations().filter((/** @type {any} */ op) => op.taskId === runId);
+    return buildTaskReplay({
+      run: done,
+      auditEntries: this.audit.entries.slice(from, to),
+      operations,
+      outboxByOperation: (operationId) => this.store.getOutboxByOperation(operationId),
+      verifyOperation,
+    });
   }
 
   /**
