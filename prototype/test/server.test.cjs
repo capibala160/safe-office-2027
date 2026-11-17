@@ -1058,3 +1058,23 @@ test('录音转写 API：上传 → 转写（stub ASR）', async (t) => {
   assert.equal(tr.data.text, '测试转写结果');
   assert.equal(tr.data.requestId, 'r-1');
 });
+
+test('任务回放 HTTP：JSON 与 text/plain 导出', async (t) => {
+  const { url } = await boot(t);
+  const cmd = await post(`${url}/api/commands`, externalCommand);
+  const runId = cmd.data.runId;
+  assert.ok(runId, '命令应返回 runId');
+
+  const replay = await json(`${url}/api/runs/${encodeURIComponent(runId)}/replay`);
+  assert.equal(replay.res.status, 200);
+  assert.equal(replay.data.runId, runId);
+  assert.ok(Array.isArray(replay.data.approvals));
+  assert.ok(replay.data.integrity);
+
+  const text = await fetch(`${url}/api/runs/${encodeURIComponent(runId)}/replay?format=text`);
+  assert.equal(text.status, 200);
+  assert.match(text.headers.get('content-type') || '', /text\/plain/);
+  const body = await text.text();
+  assert.match(body, /任务回放/);
+  assert.match(body, /证据完整性/);
+});

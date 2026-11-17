@@ -11,6 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { ConsoleService, ConsoleError, VERSION } = require('./src/console-service.cjs');
+const { renderTaskReplay } = require('./src/task-replay.cjs');
 const { createSerialNearfieldFactory } = require('./src/serial-nearfield.cjs');
 const { resolveDeviceKey, readDeviceTable } = require('./src/device-keys.cjs');
 const { DocumentStore, importBuffer } = require('./src/ingest.cjs');
@@ -792,10 +793,13 @@ function createConsoleServer({
       const runReplay = pathname.match(/^\/api\/runs\/([^/]+)\/replay$/);
       if (runReplay) requireRole(req, ROLE_OP_READ, '读取任务回放');
       if (runReplay && method === 'GET') {
-        return sendJson(res, 200, {
-          ok: true,
-          ...service.getTaskReplay(decodeURIComponent(runReplay[1]), userContext(req)),
-        });
+        const replayData = service.getTaskReplay(decodeURIComponent(runReplay[1]), userContext(req));
+        if (query.get('format') === 'text') {
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(`${renderTaskReplay(replayData).join('\n')}\n`);
+          return;
+        }
+        return sendJson(res, 200, { ok: true, ...replayData });
       }
       const opBody = pathname.match(/^\/api\/operations\/([^/]+)\/body$/);
       if (opBody) requireRole(req, ROLE_DOC_READ, '读取操作正文');

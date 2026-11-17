@@ -24,17 +24,22 @@
     document.body.removeChild(area);
   }
 
-  function downloadText(filename, text) {
-    const safe = String(filename).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'draft';
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  function downloadFile(filename, text, mime = 'text/plain;charset=utf-8') {
+    const safe = String(filename).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'download';
+    const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = safe.endsWith('.txt') ? safe : `${safe}.txt`;
+    link.download = safe;
     document.body.appendChild(link);
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function downloadText(filename, text) {
+    const safe = String(filename).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'draft';
+    downloadFile(safe.endsWith('.txt') ? safe : `${safe}.txt`, text);
   }
 
   const EXPORTABLE = new Set(['confirmed', 'executing', 'executed', 'failed']);
@@ -1462,6 +1467,8 @@
         <div class="row">
           <select id="replay-run" class="input">${options || '<option value="">暂无已完成任务</option>'}</select>
           <button class="btn" id="replay-load">载入回放</button>
+          <button class="btn ghost small" id="replay-export-json">导出 JSON</button>
+          <button class="btn ghost small" id="replay-export-text">导出文本</button>
         </div>
         <div id="replay-out" class="mt12"></div>
       </div>`;
@@ -1507,6 +1514,23 @@
       }
     }
     root.querySelector('#replay-load')?.addEventListener('click', () => load(root.querySelector('#replay-run').value));
+    async function exportReplay(kind) {
+      const runId = root.querySelector('#replay-run').value;
+      if (!runId) { toast('先选择一条已完成任务', 'info'); return; }
+      try {
+        if (kind === 'json') {
+          const data = await API.get(`/api/runs/${encodeURIComponent(runId)}/replay`);
+          downloadFile(`${runId}-replay.json`, JSON.stringify(data, null, 2), 'application/json;charset=utf-8');
+        } else {
+          const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/replay?format=text`, { credentials: 'include' });
+          if (!res.ok) throw new Error(`导出失败：HTTP ${res.status}`);
+          downloadText(`${runId}-replay.txt`, await res.text());
+        }
+        toast('已导出回放', 'ok');
+      } catch (err) { toast(c.errorText(err), 'error'); }
+    }
+    root.querySelector('#replay-export-json')?.addEventListener('click', () => exportReplay('json'));
+    root.querySelector('#replay-export-text')?.addEventListener('click', () => exportReplay('text'));
     if (runs[0]) load(runs[0].runId);
   }
 
