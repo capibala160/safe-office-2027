@@ -38,6 +38,7 @@ const { createCalendarWriterFromEnv } = require('./calendar-adapter.cjs');
 const { createBouncePollerFromEnv } = require('./imap-poller.cjs');
 const { parseAutoReplyConfig, evaluateAutoReply } = require('./auto-reply.cjs');
 const { scanAttachment } = require('./file-scan.cjs');
+const { analyzeAttachment, checkAttachmentPolicy } = require('./attachment-provenance.cjs');
 const {
   NearfieldConfirmer, VirtualDevice, createLoopbackTransport,
 } = require('./nearfield-confirm.cjs');
@@ -2300,12 +2301,68 @@ class ConsoleService {
       (op.attachments || []).some((/** @type {any} */ a) => a.sha256 === sha256));
   }
 
-  // 执行前校验：附件内容必须还在，且哈希与冻结记录一致
+  /**
+   * 附件来源匹配用的「已知文档」视图：样例 + 导入文档 + 运行期已读/派生内容。
+   * 运行期条目优先（带 tainted 与派生信息）。
+   */
+  _attachmentDocs() {
+    /** @type {Map<string, any>} */
+    const map = new Map();
+    for (const doc of Object.values(allDocuments())) {
+      map.set(doc.id, {
+        id: doc.id, title: doc.title, level: doc.level, body: doc.body, tainted: false,
+      });
+    }
+    for (const [id, entry] of Object.entries(this.runtime.knowledge || {})) {
+      map.set(id, {
+        id,
+        title: entry.title,
+        level: entry.level,
+        body: entry.body || entry.cleaned || '',
+        tainted: Boolean(entry.tainted),
+      });
+    }
+    return [...map.values()];
+  }
+
+  /**
+   * 冻结前检查附件来源：命中机密/污点 → 拒绝；内部级附件在外部发送 → 拒绝。
+   * 违规直接抛出，附件不落库。
+   * @param {any[]} attachments 解析后的 {filename,mime,buffer}
+   * @param {string} action
+   */
+  _checkAttachmentProvenance(attachments, action) {
+    if (!Array.isArray(attachments) || attachments.length === 0) return;
+    const docs = this._attachmentDocs();
+    const entries = attachments.map((a) =>
+      analyzeAttachment({ name: a.filename, buffer: a.buffer }, docs));
+    const policy = checkAttachmentPolicy(entries, action);
+    this.audit.append('附件来源检查', {
+      action,
+      ok: policy.ok,
+      entries: entries.map((e) => ({
+        name: e.name,
+        level: e.level,
+        tainted: e.tainted,
+        matched: e.matched.map((m) => ({ id: m.id, title: m.title, level: m.level })),
+      })),
+    });
+    if (!policy.ok) {
+      throw new ConsoleError('CONFLICT', policy.reason, 409);
+    }
+  }
+
+  // 执行前校验：附件内容必须还在，且哈希与冻结记录一致；并按当前知识库复核来源
   /**
    * @param {any} operation
    */
   _assertAttachmentsIntact(operation) {
-    for (const attachment of (operation && operation.attachments) || []) {
+    const attachments = (operation && operation.attachments) || [];
+    if (attachments.length === 0) return;
+    const docs = this._attachmentDocs();
+    /** @type {any[]} */
+    const entries = [];
+    for (const attachment of attachments) {
       const blob = this.blobStore.get(attachment.sha256);
       if (!blob) {
         throw new ConsoleError('CONFLICT', `附件「${attachment.name}」内容缺失，拒绝执行`, 409);
@@ -2313,6 +2370,17 @@ class ConsoleService {
       if (sha256Hex(blob.content) !== attachment.sha256) {
         throw new ConsoleError('CONFLICT', `附件「${attachment.name}」内容与冻结记录不符，拒绝执行`, 409);
       }
+      entries.push(analyzeAttachment({ name: attachment.name, buffer: blob.content }, docs));
+    }
+    const policy = checkAttachmentPolicy(entries, operation.action);
+    if (!policy.ok) {
+      this.audit.append('附件来源拒绝', {
+        operationId: operation.operationId,
+        action: operation.action,
+        reason: policy.reason,
+        entries: entries.map((e) => ({ name: e.name, level: e.level, tainted: e.tainted })),
+      });
+      throw new ConsoleError('CONFLICT', policy.reason, 409);
     }
   }
 
@@ -2584,6 +2652,8 @@ class ConsoleService {
     const finalBody = isEmail && signature
       ? `${body || `（${action}）`}\n\n-- \n${signature}`
       : body;
+    // 冻结前先按内容核对附件来源（机密/污点/内部级外发直接拒绝，且不落库）
+    if (isEmail) this._checkAttachmentProvenance(attachments, action);
     // 只有邮件动作才把附件落库；非邮件动作一个字节都不存（避免静默丢弃 + 孤儿）
     const storedAttachments = isEmail ? this._storeAttachments(attachments) : [];
     let operation;
