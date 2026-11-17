@@ -164,3 +164,5 @@ A 再原样写回 UART。PC 侧脚本**无需改动**（仍是 `serial-confirm.c
 - **WiFi 共存观测（可选）**：`--wifi` 构建（`SFC1_WITH_WIFI=1`）会让板子开 WiFi STA 并每 10 秒
   扫描一次，与 SLE 心跳并行；串口打 `WIFI COEX: sta enabled` / `scan #N ret=0`。
   **不连 AP、不传数据**，只证明射频共存，不能写「WiFi 业务与 SLE 共存通过」。
+  2026-11-16 实测 30 分钟：扫描 `#75 → #201 ret=0`，SLE `bad=0`、零超时、PING 全过
+  （[docs/74](../../docs/74-M3prime-业务帧上SLE-2026-11-16.md) §5.6）。

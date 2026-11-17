@@ -1,0 +1,31 @@
+WiFi 扫描 + SLE 心跳共存（2026-11-16 22:14–22:45，30 分钟）
+=================================================
+
+拓扑：A(exec, COM11, **WiFi 变体镜像 0be011b9…**) --SLE--> B(confirm, COM12, 标准镜像 ce3f10f4…)
+A 板行为：开 WiFi STA，每 10s 扫一次（`WIFI COEX: scan #N ret=…`），同时跑 SLE 心跳。
+说明：只做 WiFi 扫描（不连 AP、不配 IP、不传数据）——这是**射频共存**，不是 WiFi 业务共存。
+
+一、启动证据（A 串口）
+WIFI COEX: sta enabled, scan every 10000ms
+WIFI COEX: scan #1 ret=0
+WIFI COEX: scan #2 ret=0
+
+二、每 10 分钟采样
+
+t=10min  scan #75 ret=0   A tx=754  rx=755  bad=0 up=1 down=0 timeout=0
+                          B tx=762  rx=761  bad=0 up=1 down=0 timeout=0
+                          PING A ✓  PING B（中继）✓
+t=20min  scan #138 ret=0  A tx=1386 rx=1387 bad=0 up=1 down=0 timeout=0
+                          B tx=1394 rx=1393 bad=0 up=1 down=0 timeout=0
+                          PING A ✓  PING B（中继）✓
+t=30min  scan #201/#202 ret=0  A tx=2017 rx=2018 bad=0 up=1 down=0 timeout=0
+                               B tx=2026 rx=2025 bad=0 up=1 down=0 timeout=0
+                               PING A ✓  PING B（中继）✓
+
+三、结论与边界
+- 30 分钟内 WiFi 扫描持续成功（#75 → #201，约每 10s 一次、ret=0），
+  SLE 心跳零坏帧、零超时、零发送失败；3 次 PING（含中继）全过。
+- **只算 30 分钟短时共存**，不能写「>1h 共存稳定」。
+- 未连 AP、无数据业务；不能宣称「WiFi 数据业务与 SLE 共存通过」。
+- 原计划的 70 分钟采样在 22:45 被宿主内存压力终止（非测试失败），
+  因此没有 >1h 数据；A 板随后保持 WiFi 变体，标准 exec 镜像已恢复在 `ws63/firmware/out/`。
