@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.53.0');
+  assert.equal(data.version, '0.53.1');
 });
 
 test('静态首页与资源', async (t) => {
@@ -885,6 +885,21 @@ test('用户管理：管理员可新增账号，非管理员 403，参数校验'
   assert.equal((await create('bad name', '员工', 'password123')).status, 400);
   const list = await (await fetch(`${started.url}/api/users`, { headers: { Cookie: cookie('admin') } })).json();
   assert.deepEqual(list.items.map((u) => u.username), ['admin', 'alice', 'bob']);
+
+  // 用户管理动作进入审计链（v0.53.1）：actor=管理员，detail 不含密码
+  const resetBob = await fetch(`${started.url}/api/users/bob/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie('admin') },
+    body: JSON.stringify({ newPassword: 'resetpass123' }),
+  });
+  assert.equal(resetBob.status, 200);
+  assert.equal((await fetch(`${started.url}/api/users/bob/disable`, { method: 'POST', headers: { Cookie: cookie('admin') } })).status, 200);
+  const audit = await (await fetch(`${started.url}/api/audit?kind=${encodeURIComponent('用户管理')}`, { headers: { Cookie: cookie('admin') } })).json();
+  assert.equal(audit.ok, true);
+  assert.deepEqual(audit.items.map((e) => e.detail.action), ['create', 'reset-password', 'disable']);
+  assert.ok(audit.items.every((e) => e.kind === '用户管理' && e.actor === 'admin'));
+  assert.deepEqual(audit.items[0].detail, { action: 'create', target: 'bob', role: '员工' });
+  assert.ok(!JSON.stringify(audit.items).includes('password123'), '审计不含密码');
 });
 
 test('租户隔离：文档/操作/运行历史互不可见，管理员与审批角色可见', async (t) => {

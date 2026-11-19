@@ -356,6 +356,11 @@ function createConsoleServer({
       throw new ConsoleError('FORBIDDEN', '角色「' + req.user.role + '」无权' + action, 403);
     }
   }
+  // 用户管理动作写审计链（v0.53.1）：actor = 当前管理员，detail 不含密码。
+  function auditUserAdmin(/** @type {any} */ req, /** @type {any} */ action, /** @type {any} */ target, /** @type {any} */ extra = {}) {
+    if (!req.user) return;
+    service.auditAdminAction(req.user.username, '用户管理', { action, target, ...extra });
+  }
   // —— 手机确认端配对会话 ——
   // 配了配对码时，state/decision 必须带 X-Phone-Session；否则局域网任何人都能读待确认详情。
   const phoneSessions = new Map();          // token → { expiresAt }
@@ -530,6 +535,7 @@ function createConsoleServer({
         const body = await readJson(req);
         try {
           const out = auth.adminCreateUser(body.username, body.role, body.password);
+          auditUserAdmin(req, 'create', out.username, { role: out.role });
           return sendJson(res, 200, { ok: true, ...out });
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
@@ -540,11 +546,13 @@ function createConsoleServer({
       if (userReset && method === 'POST') {
         if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
         const body = await readJson(req);
+        const target = decodeURIComponent(userReset[1]);
         try {
-          auth.adminResetPassword(decodeURIComponent(userReset[1]), body.newPassword);
+          auth.adminResetPassword(target, body.newPassword);
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
         }
+        auditUserAdmin(req, 'reset-password', target);
         return sendJson(res, 200, { ok: true });
       }
       const userToggle = pathname.match(/^\/api\/users\/([^/]+)\/(disable|enable)$/);
@@ -557,6 +565,7 @@ function createConsoleServer({
         }
         try {
           const out = auth.setDisabled(username, userToggle[2] === 'disable');
+          auditUserAdmin(req, userToggle[2] === 'disable' ? 'disable' : 'enable', username);
           return sendJson(res, 200, { ok: true, ...out });
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
@@ -572,6 +581,7 @@ function createConsoleServer({
         }
         try {
           const out = auth.deleteUser(username);
+          auditUserAdmin(req, 'delete', username);
           return sendJson(res, 200, { ok: true, ...out });
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);
