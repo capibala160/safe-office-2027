@@ -329,6 +329,7 @@ function createConsoleServer({
   const twoFactorAttempts = new Map();
   const mapAuthError = (/** @type {any} */ err) => {
     if (err.code === 'USER_NOT_FOUND') return new ConsoleError('NOT_FOUND', err.message, 404);
+    if (err.code === 'USER_EXISTS') return new ConsoleError('CONFLICT', err.message, 409);
     if (err.code === 'TOTP_ENABLED' || err.code === 'TOTP_SETUP_REQUIRED' || err.code === 'LAST_ADMIN') {
       return new ConsoleError('CONFLICT', err.message, 409);
     }
@@ -521,6 +522,18 @@ function createConsoleServer({
         requireRole(req, ROLE_ADMIN, '读取用户列表');
         if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
         return sendJson(res, 200, { ok: true, items: auth.listUsers() });
+      }
+      // 新增账号（仅管理员；v0.53）。不开放自助注册：角色/租户/审计口径仍由管理员分配。
+      if (pathname === '/api/users' && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '新增用户');
+        if (!auth) throw new ConsoleError('CONFLICT', '未启用登录（没有用户表）', 409);
+        const body = await readJson(req);
+        try {
+          const out = auth.adminCreateUser(body.username, body.role, body.password);
+          return sendJson(res, 200, { ok: true, ...out });
+        } catch (errRaw) { const err = /** @type {any} */ (errRaw);
+          throw mapAuthError(err);
+        }
       }
       const userReset = pathname.match(/^\/api\/users\/([^/]+)\/reset-password$/);
       if (userReset) requireRole(req, ROLE_ADMIN, '重置用户密码');

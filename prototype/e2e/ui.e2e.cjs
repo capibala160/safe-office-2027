@@ -600,6 +600,36 @@ test('UI：管理员禁用账号后该账号无法登录', { timeout: 90000 }, a
   assert.match(await page.textContent('#err'), /不正確|不正确|禁用|INVALID|用户名/);
 });
 
+test('UI：管理员在治理页新增账号并可登录', { timeout: 90000 }, async (t) => {
+  const auth = new AuthService({ users: [e2eUser('admin', '管理员')] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+
+  await e2eLogin(page, started.url, 'admin');
+  await page.goto(`${started.url}/#/governance`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#new-user-name');
+  await page.fill('#new-user-name', 'bob');
+  await page.selectOption('#new-user-role', '员工');
+  await page.fill('#new-user-pass', 'password123');
+  await page.click('#gov-create-user');
+  await page.waitForFunction(() => {
+    const toast = document.getElementById('toast');
+    return toast && toast.textContent.includes('已新增「bob」');
+  }, null, { timeout: 15000 });
+  await page.waitForSelector('[data-reset-user="bob"]');
+
+  await page.click('#btn-logout');
+  await page.waitForURL(/\/login\.html/);
+  await page.fill('#username', 'bob');
+  await page.fill('#password', 'password123');
+  await page.click('#submit');
+  await page.waitForURL((url) => !url.pathname.endsWith('/login.html'));
+  await page.waitForSelector('#current-user:not([hidden])');
+  assert.match(await page.textContent('#current-user'), /bob/);
+});
+
 test('UI：审计员按策略自动回信（固定模板，不读来信正文）', { timeout: 90000 }, async (t) => {
   const { ConsoleService } = require('../src/console-service.cjs');
   const auth = new AuthService({ users: [e2eUser('auditor', '审计员')] });

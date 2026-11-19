@@ -1233,6 +1233,13 @@
         </section>
       </div>
       ${users ? `<section class="card"><div class="card-head"><h2>用户管理</h2><span class="sub">${users.items.length} 个</span></div>
+        <div class="form-grid">
+          <div><label class="label">用户名</label><input class="input" id="new-user-name" placeholder="2–32 位字母/数字/_.@-" autocomplete="off"></div>
+          <div><label class="label">角色</label><select class="select" id="new-user-role">${roles.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select></div>
+          <div><label class="label">初始密码（至少 8 位）</label><input class="input" id="new-user-pass" type="password" autocomplete="new-password"></div>
+        </div>
+        <div class="btn-row mt12"><button class="btn small" id="gov-create-user">新增用户</button><span class="sub">仅管理员；账号即建即用，请让本人首次登录后改密</span></div>
+        <div id="gov-create-user-result" class="mt12"></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>两步验证</th><th>操作</th></tr></thead><tbody>
           ${users.items.map((u) => `<tr><td class="mono">${esc(u.username)}</td><td>${esc(u.role)}</td><td>${u.disabled ? '已禁用' : '正常'}</td><td>${u.totpEnabled ? '已启用' : '未启用'}</td><td class="row-actions"><button class="btn ghost small" data-reset-user="${esc(u.username)}">重置密码</button><button class="btn ghost small" data-toggle-user="${esc(u.username)}" data-disabled="${u.disabled ? 'true' : 'false'}">${u.disabled ? '启用' : '禁用'}</button><button class="btn danger small" data-delete-user="${esc(u.username)}">删除</button></td></tr>`).join('')}
         </tbody></table></div>
@@ -1291,6 +1298,21 @@
         const res = await API.post('/api/governance/audit-tamper-demo', {});
         root.querySelector('#gov-tamper-result').innerHTML = `<div class="notice ${res.tampered ? 'info' : 'block'}">原链校验：${res.original ? '通过' : '断裂'}；克隆链篡改后：${res.tampered ? '通过（异常）' : '断裂（预期）'}。<div class="sub-text mt8">${esc(res.note || '')}</div></div>`;
       } catch (err) { toast(c.errorText(err), 'error'); }
+    });
+    root.querySelector('#gov-create-user')?.addEventListener('click', async () => {
+      const username = String(root.querySelector('#new-user-name')?.value || '').trim();
+      const role = String(root.querySelector('#new-user-role')?.value || '');
+      const password = String(root.querySelector('#new-user-pass')?.value || '');
+      if (!username || !role || !password) { toast('用户名 / 角色 / 初始密码都要填', 'error'); return; }
+      const btn = root.querySelector('#gov-create-user');
+      btn.disabled = true;
+      try {
+        const res = await API.post('/api/users', { username, role, password });
+        toast(`已新增「${res.username}」（${res.role}）`, 'ok');
+        await c.refreshState();
+        c.rerender();
+      } catch (err) { toast(c.errorText(err), 'error'); }
+      finally { btn.disabled = false; }
     });
     root.querySelectorAll('[data-reset-user]').forEach((btn) => {
       btn.addEventListener('click', async () => {

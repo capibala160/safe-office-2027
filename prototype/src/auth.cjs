@@ -300,6 +300,35 @@ class AuthService {
     return { username: user.username };
   }
 
+  // 管理员新增账号（v0.53）：账号仍由管理员创建，不开放自助注册。
+  // 用户名限制为 2–32 位 ASCII（字母/数字/_.@-），避免空白/路径/注入类字符进入审计与租户链。
+  /**
+   * @param {any} username
+   * @param {any} role
+   * @param {any} password
+   */
+  adminCreateUser(username, role, password) {
+    const name = String(username || '').trim();
+    if (!/^[A-Za-z0-9_.@-]{2,32}$/.test(name)) {
+      throw authError('用户名需 2–32 位字母/数字/_.@-', 'BAD_USERNAME');
+    }
+    if (this.users.has(name)) {
+      throw authError('用户已存在', 'USER_EXISTS');
+    }
+    if (!ROLES.has(role)) {
+      throw authError(`角色非法：${role}`, 'BAD_ROLE');
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+      throw authError('密码至少 8 位', 'BAD_PASSWORD');
+    }
+    const next = hashPassword(password);
+    this._persistUser({
+      username: name, role, salt: next.salt, hash: next.hash,
+      totpSecret: '', totpEnabled: false, disabled: false,
+    });
+    return { username: name, role };
+  }
+
   // 管理员禁用/启用：禁用立即注销该用户全部会话；最后一个可用管理员不能被禁用。
   /**
    * @param {any} username

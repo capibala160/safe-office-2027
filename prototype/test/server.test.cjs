@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.52.3');
+  assert.equal(data.version, '0.53.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -854,6 +854,37 @@ test('用户管理：管理员可列出/重置，非管理员 403', async (t) =>
   assert.equal((await post(`${started.url}/api/login`, { username: 'alice', password: 'resetpass123' })).res.status, 401, '删除后不能登录');
   const finalList = await (await fetch(`${started.url}/api/users`, { headers: { Cookie: adminCookie } })).json();
   assert.deepEqual(finalList.items.map((u) => u.username), ['admin']);
+});
+
+test('用户管理：管理员可新增账号，非管理员 403，参数校验', async (t) => {
+  const mk = (username, role) => {
+    const { salt, hash } = hashPassword('password123');
+    return { username, role, salt, hash };
+  };
+  const auth = new AuthService({ users: [mk('admin', '管理员'), mk('alice', '员工')] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+  const cookie = (name) => `sfc_session=${auth.login(name, 'password123').token}`;
+  const create = (name, role, password, who = 'admin') => fetch(`${started.url}/api/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie(who) },
+    body: JSON.stringify({ username: name, role, password }),
+  });
+
+  assert.equal((await create('bob', '员工', 'password123', 'alice')).status, 403, '非管理员不能新增');
+  const ok = await create('bob', '员工', 'password123');
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { ok: true, username: 'bob', role: '员工' });
+  // 账号即建即用
+  assert.equal((await post(`${started.url}/api/login`, { username: 'bob', password: 'password123' })).res.status, 200);
+  // 重复用户名 → 409
+  assert.equal((await create('bob', '员工', 'password123')).status, 409);
+  // 非法角色 / 短密码 / 非法用户名 → 400
+  assert.equal((await create('carol', '超级管理员', 'password123')).status, 400);
+  assert.equal((await create('carol', '员工', 'short')).status, 400);
+  assert.equal((await create('bad name', '员工', 'password123')).status, 400);
+  const list = await (await fetch(`${started.url}/api/users`, { headers: { Cookie: cookie('admin') } })).json();
+  assert.deepEqual(list.items.map((u) => u.username), ['admin', 'alice', 'bob']);
 });
 
 test('租户隔离：文档/操作/运行历史互不可见，管理员与审批角色可见', async (t) => {
