@@ -18,11 +18,13 @@
     { route: 'device', label: '设备', icon: '◉' },
     { route: 'governance', label: '治理审计', icon: '◎' },
     { route: 'replay', label: '任务回放', icon: '↺' },
+    { divider: '演示' },
+    { route: 'demo', label: '演示场景', icon: '▶' },
   ];
   const TITLES = {
     dashboard: '工作台', command: '命令台', minutes: '纪要中心', mail: '邮件',
     calendar: '日历', contacts: '通讯录', files: '文件', approvals: '审批与确认',
-    device: '设备', governance: '治理审计', replay: '任务回放',
+    device: '设备', governance: '治理审计', replay: '任务回放', demo: '演示场景',
   };
 
   const store = {
@@ -36,6 +38,7 @@
     route: 'dashboard',
     authUser: null,
     pendingSample: null,
+    pendingCommand: null,
     opFilter: '',
     operationId: null,
     challengeId: null,

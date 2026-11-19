@@ -51,11 +51,29 @@ test('UI：登录 → 运行样例 → 审批页 → 上传 → 改密重登 →
   assert.equal(await page.locator('#role-select').isDisabled(), true, '登录角色应锁定');
   assert.equal(await page.inputValue('#role-select'), '员工');
 
-  // 工作台一键样例：内网纪要（FakeMailer，不会真发）
+  // 工作台：任务输入 + 快捷填入
+  await page.waitForSelector('#dash-command');
+  await page.click('[data-quick="纪要"]');
+  assert.match(await page.inputValue('#dash-command'), /周例会/);
+
+  // 演示场景：一键样例（内网纪要，FakeMailer，不会真发）
+  await page.goto(`${started.url}/#/demo`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-sample="normal-minutes"]');
   await page.click('[data-sample="normal-minutes"]');
   await page.waitForSelector('#toast.show');
   assert.match(await page.textContent('#toast'), /样例执行完成/);
+
+  // 任务内确认：外发样例 → 发起确认 → 抽屉批准（不再跳设备页）
+  await page.click('[data-sample="external-confirm"]');
+  await page.waitForSelector('[data-op-action="challenge"]', { timeout: 15000 });
+  await page.click('[data-op-action="challenge"]');
+  await page.waitForSelector('#confirm-drawer', { timeout: 15000 });
+  assert.match(await page.textContent('#confirm-drawer'), /partner@partner-example\.com/);
+  // 四眼原则：员工可以发起，但不能代替设备助手批准
+  assert.equal(await page.locator('#drawer-approve').count(), 0, '员工不应看到直接批准按钮');
+  assert.match(await page.textContent('#confirm-drawer'), /设备助手/);
+  await page.click('#drawer-close-ok');
+  await page.waitForSelector('#confirm-drawer', { state: 'detached' });
 
   // 治理页：员工不能读完整审计，但页面不能报错
   await page.goto(`${started.url}/#/governance`, { waitUntil: 'domcontentloaded' });
@@ -239,6 +257,7 @@ test('UI 手机确认：员工发起外发 → 手机配对 → 批准 → 控�
   await consolePage.waitForSelector('#current-user:not([hidden])');
 
   // 一键外发样例 → 冻结 → 发起 WS63 确认
+  await consolePage.goto(`${started.url}/#/demo`, { waitUntil: 'domcontentloaded' });
   await consolePage.waitForSelector('[data-sample="external-confirm"]');
   await consolePage.click('[data-sample="external-confirm"]');
   await consolePage.waitForSelector('#dash-result [data-op-action="challenge"]');
@@ -292,6 +311,7 @@ test('UI 退信处理：员工发内网邮件 → 审计员粘贴 DSN → 发件
 
   // 员工：内网纪要样例 → 策略自动确认 → FakeMailer 发送成功
   await login('emp');
+  await page.goto(`${started.url}/#/demo`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-sample="normal-minutes"]');
   await page.click('[data-sample="normal-minutes"]');
   await page.waitForFunction(() => {
@@ -383,7 +403,7 @@ test('UI MCP 接入：管理员在治理页发现并注册 MCP 工具', { timeou
   assert.deepEqual(errors, [], `页面异常：${errors.join('；')}`);
 });
 
-test('UI 设备确认：员工发起挑战 → 设备助手在设备页批准 → 操作已执行', { timeout: 90000 }, async (t) => {
+test('UI 设备确认：员工发起外发 → 设备助手在工作台抽屉批准 → 操作已执行', { timeout: 90000 }, async (t) => {
   const mk = (username, role) => {
     const { salt, hash } = hashPassword('password123');
     return { username, role, salt, hash };
@@ -405,31 +425,35 @@ test('UI 设备确认：员工发起挑战 → 设备助手在设备页批准 �
     await page.waitForSelector('#current-user:not([hidden])');
   };
 
-  // 员工：冻结一条外发，并在设备页发起挑战
+  // 员工：冻结一条外发，不发起挑战
   await login('emp');
+  await page.goto(`${started.url}/#/demo`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-sample="external-confirm"]');
   await page.click('[data-sample="external-confirm"]');
   await page.waitForSelector('#dash-result [data-op-action="challenge"]', { timeout: 15000 });
   const op = started.service.store.listOperations()[0];
   assert.ok(op && op.state === 'frozen');
 
-  await page.goto(`${started.url}/#/device`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('#dev-op');
-  await page.selectOption('#dev-op', op.operationId);
-  await page.click('#dev-challenge');
-  await page.waitForSelector('[data-dev-decide="approve"]', { timeout: 15000 });
+  // 发起人先发起确认（员工不能自己批准）
+  await page.click('#dash-result [data-op-action="challenge"]');
+  await page.waitForSelector('#confirm-drawer', { timeout: 15000 });
+  assert.equal(await page.locator('#drawer-approve').count(), 0, '员工不应看到直接批准按钮');
+  await page.click('#drawer-close-ok');
+  await page.waitForSelector('#confirm-drawer', { state: 'detached' });
 
-  // 设备助手：换人批准（四眼原则：不能是自己发起的）
+  // 设备助手：换人后在工作台待办里直接确认（四眼原则：不能是自己发起的）
   await page.click('#btn-logout');
   await page.waitForURL(/\/login\.html/);
   await login('dev');
-  await page.goto(`${started.url}/#/device`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('[data-dev-decide="approve"]', { timeout: 15000 });
-  await page.click('[data-dev-decide="approve"]');
-  await page.waitForFunction(() => {
-    const el = document.getElementById('device-result');
-    return el && el.innerText.includes('已批准');
-  }, null, { timeout: 15000 });
+  await page.waitForSelector('[data-op-action="challenge"]', { timeout: 15000 });
+  await page.click('[data-op-action="challenge"]');
+  await page.waitForSelector('#confirm-drawer', { timeout: 15000 });
+  assert.match(await page.textContent('#confirm-drawer'), /partner@partner-example\.com/);
+  await page.click('#drawer-approve');
+  await page.waitForSelector('#drawer-done', { timeout: 15000 });
+  assert.match(await page.textContent('#drawer-result'), /已批准/);
+  await page.click('#drawer-done');
+  await page.waitForSelector('#confirm-drawer', { state: 'detached' });
 
   const executed = started.service.store.getOperation(op.operationId);
   assert.equal(executed.state, 'executed');
@@ -692,6 +716,7 @@ test('UI：任务回放页展示批准/回执与审计完整性', { timeout: 600
   const page = await browser.newPage();
 
   await e2eLogin(page, started.url, 'alice');
+  await page.goto(`${started.url}/#/demo`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-sample="normal-minutes"]');
   await page.click('[data-sample="normal-minutes"]');
   await page.waitForSelector('#toast.show');

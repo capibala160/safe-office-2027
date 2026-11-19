@@ -21,7 +21,7 @@ const name = `safe-office-${PKG.version}-${stamp}`;
 const tarName = `${name}.tar.gz`;
 
 const EXCLUDE_NAMES = new Set([
-  '.git', 'node_modules', 'data', 'out', 'dist', '.cache', '.claude',
+  '.git', 'node_modules', 'data', 'out', 'output', 'dist', '.cache', '.claude',
   'config.env', 'devices.json', 'initial-users.txt', '.env',
 ]);
 

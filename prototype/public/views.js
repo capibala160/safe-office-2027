@@ -44,6 +44,186 @@
 
   const EXPORTABLE = new Set(['confirmed', 'executing', 'executed', 'failed']);
 
+  const TOOL_LABELS = {
+    readDoc: '读取资料', summarize: '生成摘要', sendInternalEmail: '发内网邮件',
+    sendExternalEmail: '对外发邮件', deleteDoc: '删除文件', printDoc: '打印',
+    scheduleMeeting: '预约会议', readContact: '查联系人', transcribeAudio: '录音转写',
+    recognizeImage: '图片识别', shareScreen: '屏幕共享', deviceControl: '设备控制',
+    uploadToCloud: '上传云端',
+  };
+  function toolLabel(name) {
+    return TOOL_LABELS[name] || name;
+  }
+
+  // 命令台的权限建议：只是提示，勾选与最终授权仍由用户和服务端决定
+  function recommendTools(text) {
+    const s = String(text || '');
+    const out = new Set();
+    if (/删除|删掉|清理/.test(s)) { out.add('readDoc'); out.add('deleteDoc'); }
+    if (/打印/.test(s)) { out.add('readDoc'); out.add('printDoc'); }
+    if (/会议|预约|日程/.test(s)) out.add('scheduleMeeting');
+    if (/联系人|通讯录/.test(s)) out.add('readContact');
+    if (/转写|录音/.test(s)) out.add('transcribeAudio');
+    if (/图片|识别|OCR/i.test(s)) out.add('recognizeImage');
+    if (/共享|投屏/.test(s)) out.add('shareScreen');
+    if (/门锁|开锁|门禁|设备|空调|灯/.test(s)) out.add('deviceControl');
+    if (/发|邮件|邮箱|通知|外发/.test(s) && /外部|合作方|客户|partner|@[^\s]*\.(com|cn|net|org)/i.test(s)) {
+      out.add('readDoc'); out.add('sendExternalEmail');
+    } else if (/发|邮件|邮箱|通知/.test(s)) {
+      out.add('readDoc'); out.add('sendInternalEmail');
+    }
+    if (/整理|摘要|总结|纪要|草稿|正式稿/.test(s)) { out.add('readDoc'); out.add('summarize'); }
+    if (!out.size) { out.add('readDoc'); out.add('summarize'); }
+    return [...out];
+  }
+
+  // ---------- 任务内确认抽屉（虚拟设备） ----------
+  function removeConfirmDrawer() {
+    const old = document.getElementById('confirm-drawer-backdrop');
+    if (old) old.remove();
+  }
+
+  function mountConfirmDrawer(ch, detail, c) {
+    removeConfirmDrawer();
+    const op = (detail && detail.operation) || ch.operation || {};
+    const subject = op.subject || ch.summary || '待确认操作';
+    const body = (detail && detail.operation && detail.operation.body) || '';
+    const expires = ch.expiresAt ? new Date(ch.expiresAt).getTime() : Date.now() + (Number(ch.remainingSec) || 30) * 1000;
+    const attachments = (op.attachments || []).map((a) => esc(a.name || a.filename || '')).filter(Boolean);
+    const authUser = (c.store.bootstrap && c.store.bootstrap.authUser) || null;
+    const role = authUser ? authUser.role : null;
+    const canDecide = !role || ['设备助手', '管理员'].includes(role);
+    const wrap = document.createElement('div');
+    wrap.id = 'confirm-drawer-backdrop';
+    wrap.className = 'drawer-backdrop';
+    wrap.innerHTML = `<aside class="drawer" id="confirm-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+      <div class="drawer-head">
+        <div>
+          <div class="sub-text">请确认这次操作</div>
+          <h2 id="drawer-title">${esc(subject)}</h2>
+        </div>
+        <button class="btn ghost small" id="drawer-close" type="button">关闭</button>
+      </div>
+      <div class="drawer-body">
+        <div class="kv"><span>动作</span><strong>${esc(op.protocolLabel || op.action || '—')}</strong></div>
+        <div class="kv"><span>目标</span><strong>${esc(op.recipient || '—')}</strong></div>
+        <div class="kv"><span>密级</span><strong>${esc(op.level || '—')}</strong></div>
+        <div class="kv"><span>剩余时间</span><strong class="countdown" id="drawer-countdown">${esc(ch.remainingSec === undefined ? '—' : `${ch.remainingSec}s`)}</strong></div>
+        <div class="sub-text mt8">内容摘要</div>
+        <div class="drawer-summary">${esc(ch.summary || subject)}</div>
+        ${attachments.length ? `<div class="sub-text mt8">附件：${attachments.join('、')}</div>` : ''}
+        <details class="mt8"><summary class="sub-text">查看完整正文</summary>
+          <pre class="drawer-body-text mt8">${esc(body || '正文不可用，请到审批页查看详情。')}</pre>
+        </details>
+        <div class="notice info mt8">批准后将按上面的目标、正文和附件执行；内容一旦改动，旧确认会自动作废。</div>
+        ${canDecide ? '' : `<div class="notice block mt8">已发起确认。你的角色是「${esc(role)}」，不能代替设备助手批准；请让设备助手登录后在工作台或审批页完成确认。</div>`}
+        <div class="mono sub-text mt8">operationHash ${esc(short(op.operationHash || ch.targetHash, 28))}</div>
+        <div id="drawer-result"></div>
+      </div>
+      <div class="drawer-actions" id="drawer-actions">
+        ${canDecide
+          ? '<button class="btn ghost" id="drawer-reject" type="button">拒绝</button><button class="btn" id="drawer-approve" type="button">批准并执行</button>'
+          : '<button class="btn" id="drawer-close-ok" type="button">关闭</button>'}
+      </div>
+    </aside>`;
+    document.body.appendChild(wrap);
+
+    const countdown = wrap.querySelector('#drawer-countdown');
+    const approve = wrap.querySelector('#drawer-approve');
+    const reject = wrap.querySelector('#drawer-reject');
+    const result = wrap.querySelector('#drawer-result');
+    const actions = wrap.querySelector('#drawer-actions');
+    let deciding = false;
+    let timer = null;
+    const close = () => {
+      clearInterval(timer);
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
+      if (countdown) countdown.textContent = `${left}s`;
+      if (left === 0) {
+        clearInterval(timer);
+        if (approve) approve.disabled = true;
+        if (reject) reject.disabled = true;
+        if (result && !result.innerHTML) result.innerHTML = '<div class="notice block">确认已过期，请关闭后重新发起。</div>';
+      }
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+
+    wrap.querySelector('#drawer-close').addEventListener('click', close);
+    wrap.querySelector('#drawer-close-ok')?.addEventListener('click', close);
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
+    const decide = async (decision) => {
+      if (deciding) return;
+      deciding = true;
+      if (approve) approve.disabled = true;
+      if (reject) reject.disabled = true;
+      try {
+        const res = await API.post(`/api/device/challenges/${encodeURIComponent(ch.challengeId)}/decide`, { decision });
+        clearInterval(timer);
+        if (result) result.innerHTML = renderDeviceResult(res);
+        if (actions) actions.innerHTML = '<button class="btn" id="drawer-done" type="button">完成</button>';
+        wrap.querySelector('#drawer-done').addEventListener('click', () => {
+          close();
+          c.refreshState().catch(() => {}).then(() => c.rerender());
+        });
+        await c.refreshState();
+        c.rerender();
+      } catch (err) {
+        deciding = false;
+        if (approve) approve.disabled = false;
+        if (reject) reject.disabled = false;
+        if (result) result.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
+      }
+    };
+    approve?.addEventListener('click', () => decide('approve'));
+    reject?.addEventListener('click', () => decide('cancel'));
+    approve?.focus();
+  }
+
+  // 返回 true 表示已在当前页打开抽屉；false 表示已转到设备页或给出提示
+  async function openConfirm(operationId, c) {
+    const b = c.store.bootstrap || {};
+    const virtualConfirm = !(b.virtualConfirm === false);
+    const serialMode = !!b.nearfieldSerial;
+    const role = (b.authUser && b.authUser.role) || null;
+    const canInitiate = !role || ['员工', '管理员'].includes(role);
+    const id = encodeURIComponent(operationId);
+    // 设备助手不能发起挑战，但可以接住发起人已经下发的挑战：先查有没有现成的待确认
+    let challenge = null;
+    try {
+      const dev = await API.get('/api/device');
+      challenge = (dev.pending || []).find((p) => p.operationId === operationId) || null;
+    } catch { /* 设备状态读不到就按新挑战处理 */ }
+    if (!virtualConfirm || serialMode) {
+      if (!challenge) {
+        if (!canInitiate) { toast('这条操作还没有发起确认，请让发起人先发起', 'info'); return false; }
+        const res = await API.post(`/api/operations/${id}/challenge`);
+        challenge = res.challenge;
+      }
+      c.store.operationId = operationId;
+      c.store.challengeId = challenge.challengeId;
+      toast(serialMode ? '挑战已下发，请在设备 OLED 上按键确认' : '挑战已下发，请在确认端完成', 'ok');
+      c.navigate('device');
+      return false;
+    }
+    if (!challenge) {
+      if (!canInitiate) { toast('这条操作还没有发起确认，请让发起人先发起', 'info'); return false; }
+      const res = await API.post(`/api/operations/${id}/challenge`);
+      challenge = res.challenge;
+    }
+    const detail = await API.get(`/api/operations/${id}`).catch(() => null);
+    c.store.operationId = operationId;
+    c.store.challengeId = challenge.challengeId;
+    mountConfirmDrawer(challenge, detail, c);
+    return true;
+  }
+
   // ---------- 通用 ----------
   function page(title, sub) {
     return `<div class="spread"><div><h2 class="page-title">${esc(title)}</h2><div class="sub-text">${esc(sub)}</div></div></div>`;
@@ -126,11 +306,7 @@
         btn.disabled = true;
         try {
           if (action === 'challenge') {
-            const res = await API.post(`/api/operations/${encodeURIComponent(id)}/challenge`);
-            c.store.operationId = id;
-            c.store.challengeId = res.challenge.challengeId;
-            toast('挑战已下发，请在设备页确认', 'ok');
-            c.navigate('device');
+            await openConfirm(id, c);
           } else if (action === 'reject') {
             await API.post(`/api/operations/${encodeURIComponent(id)}/reject`);
             toast('操作已拒绝', 'ok');
@@ -260,16 +436,100 @@
     }
   }
 
-  // ---------- 工作台 ----------
+  // ---------- 工作台（任务入口） ----------
   async function dashboard(root, c) {
+    const state = c.store.state || await c.refreshState();
+    const risk = state.risk || {};
+    const [opsRes, runsRes] = await Promise.all([
+      API.get('/api/operations?state=frozen').catch(() => ({ items: [] })),
+      API.get('/api/commands').catch(() => ({ items: [] })),
+    ]);
+    const pending = opsRes.items || [];
+    const runs = (runsRes.items || []).slice(0, 5);
+    const draft = c.store.pendingCommand || '';
+    const authUser = (c.store.bootstrap && c.store.bootstrap.authUser) || null;
+    const role = authUser ? authUser.role : null;
+    const canDecide = !role || ['设备助手', '管理员'].includes(role);
+    root.innerHTML = `
+      ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<a href="#/governance">去人工复核</a></div>` : ''}
+      <section class="card hero">
+        <div class="hero-top">
+          <div>
+            <div class="hero-kicker">任务工作台</div>
+            <h2>今天要完成什么？</h2>
+            <div class="sub-text">描述任务，系统整理资料并给出执行计划；外发、删除、打印和设备动作会先请你确认。</div>
+          </div>
+          <div class="hero-pills">
+            <span class="pill ${pending.length ? 'warn' : 'ok'}">待你确认 ${pending.length}</span>
+            <span class="pill ${risk.frozen ? 'block' : (risk.score > 0 ? 'warn' : 'ok')}">风险 ${esc(risk.score || 0)}/${esc(risk.threshold || 60)}</span>
+          </div>
+        </div>
+        <textarea class="textarea hero-input" id="dash-command" placeholder="例如：把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal">${esc(draft)}</textarea>
+        <div class="quick-row">
+          <button class="quick" data-quick="纪要" type="button">整理会议纪要</button>
+          <button class="quick" data-quick="外发" type="button">外发邮件确认</button>
+          <button class="quick" data-quick="设备" type="button">门锁控制</button>
+        </div>
+        <div class="btn-row mt12">
+          <button class="btn" id="dash-start" type="button">开始任务</button>
+          <a class="btn ghost" href="#/demo">演示场景</a>
+          <a class="btn ghost" href="#/approvals">全部审批</a>
+        </div>
+      </section>
+      <div class="two-col">
+        <section class="card">
+          <div class="card-head"><h2>待你处理</h2><span class="sub">${pending.length} 条</span></div>
+          <div class="stack">
+            ${pending.length ? pending.slice(0, 4).map((op) => `<article class="task-row">
+              <div><strong>${esc(op.subject)}</strong><div class="sub-text">${esc(op.protocolLabel)} · 目标 ${esc(op.recipient)} · ${confirmationLabel(op)}</div></div>
+              <div class="btn-row"><button class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}" type="button">${canDecide ? '现在确认' : '发起确认'}</button><button class="btn ghost small" data-op-action="detail" data-id="${esc(op.operationId)}" type="button">详情</button></div>
+            </article>`).join('') : '<div class="empty">没有待确认的操作。完成一个任务后，高危动作会出现在这里。</div>'}
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>最近任务</h2><span class="sub">${runs.length} 条</span></div>
+          <div class="stack">
+            ${runs.length ? runs.map((r) => `<div class="task-row">
+              <div><strong>${esc(short(r.command || r.runId, 42))}</strong><div class="sub-text">${esc(dateTime(r.at))} · ${(r.operations || []).length} 个动作 · 风险 ${esc((r.risk && r.risk.score) || 0)}</div></div>
+              <a class="btn ghost small" href="#/replay">回放</a>
+            </div>`).join('') : '<div class="empty">还没有任务记录。从上面的输入框开始第一个任务。</div>'}
+          </div>
+        </section>
+      </div>`;
+
+    const quickText = {
+      纪要: '把周例会纪要整理成正式稿，发到部门内网邮箱 team@corp.internal',
+      外发: '把季度总结发到合作方 partner@partner-example.com，需要设备确认',
+      设备: '打开 3 号会议室的门锁',
+    };
+    const input = root.querySelector('#dash-command');
+    root.querySelectorAll('[data-quick]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        input.value = quickText[btn.dataset.quick] || '';
+        c.store.pendingCommand = input.value;
+        input.focus();
+      });
+    });
+    input?.addEventListener('input', () => { c.store.pendingCommand = input.value; });
+    root.querySelector('#dash-start')?.addEventListener('click', () => {
+      const text = String(input.value || '').trim();
+      if (!text) { toast('先描述一下要完成的任务', 'info'); input.focus(); return; }
+      c.store.pendingCommand = text;
+      c.navigate('command');
+    });
+    bindOpActions(root, c);
+  }
+
+  // ---------- 演示场景（答辩用，和日常工作台分开） ----------
+  async function demo(root, c) {
     const state = c.store.state || await c.refreshState();
     const counts = state.counts || {};
     const risk = state.risk || {};
     const events = (state.audit && state.audit.recent) || [];
     const samples = c.store.bootstrap.samples || [];
     const pick = ['normal-minutes', 'external-confirm', 'injection', 'private-mailbox', 'bulk-delete', 'device'];
-    root.innerHTML = `
-      ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<button class="btn ghost small" id="dash-review">人工复核 clear</button></div>` : ''}
+    root.innerHTML = `${page('演示场景', '答辩用：正常流 → 攻击样例 → 硬件确认 → 治理回溯；日常任务请回工作台')}
+      ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<button class="btn ghost small" id="dash-review" type="button">人工复核</button></div>` : ''}
       <div class="stats">
         ${stat('文档 / 图片 / 录音', (counts.documents || 0) + (counts.images || 0) + (counts.audios || 0), '演示数据')}
         ${stat('待确认操作', counts.pendingOperations || 0, '冻结记录')}
@@ -363,33 +623,61 @@
     const b = c.store.bootstrap;
     const sample = c.store.pendingSample || null;
     c.store.pendingSample = null;
+    const pendingText = c.store.pendingCommand || '';
+    c.store.pendingCommand = null;
     const tools = sample ? (sample.tools || []) : ['readDoc', 'summarize', 'sendInternalEmail'];
     const docs = sample ? (sample.documentIds || []) : ['M2'];
     const domains = ((sample && sample.domains) || []).join(',');
-    const text = (sample && sample.command) || '把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal';
+    const text = pendingText || (sample && sample.command) || '把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal';
     const sandbox = (sample && sample.sandboxPreset) || 'default';
     const maxCalls = sample && sample.maxCalls ? String(sample.maxCalls) : '';
     if (sample && sample.nearfieldOnline !== undefined) c.setNearfield(!!sample.nearfieldOnline);
 
-    root.innerHTML = `${page('命令台', '自由指令 + 角色/工具/文档/沙箱；查看五道闸与冻结操作')}
+    root.innerHTML = `${page('命令台', '描述任务，系统整理资料并给出计划；高危动作会先请你确认')}
       <section class="card">
-        <div class="card-head"><h2>指令</h2><span class="sub">角色 / 模型 / 近场取顶栏</span></div>
+        <div class="card-head"><h2>任务</h2><span class="sub">角色 / 模型 / 近场取顶栏</span></div>
         <div class="form-grid">
-          <div class="full"><label class="label">指令</label><textarea class="textarea" id="cmd-text">${esc(text)}</textarea></div>
-          <div class="full"><label class="label">允许工具</label><div class="checks" id="cmd-tools">${b.tools.map((t) => `<label class="check"><input type="checkbox" value="${esc(t.name)}" ${tools.includes(t.name) ? 'checked' : ''}> ${esc(t.name)} <span class="muted">${esc(t.level)}</span></label>`).join('')}</div></div>
-          <div class="full"><label class="label">授权文档</label><div class="checks" id="cmd-docs">${b.documents.map((d) => `<label class="check"><input type="checkbox" value="${esc(d.id)}" ${docs.includes(d.id) ? 'checked' : ''}> ${esc(d.id)} ${esc(d.title)} <span class="muted">${esc(d.level)}</span></label>`).join('')}</div></div>
-          <div class="full"><label class="label">附件（最多 5 个，单个 ≤5MB；随外发邮件一起冻结）</label><input type="file" id="cmd-files" multiple /></div>
-          <div><label class="label">外部域名（逗号分隔）</label><input class="input" id="cmd-domains" value="${esc(domains)}" placeholder="partner-example.com"></div>
-          <div><label class="label">调用上限（空=不限）</label><input class="input" id="cmd-max" type="number" min="1" value="${esc(maxCalls)}"></div>
-          <div><label class="label">沙箱</label><select class="select" id="cmd-sandbox"><option value="default" ${sandbox === 'default' ? 'selected' : ''}>默认沙箱（物理通道关闭）</option><option value="physical" ${sandbox === 'physical' ? 'selected' : ''}>开放物理通道</option></select></div>
-          <div><label class="label">说明</label><div class="sub-text">外发/删除/打印/设备会转交冻结操作；内网邮件由策略自动确认。</div></div>
+          <div class="full"><label class="label">想让 Agent 完成什么？</label><textarea class="textarea" id="cmd-text">${esc(text)}</textarea></div>
+          <div class="full"><label class="label">选择本次可用的资料</label><div class="checks" id="cmd-docs">${b.documents.map((d) => `<label class="check"><input type="checkbox" value="${esc(d.id)}" ${docs.includes(d.id) ? 'checked' : ''}> ${esc(d.id)} ${esc(d.title)} <span class="muted">${esc(d.level)}</span></label>`).join('')}</div></div>
+          <div class="full"><label class="label">附件（可选，最多 5 个，单个 ≤5MB）</label><input type="file" id="cmd-files" multiple /></div>
+          <div class="full cmd-rec">
+            <div><div class="sub-text">建议权限</div><strong id="cmd-rec-text">读取资料、生成摘要、发内网邮件</strong></div>
+            <button class="btn ghost small" id="cmd-rec-apply" type="button">按建议勾选</button>
+          </div>
         </div>
+        <details class="advanced" id="cmd-advanced">
+          <summary>高级设置（工具、域名、调用次数、执行范围）</summary>
+          <div class="form-grid mt12">
+            <div class="full"><label class="label">本次可用工具</label><div class="checks" id="cmd-tools">${b.tools.map((t) => `<label class="check"><input type="checkbox" value="${esc(t.name)}" ${tools.includes(t.name) ? 'checked' : ''}> ${esc(toolLabel(t.name))} <span class="muted">${esc(t.level)}</span></label>`).join('')}</div></div>
+            <div><label class="label">允许外发域名（逗号分隔）</label><input class="input" id="cmd-domains" value="${esc(domains)}" placeholder="partner-example.com"></div>
+            <div><label class="label">最多调用次数（空=不限）</label><input class="input" id="cmd-max" type="number" min="1" value="${esc(maxCalls)}"></div>
+            <div class="full"><label class="label">执行范围</label><select class="select" id="cmd-sandbox"><option value="default" ${sandbox === 'default' ? 'selected' : ''}>默认（物理通道关闭）</option><option value="physical" ${sandbox === 'physical' ? 'selected' : ''}>开放物理通道</option></select></div>
+          </div>
+          <div class="sub-text mt8">外发、删除、打印和设备动作会转交确认；内网邮件按策略自动确认。这里的勾选只是本次授权，服务端策略始终优先。</div>
+        </details>
         <div class="btn-row mt12"><button class="btn" id="cmd-run">执行</button><button class="btn ghost" id="cmd-clear">清空</button></div>
         <div class="hr"></div>
         <div class="sub-text mb8">样例（点击填入表单）：</div>
         <div class="sample-grid">${b.samples.map((s) => `<button class="sample" data-cmd-sample="${esc(s.id)}"><strong>${esc(s.name)}</strong><small>${esc(s.expect)}</small></button>`).join('')}</div>
       </section>
       <div id="cmd-result"></div>`;
+
+    const recEl = root.querySelector('#cmd-rec-text');
+    const recApply = root.querySelector('#cmd-rec-apply');
+    let recTools = [];
+    const syncRecommendation = () => {
+      const available = new Set((b.tools || []).map((t) => t.name));
+      recTools = recommendTools(root.querySelector('#cmd-text').value).filter((name) => available.has(name));
+      if (!recTools.length) recTools = ['readDoc', 'summarize'].filter((name) => available.has(name));
+      if (recEl) recEl.textContent = recTools.map(toolLabel).join('、') || '按默认';
+      if (recApply) recApply.disabled = recTools.length === 0;
+    };
+    root.querySelector('#cmd-text').addEventListener('input', syncRecommendation);
+    syncRecommendation();
+    recApply?.addEventListener('click', () => {
+      root.querySelectorAll('#cmd-tools input').forEach((x) => { x.checked = recTools.includes(x.value); });
+      toast(`已按建议勾选 ${recTools.length} 个工具`, 'ok');
+    });
 
     const collect = () => ({
       command: root.querySelector('#cmd-text').value,
@@ -486,9 +774,11 @@
     }
     root.querySelector('#cmd-clear').addEventListener('click', () => {
       root.querySelector('#cmd-text').value = '';
+      c.store.pendingCommand = null;
       root.querySelectorAll('#cmd-tools input').forEach((x) => { x.checked = false; });
       root.querySelectorAll('#cmd-docs input').forEach((x) => { x.checked = false; });
       root.querySelector('#cmd-result').innerHTML = '';
+      syncRecommendation();
     });
     root.querySelectorAll('[data-cmd-sample]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1557,6 +1847,6 @@
   }
 
   window.Views = {
-    dashboard, command, minutes, mail, calendar, contacts, files, approvals, device, governance, replay,
+    dashboard, demo, command, minutes, mail, calendar, contacts, files, approvals, device, governance, replay,
   };
 })();
