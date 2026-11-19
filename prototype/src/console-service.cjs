@@ -47,7 +47,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.53.1';
+const VERSION = '0.53.2';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -457,7 +457,7 @@ class ConsoleService {
     return this._auditActorStorage.run(actor || null, fn);
   }
 
-  // 管理员用户管理动作写入审计链（v0.53.1）：actor = 当前管理员，detail 不含密码。
+  // 动作写审计链（v0.53.1 起）：actor = 操作者（请求级身份），detail 不含密码。
   // 说明：审计落盘失败由 AuditLog.onAppend 内部吞掉（既有口径：不打断审计链），
   // 因此这里不能保证"磁盘必写"；内存链与检查点仍会更新。
   /**
@@ -465,7 +465,7 @@ class ConsoleService {
    * @param {any} kind
    * @param {any} detail
    */
-  auditAdminAction(actor, kind, detail) {
+  auditAction(actor, kind, detail) {
     this._withAuditActor(actor, () => this.audit.append(kind, detail));
   }
 

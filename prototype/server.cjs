@@ -359,7 +359,7 @@ function createConsoleServer({
   // 用户管理动作写审计链（v0.53.1）：actor = 当前管理员，detail 不含密码。
   function auditUserAdmin(/** @type {any} */ req, /** @type {any} */ action, /** @type {any} */ target, /** @type {any} */ extra = {}) {
     if (!req.user) return;
-    service.auditAdminAction(req.user.username, '用户管理', { action, target, ...extra });
+    service.auditAction(req.user.username, '用户管理', { action, target, ...extra });
   }
   // —— 手机确认端配对会话 ——
   // 配了配对码时，state/decision 必须带 X-Phone-Session；否则局域网任何人都能读待确认详情。
@@ -495,6 +495,7 @@ function createConsoleServer({
           }
           throw new ConsoleError('BAD_REQUEST', err.message, 400);
         }
+        service.auditAction(req.user.username, '账号安全', { action: 'change-password', target: req.user.username });
         return sendJson(res, 200, { ok: true });
       }
       // —— 两步验证（TOTP）——
@@ -509,13 +510,14 @@ function createConsoleServer({
             return sendJson(res, 200, { ok: true, ...auth.beginTotpSetup(req.user.username) });
           }
           if (pathname === '/api/2fa/enable') {
-            return sendJson(res, 200, { ok: true, ...auth.enableTotp(req.user.username, body.code) });
+            const out = auth.enableTotp(req.user.username, body.code);
+            service.auditAction(req.user.username, '账号安全', { action: 'totp-enable', target: req.user.username });
+            return sendJson(res, 200, { ok: true, ...out });
           }
           if (pathname === '/api/2fa/disable') {
-            return sendJson(res, 200, {
-              ok: true,
-              ...auth.disableTotp(req.user.username, body.password, body.code),
-            });
+            const out = auth.disableTotp(req.user.username, body.password, body.code);
+            service.auditAction(req.user.username, '账号安全', { action: 'totp-disable', target: req.user.username });
+            return sendJson(res, 200, { ok: true, ...out });
           }
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           throw mapAuthError(err);

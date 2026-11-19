@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.53.1');
+  assert.equal(data.version, '0.53.2');
 });
 
 test('静态首页与资源', async (t) => {
@@ -609,6 +609,12 @@ test('改密接口：原密码错误 401、新密码过短 400、成功后其他
   assert.equal(oldLogin.res.status, 401);
   const newLogin = await post(`${started.url}/api/login`, { username: 'alice', password: 'newpassword123' });
   assert.equal(newLogin.res.status, 200);
+
+  // 账号安全动作进审计链（v0.53.2）：失败尝试不写、成功动作写且不含密码
+  const secAudit = started.service.audit.entries.filter((e) => e.kind === '账号安全');
+  assert.deepEqual(secAudit.map((e) => e.detail.action), ['change-password']);
+  assert.equal(secAudit[0].actor, 'alice');
+  assert.ok(!JSON.stringify(secAudit).includes('newpassword123'), '审计不含密码');
 });
 
 test('四眼原则：HTTP 审批拒绝发起人，换一位管理员可批准', async (t) => {
@@ -693,6 +699,11 @@ test('两步验证：启用后登录必须带码，/api/me 标记，关闭后恢
   assert.equal(disable.status, 200);
   const afterDisable = await login();
   assert.equal(afterDisable.res.status, 200);
+
+  // 两步验证变更进审计链（v0.53.2）
+  const secAudit = started.service.audit.entries.filter((e) => e.kind === '账号安全');
+  assert.deepEqual(secAudit.map((e) => e.detail.action), ['totp-enable', 'totp-disable']);
+  assert.ok(secAudit.every((e) => e.actor === 'alice'));
 });
 
 test('收件箱回信草稿：只返回草稿，autoSend=false', async (t) => {
