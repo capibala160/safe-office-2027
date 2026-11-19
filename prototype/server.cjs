@@ -22,6 +22,7 @@ const { createInboxReaderFromEnv } = require('./src/imap-inbox.cjs');
 const { scanAttachment, findClamav } = require('./src/file-scan.cjs');
 const { runPreflight } = require('./src/preflight.cjs');
 const { createAuthFromFile } = require('./src/auth.cjs');
+const { toDataUrl: totpQr } = require('./src/qr.cjs');
 const { loadConfigFile } = require('./src/load-config.cjs');
 const { createAsrFromEnv } = require('./src/asr.cjs');
 const { createSerialActuator } = require('./src/device-actuator.cjs');
@@ -507,7 +508,10 @@ function createConsoleServer({
         const body = await readJson(req);
         try {
           if (pathname === '/api/2fa/setup') {
-            return sendJson(res, 200, { ok: true, ...auth.beginTotpSetup(req.user.username) });
+            const setup = auth.beginTotpSetup(req.user.username);
+            let qr = '';
+            try { qr = totpQr(setup.uri); } catch { qr = ''; }
+            return sendJson(res, 200, { ok: true, ...setup, qr });
           }
           if (pathname === '/api/2fa/enable') {
             const out = auth.enableTotp(req.user.username, body.code);

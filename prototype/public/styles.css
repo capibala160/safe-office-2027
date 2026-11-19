@@ -385,3 +385,6 @@ a.sample { display: block; text-decoration: none; color: inherit; }
   border-radius: 8px;
   background: #000;
 }
+
+/* TOTP 绑定二维码（v0.53.3）：固定白底，避免深色主题下扫不出来 */
+.totp-qr { display: block; margin: 8px auto; width: 200px; height: 200px; background: #fff; padding: 6px; border-radius: 8px; image-rendering: pixelated; }

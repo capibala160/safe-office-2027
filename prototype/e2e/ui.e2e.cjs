@@ -149,7 +149,9 @@ test('UI 两步验证：启用 → 登出 → 无码被拒 → 动态码登录',
   await page.waitForSelector('#password-dialog[open]');
   await page.click('#btn-totp');
   await page.waitForSelector('#totp-dialog[open]');
-  await page.click('#totp-setup');
+  // v0.53.3：打开即自动生成二维码，无需再点“生成密钥”
+  await page.waitForSelector('#totp-qr');
+  assert.match(await page.getAttribute('#totp-qr', 'src'), /^data:image\//, '应自动显示 TOTP 二维码');
   await page.waitForSelector('#totp-enable');
   const secret = (await page.textContent('#totp-body .mono')).trim();
   assert.match(secret, /^[A-Z2-7]+$/);

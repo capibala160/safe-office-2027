@@ -284,18 +284,28 @@
     return data;
   }
 
-  // 两步验证弹窗：未启用 → 生成密钥并确认；已启用 → 密码 + 动态码关闭
+  // 两步验证弹窗：未启用 → 自动生成密钥 + 二维码并确认；已启用 → 密码 + 动态码关闭
+  let totpSetupCache = null;
+  let totpSetupPromise = null;
   async function openTotpDialog() {
     const dialog = document.getElementById('totp-dialog');
     const body = document.getElementById('totp-body');
     const error = document.getElementById('totp-error');
     if (!dialog || !body || !error) return;
     error.textContent = '';
-    body.innerHTML = '<div class="empty">加载中…</div>';
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
     try {
       const me = await fetch('/api/me', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null));
-      renderTotpState(!!(me && me.user && me.user.totpEnabled), body, error);
+      const enabled = !!(me && me.user && me.user.totpEnabled);
+      if (enabled) { totpSetupCache = null; totpSetupPromise = null; renderTotpState(true, body, error); return; }
+      // 未启用：打开即自动生成二维码（不再需要点“生成密钥”）
+      if (totpSetupCache) { renderTotpSetup(totpSetupCache, body, error); return; }
+      body.innerHTML = '<div class="empty">正在生成绑定二维码…</div>';
+      let setup = totpSetupPromise ? await totpSetupPromise.catch(() => null) : null;
+      if (!setup) setup = await accountRequest('/api/2fa/setup');
+      totpSetupCache = setup;
+      totpSetupPromise = null;
+      renderTotpSetup(setup, body, error);
     } catch (err) {
       error.textContent = err.message;
     }
@@ -319,6 +329,8 @@
             code: document.getElementById('totp-code').value.trim(),
           });
           store.authUser = { ...(store.authUser || {}), totpEnabled: false };
+          totpSetupCache = null;
+          totpSetupPromise = null;
           document.getElementById('totp-dialog').close();
           toast('两步验证已关闭', 'ok');
         } catch (err) {
@@ -329,13 +341,14 @@
       return;
     }
     body.innerHTML = `<div class="sub-text">未启用。启用后登录需要密码 + 认证器动态码。</div>
-      <div class="btn-row mt12"><button class="btn" id="totp-setup" type="button">生成密钥</button></div>`;
+      <div class="btn-row mt12"><button class="btn" id="totp-setup" type="button">重新生成二维码</button></div>`;
     body.querySelector('#totp-setup').addEventListener('click', async () => {
       const button = body.querySelector('#totp-setup');
       button.disabled = true;
       error.textContent = '';
       try {
         const setup = await accountRequest('/api/2fa/setup');
+        totpSetupCache = setup;
         renderTotpSetup(setup, body, error);
       } catch (err) {
         error.textContent = err.message;
@@ -345,7 +358,11 @@
   }
 
   function renderTotpSetup(setup, body, error) {
-    body.innerHTML = `<div class="sub-text">1. 在认证器里手动输入密钥：</div>
+    const qr = setup.qr && String(setup.qr).startsWith('data:image/')
+      ? `<img id="totp-qr" class="totp-qr" src="${esc(setup.qr)}" alt="TOTP 绑定二维码">`
+      : '<div class="notice block">二维码生成失败，请改用下方密钥手动添加。</div>';
+    body.innerHTML = `${qr}
+      <div class="sub-text mt8">1. 用验证器「扫码/二维码激活」扫上面二维码；无法扫码则手动输入密钥：</div>
       <div class="mono mt8">${esc(setup.secret)}</div>
       <div class="sub-text mt8">或粘贴 otpauth URI：</div>
       <div class="mono mt8">${esc(setup.uri)}</div>
@@ -361,6 +378,7 @@
           code: document.getElementById('totp-code').value.trim(),
         });
         store.authUser = { ...(store.authUser || {}), totpEnabled: true };
+        totpSetupCache = null;
         document.getElementById('totp-dialog').close();
         toast('两步验证已启用；下次登录需要动态验证码', 'ok');
       } catch (err) {
@@ -384,6 +402,11 @@
       for (const id of fields) document.getElementById(id).value = '';
       dialog.showModal();
       document.getElementById('old-password').focus();
+      // 每次打开改密弹窗：自动生成一张新的 TOTP 绑定二维码（进入“管理”即直接显示）
+      totpSetupCache = null;
+      if (!store.authUser || !store.authUser.totpEnabled) {
+        totpSetupPromise = accountRequest('/api/2fa/setup').catch(() => null);
+      }
     });
     document.getElementById('password-cancel').addEventListener('click', () => dialog.close());
     dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });

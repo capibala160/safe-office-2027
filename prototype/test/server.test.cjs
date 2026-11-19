@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.53.2');
+  assert.equal(data.version, '0.53.3');
 });
 
 test('静态首页与资源', async (t) => {
@@ -673,7 +673,9 @@ test('两步验证：启用后登录必须带码，/api/me 标记，关闭后恢
 
   const setup = await fetch(`${started.url}/api/2fa/setup`, { method: 'POST', headers: { Cookie: cookie } });
   assert.equal(setup.status, 200);
-  const { secret } = await setup.json();
+  const setupBody = await setup.json();
+  const { secret } = setupBody;
+  assert.match(String(setupBody.qr), /^data:image\//, 'setup 应返回二维码 data URL（v0.53.3）');
   const enable = await fetch(`${started.url}/api/2fa/enable`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
