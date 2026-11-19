@@ -4,7 +4,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ConsoleService } = require('../src/console-service.cjs');
 const { buildTaskReplay, renderTaskReplay } = require('../src/task-replay.cjs');
-const { verifyOperation } = require('../src/operation.cjs');
 
 function synthetic() {
   const run = {
