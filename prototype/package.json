@@ -48,7 +48,8 @@
     "coverage": "node --test --experimental-test-coverage",
     "audit": "npm audit --registry=https://registry.npmjs.org --audit-level=high",
     "release": "node scripts/release.cjs",
-    "evidence:run": "node scripts/evidence-run.cjs"
+    "evidence:run": "node scripts/evidence-run.cjs",
+    "supersede:check": "node scripts/supersede-receipt-check.cjs"
   },
   "dependencies": {
     "imapflow": "^2.10.0",

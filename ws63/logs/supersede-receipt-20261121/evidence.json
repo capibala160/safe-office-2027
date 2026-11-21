@@ -1,0 +1,186 @@
+{
+  "generatedAt": "2026-11-21T02:12:46.673Z",
+  "port": "COM11",
+  "device": "ws63-B",
+  "old": {
+    "operationId": "24e75912-d129-4aff-908f-544d19efa519",
+    "recipient": "partner@partner-example.com",
+    "attachments": [
+      {
+        "name": "agenda.txt",
+        "size": 21,
+        "sha256": "9d6e9dbab9df324509542976c14cdb09597e0fbbd6d62a4d51be255719577470"
+      }
+    ],
+    "challengeId": "ce0d977dbd96711923ff4f305107175c",
+    "challengeState": "expired",
+    "operationState": "rejected",
+    "withdrawn": {
+      "ok": true,
+      "voidedChallenges": 1,
+      "operation": {
+        "operationId": "24e75912-d129-4aff-908f-544d19efa519",
+        "taskId": "RUN-1",
+        "action": "sendExternalEmail",
+        "protocolAction": 1,
+        "protocolLabel": "外发",
+        "createdBy": "",
+        "tool": "sendExternalEmail",
+        "recipient": "partner@partner-example.com",
+        "subject": "发送：周例会纪要（草稿）",
+        "mailAccount": "",
+        "mailAlias": "",
+        "level": "内部",
+        "sourceDocIds": [
+          "M2"
+        ],
+        "attachments": [
+          {
+            "name": "agenda.txt",
+            "sha256": "9d6e9dbab9df324509542976c14cdb09597e0fbbd6d62a4d51be255719577470",
+            "size": 21
+          }
+        ],
+        "state": "rejected",
+        "createdAt": "2026-11-21T02:12:01.185Z",
+        "expiresAt": "2026-11-21T02:17:01.185Z",
+        "updatedAt": "2026-11-21T02:12:05.229Z",
+        "expired": false,
+        "bodyHash": "c44204c9c35fb61cf96055f0301649ee9bd66b775ee309dab6ef37481054a25f",
+        "operationHash": "cc6a4b41f1e7ba4bf907d3bf305b99a57ecdfdf5f4d9412c0d3381e333fd7016",
+        "attachmentHashes": [
+          {
+            "name": "agenda.txt",
+            "sha256": "9d6e9dbab9df324509542976c14cdb09597e0fbbd6d62a4d51be255719577470",
+            "size": 21
+          }
+        ],
+        "confirmationId": null,
+        "deviceId": null,
+        "result": null,
+        "bodyPreview": "下周排期已更新，例会改到周四上午十点。值班表周五前交行政。",
+        "requiresNearfield": true,
+        "confirmationTransport": "virtual-loopback",
+        "confirmationDevice": "WS63 真板确认端",
+        "confirmationMode": null,
+        "autoConfirmed": false,
+        "docTitle": "周例会纪要（草稿）",
+        "stepNumber": 2,
+        "runId": "RUN-1",
+        "args": {
+          "to": "partner@partner-example.com",
+          "docId": "M2"
+        },
+        "verify": {
+          "ok": true,
+          "reason": "ok",
+          "actualHash": "cc6a4b41f1e7ba4bf907d3bf305b99a57ecdfdf5f4d9412c0d3381e333fd7016"
+        },
+        "outbox": null,
+        "challenge": null
+      }
+    },
+    "attempt": {
+      "kind": "rejected",
+      "code": "CONFLICT",
+      "message": "挑战已作废，请检查当前任务状态"
+    }
+  },
+  "comparison": {
+    "operationIds": {
+      "from": "24e75912-d129-4aff-908f-544d19efa519",
+      "to": "6d09515d-5aff-4baf-b64a-9e401619bdf7"
+    },
+    "recipient": {
+      "from": "partner@partner-example.com",
+      "to": "review@partner-example.com",
+      "changed": true
+    },
+    "attachments": {
+      "from": [
+        {
+          "name": "agenda.txt",
+          "size": 21,
+          "sha256": "9d6e9dbab9df324509542976c14cdb09597e0fbbd6d62a4d51be255719577470"
+        }
+      ],
+      "to": [
+        {
+          "name": "agenda.txt",
+          "size": 21,
+          "sha256": "d035eacdbabdb990eec6d26af970cefbdbaf68d89a5d44f31c310603827b5d87"
+        }
+      ],
+      "removed": [
+        {
+          "name": "agenda.txt",
+          "size": 21,
+          "sha256": "9d6e9dbab9df324509542976c14cdb09597e0fbbd6d62a4d51be255719577470"
+        }
+      ],
+      "added": [
+        {
+          "name": "agenda.txt",
+          "size": 21,
+          "sha256": "d035eacdbabdb990eec6d26af970cefbdbaf68d89a5d44f31c310603827b5d87"
+        }
+      ],
+      "nameReused": true
+    },
+    "bodyHash": {
+      "from": "c44204c9c35fb61cf96055f0301649ee9bd66b775ee309dab6ef37481054a25f",
+      "to": "c44204c9c35fb61cf96055f0301649ee9bd66b775ee309dab6ef37481054a25f",
+      "changed": false
+    },
+    "operationHash": {
+      "from": "cc6a4b41f1e7ba4bf907d3bf305b99a57ecdfdf5f4d9412c0d3381e333fd7016",
+      "to": "98466b02b22c9b805984f9dd7eae406e3aee6215ec684d95fa70183fc03b8d00",
+      "changed": true
+    }
+  },
+  "new": {
+    "operationId": "6d09515d-5aff-4baf-b64a-9e401619bdf7",
+    "recipient": "review@partner-example.com",
+    "attachments": [
+      {
+        "name": "agenda.txt",
+        "size": 21,
+        "sha256": "d035eacdbabdb990eec6d26af970cefbdbaf68d89a5d44f31c310603827b5d87"
+      }
+    ],
+    "challengeId": "15875dbc7e2d077b34b4034d8dcf5d89",
+    "targetHash": "98466b02b22c9b805984f9dd7eae406e3aee6215ec684d95fa70183fc03b8d00",
+    "decision": {
+      "ok": true,
+      "outcome": "approved",
+      "code": "OK"
+    }
+  },
+  "receipt": {
+    "confirmationId": "ws63-5c1331edd27d2d58-15875dbc7e2d077b34b4034d8dcf5d89",
+    "messageId": "fake-message-1-1",
+    "outboxState": "sent",
+    "operationState": "executed"
+  },
+  "audit": {
+    "verified": true,
+    "entries": 29,
+    "head": "dee86e44e14c98097d4bc4c0fc507b86e06f227e4dbd9e9b92a715eff179a909"
+  },
+  "checks": {
+    "oldChallengeExpired": true,
+    "oldOperationRejected": true,
+    "oldChallengeCannotApprove": true,
+    "historyMarkedWithdrawn": true,
+    "recipientChanged": true,
+    "attachmentReplaced": true,
+    "newTargetHashMatches": true,
+    "newApproved": true,
+    "executed": true,
+    "outboxSent": true,
+    "receiptPresent": true,
+    "auditVerified": true,
+    "auditVoided": true
+  },
+  "ok": true
+}
