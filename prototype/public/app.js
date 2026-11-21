@@ -4,6 +4,17 @@
   const { esc, badge, kindClass, summarize, time, toast, errorText } = window.UI;
   const API = window.API;
 
+  // 提交只创建任务，正常很快返回；超时视为“未收到回执”，由页面引导人工核对。
+  // 测试可注入 window.SAFE_OFFICE_POST_TIMEOUT_MS / SAFE_OFFICE_POLL_MAX_RETRIES 缩短等待。
+  const POST_TIMEOUT_MS = (() => {
+    const v = Number(window.SAFE_OFFICE_POST_TIMEOUT_MS);
+    return Number.isFinite(v) && v > 0 ? v : 15000;
+  })();
+  const POLL_MAX_RETRIES = (() => {
+    const v = Number(window.SAFE_OFFICE_POLL_MAX_RETRIES);
+    return Number.isInteger(v) && v > 0 ? v : 60;
+  })();
+
   const PAGES = [
     { route: 'dashboard', label: '工作台', icon: '◈' },
     { route: 'command', label: '命令台', icon: '⌘' },
@@ -102,14 +113,15 @@
       if (body.role === undefined) body.role = store.role;
       if (body.modelLocation === undefined) body.modelLocation = store.modelLocation;
       if (body.nearfieldOnline === undefined) body.nearfieldOnline = store.nearfieldOnline;
-      const res = await API.post('/api/commands/async', body);
+      const res = await API.post('/api/commands/async', body, { signal: AbortSignal.timeout(POST_TIMEOUT_MS) });
       store.activeRunId = res.runId;
       try { localStorage.setItem('safe-office.activeRun', res.runId); } catch { /* 隐私模式 */ }
       return res;
     },
-    async pollRun(runId, onUpdate, { onRetry, isCurrent = () => true } = {}) {
+    async pollRun(runId, onUpdate, { onRetry, isCurrent = () => true, maxRetries = POLL_MAX_RETRIES } = {}) {
       const path = `/api/commands/${encodeURIComponent(runId)}`;
       let delay = 900;
+      let failures = 0;
       while (isCurrent()) {
         let snap;
         try {
@@ -117,12 +129,20 @@
         } catch (err) {
           if (err.code !== 'NETWORK' && ![502, 503, 504].includes(err.status)) throw err;
           if (!isCurrent()) return null;
-          onRetry?.();
+          failures += 1;
+          if (failures > maxRetries) {
+            const limit = new Error(`连续 ${failures} 次无法获取任务进度，自动重连已暂停`);
+            limit.code = 'RETRY_LIMIT';
+            limit.attempts = failures;
+            throw limit;
+          }
+          onRetry?.({ attempt: failures, delay });
           await new Promise((resolve) => setTimeout(resolve, delay));
           delay = Math.min(delay * 2, 5000);
           continue;
         }
         if (!isCurrent()) return null;
+        failures = 0;
         delay = 900;
         if (onUpdate) onUpdate(snap);
         if (snap.status !== 'running') {

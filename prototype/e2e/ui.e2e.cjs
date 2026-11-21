@@ -738,6 +738,63 @@ test('UI：任务状态查询断线后恢复，提交只发生一次', { timeout
   assert.equal(await page.locator('#cmd-run').isEnabled(), true);
 });
 
+test('UI：提交超时未收到回执 → 暂停重提并引导工作台', { timeout: 30000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await page.addInitScript(() => { window.SAFE_OFFICE_POST_TIMEOUT_MS = 300; });
+  let submissions = 0;
+  await page.route('**/api/commands/async', async (route) => {
+    submissions += 1;
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    try { await route.continue(); } catch { /* 测试已结束 */ }
+  });
+
+  await page.goto(started.url);
+  await page.click('[data-quick="外发"]');
+  await page.click('#dash-start');
+  await page.click('#cmd-run');
+  const notice = page.locator('#cmd-result .notice.block');
+  await notice.waitFor();
+  assert.match(await notice.innerText(), /未收到提交回执/);
+  assert.match(await notice.innerText(), /工作台/);
+  assert.equal(submissions, 1, '超时后不得自动重提');
+  assert.equal(await page.locator('#cmd-run').isDisabled(), true);
+  assert.equal(await page.locator('#cmd-clear').isDisabled(), true);
+});
+
+test('UI：多次查询失败后暂停自动重连，可手动继续', { timeout: 45000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await page.addInitScript(() => { window.SAFE_OFFICE_POLL_MAX_RETRIES = 2; });
+  let failing = true;
+  await page.route(/\/api\/commands\/RUN-\d+$/, async (route) => {
+    if (failing) await route.abort('internetdisconnected');
+    else await route.continue();
+  });
+
+  await page.goto(started.url);
+  await page.click('[data-quick="外发"]');
+  await page.click('#dash-start');
+  await page.click('#cmd-run');
+  await page.waitForFunction(() => {
+    const el = document.getElementById('run-connection');
+    return el && !el.hidden && el.textContent.includes('自动重连已暂停');
+  }, null, { timeout: 20000 });
+  const connection = page.locator('#run-connection');
+  assert.match(await connection.innerText(), /已保留最后收到的进度/);
+  assert.equal(await page.locator('#cmd-run').isDisabled(), true, '暂停期间不能重复提交');
+  assert.equal(await page.locator('#run-cancel').isDisabled(), true);
+
+  failing = false;
+  await page.click('#run-retry');
+  await page.locator('#cmd-result .op-card').waitFor({ timeout: 20000 });
+  assert.equal(await page.locator('#cmd-run').isEnabled(), true);
+});
+
 test('UI：对照收件人和同名附件改动，撤销旧挑战后核对新回执', { timeout: 60000 }, async (t) => {
   const password = hashPassword('password123');
   const auth = new AuthService({ users: [

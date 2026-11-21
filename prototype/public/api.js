@@ -37,7 +37,7 @@
 
   window.API = {
     get: (path, options) => request(path, options),
-    post: (path, body = {}) => request(path, { method: 'POST', body }),
+    post: (path, body = {}, options = {}) => request(path, { method: 'POST', body, ...options }),
     del: (path) => request(path, { method: 'DELETE' }),
   };
 })();

@@ -784,6 +784,8 @@
     const clearButton = root.querySelector('#cmd-clear');
     let watchedRunId = null;
     let cancelling = false;
+    let submissionUncertain = false;
+    let retryPaused = false;
     const comparison = root.querySelector('#cmd-comparison');
     const prior = comparisonId
       ? API.get(`/api/operations/${encodeURIComponent(comparisonId)}`).then((detail) => detail.operation).catch(() => null)
@@ -828,6 +830,7 @@
       const log = target.querySelector('#run-log');
       const connection = target.querySelector('#run-connection');
       const cancelButton = target.querySelector('#run-cancel');
+      retryPaused = false;
       try {
         const snapshot = await c.pollRun(runId, (status) => {
           connection.hidden = true;
@@ -836,25 +839,42 @@
           cancelButton.disabled = cancelling || status.status !== 'running' || status.cancelRequested;
         }, {
           isCurrent: () => target.isConnected,
-          onRetry: () => {
-            connection.textContent = '暂时无法获取进度，连接恢复后会继续查询此任务。';
+          onRetry: ({ attempt } = {}) => {
+            connection.textContent = attempt
+              ? `暂时无法获取进度（第 ${attempt} 次重试），连接恢复后会继续查询此任务。`
+              : '暂时无法获取进度，连接恢复后会继续查询此任务。';
             connection.hidden = false;
             cancelButton.disabled = true;
           },
         });
         if (snapshot) await finish(snapshot);
       } catch (err) {
-        if (target.isConnected) target.innerHTML = `<div class="notice block" role="alert">无法查看任务 ${esc(runId)}：${esc(c.errorText(err))}</div>`;
+        if (err.code === 'RETRY_LIMIT' && target.isConnected) {
+          retryPaused = true;
+          connection.textContent = '多次无法获取进度，自动重连已暂停；已保留最后收到的进度。可继续查询，或到工作台查看最近任务。';
+          connection.hidden = false;
+          if (!connection.querySelector('#run-retry')) {
+            const retry = document.createElement('button');
+            retry.className = 'btn ghost small mt8';
+            retry.id = 'run-retry';
+            retry.type = 'button';
+            retry.dataset.runId = runId;
+            retry.textContent = '继续查询';
+            connection.appendChild(retry);
+          }
+        } else if (target.isConnected) {
+          target.innerHTML = `<div class="notice block" role="alert">无法查看任务 ${esc(runId)}：${esc(c.errorText(err))}</div>`;
+        }
       } finally {
         watchedRunId = null;
-        runButton.disabled = false;
-        clearButton.disabled = false;
+        runButton.disabled = submissionUncertain || retryPaused;
+        clearButton.disabled = submissionUncertain || retryPaused;
       }
     };
     runButton.addEventListener('click', async () => {
       runButton.disabled = true;
       clearButton.disabled = true;
-      let submissionUncertain = false;
+      submissionUncertain = false;
       try {
         root.querySelector('#cmd-result').innerHTML = '<div class="notice info" role="status">正在提交任务…</div>';
         const allFiles = [...(root.querySelector('#cmd-files').files || [])];
@@ -886,11 +906,18 @@
           : `<div class="notice block" role="alert">${esc(c.errorText(err))}</div>`;
       }
       finally {
-        runButton.disabled = submissionUncertain;
-        clearButton.disabled = submissionUncertain;
+        runButton.disabled = submissionUncertain || retryPaused;
+        clearButton.disabled = submissionUncertain || retryPaused;
       }
     });
     root.querySelector('#cmd-result').addEventListener('click', async (ev) => {
+      const retryBtn = ev.target.closest('#run-retry');
+      if (retryBtn) {
+        const id = retryBtn.dataset.runId;
+        retryBtn.disabled = true;
+        if (id) void watch(id);
+        return;
+      }
       const btn = ev.target.closest('#run-cancel');
       if (!btn || !watchedRunId || cancelling) return;
       cancelling = true;

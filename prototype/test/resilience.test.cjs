@@ -14,6 +14,7 @@ const { HttpLLM, MockLLM } = require('../src/llm.cjs');
 const { PolicyEngine, AuditLog, RiskMeter } = require('../src/governance.cjs');
 const { CapabilityToken } = require('../src/guard.cjs');
 const { DOCS } = require('../src/scenario.cjs');
+const { isFetchBadPort } = require('../src/net-ports.cjs');
 
 function mkRt(llm = new MockLLM()) {
   const audit = new AuditLog(), risk = new RiskMeter(1000), policy = new PolicyEngine();
@@ -23,9 +24,28 @@ function mkRt(llm = new MockLLM()) {
 const token = (tools, { docs = ['M1', 'M2', 'M3'], domains = [] } = {}) =>
   new CapabilityToken({ tools, documentIds: docs, allowedExternalDomains: domains });
 
+// 随机端口偶尔会落在 undici 的 bad port 列表（如 6000/6666），fetch 会直接报 "bad port"；
+// 命中就换一个端口重试，避免测试假失败。
+function listenSafe(server) {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    const attempt = () => {
+      attempts += 1;
+      if (attempts > 20) { reject(new Error('无法找到非 bad port 的测试端口')); return; }
+      server.listen(0, '127.0.0.1', () => {
+        const { port } = server.address();
+        if (isFetchBadPort(port)) { server.close(() => attempt()); return; }
+        resolve(port);
+      });
+    };
+    server.once('error', reject);
+    attempt();
+  });
+}
+
 // —— 本地假端点：handler({url, method, headers, body}) → { json | raw | status | delayMs } ——
 function startFakeModel(handler) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       res.on('error', () => {}); // 客户端超时提前断开时静默
       let raw = '';
@@ -43,13 +63,10 @@ function startFakeModel(handler) {
         } catch { /* 客户端已断开 */ }
       });
     });
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      resolve({
-        endpoint: `http://127.0.0.1:${port}/v1`,
-        close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }),
-      });
-    });
+    listenSafe(server).then((port) => resolve({
+      endpoint: `http://127.0.0.1:${port}/v1`,
+      close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }),
+    })).catch(reject);
   });
 }
 const chat = (content) => ({ json: { choices: [{ message: { content } }] } });
