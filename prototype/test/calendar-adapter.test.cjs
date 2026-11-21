@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { listenSafe } = require('./support/listen-safe.cjs');
 const {
   buildIcs, writeMeeting, createCalendarWriterFromEnv, parseWhen,
 } = require('../src/calendar-adapter.cjs');
@@ -129,11 +130,11 @@ test('CalDAV：配置后写远端（Basic 认证）并可同时本地留档', as
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => { store.set(req.url, body); res.writeHead(201, { ETag: '"v1"' }); res.end(); });
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = await listenSafe(server);
   t.after(() => server.close());
   const dir = tmpDir(t);
   const writer = createCalendarWriterFromEnv({
-    SAFE_OFFICE_CALDAV_URL: `http://127.0.0.1:${server.address().port}/cal/`,
+    SAFE_OFFICE_CALDAV_URL: `http://127.0.0.1:${port}/cal/`,
     SAFE_OFFICE_CALDAV_USER: 'alice',
     SAFE_OFFICE_CALDAV_PASS: 'secret',
     SAFE_OFFICE_CALENDAR_DIR: dir,

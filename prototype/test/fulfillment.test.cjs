@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const { listenSafe } = require('./support/listen-safe.cjs');
 const { sealOperation, verifyOperation, transition } = require('../src/operation.cjs');
 const { OperationStore } = require('../src/store.cjs');
 const { FakeMailer, HttpMailer } = require('../src/mailer.cjs');
@@ -273,8 +274,8 @@ test('HttpMailer：成功 / 4xx 明确失败 / 5xx 结果未知 / 超时', async
       }
     });
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const port = await listenSafe(server);
+  const base = `http://127.0.0.1:${port}`;
   const operation = {
     operationId: 'op-http', recipient: 'a@example.com', subject: 's', body: 'hello', attachments: [],
   };

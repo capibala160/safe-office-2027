@@ -17,6 +17,7 @@ const { runAll, TIERS } = require('./harness.cjs');
 const { aggregateMatrix } = require('./metrics.cjs');
 const { makeLLMFactory } = require('./llm-eval.cjs');
 const { experimentFingerprint } = require('./fingerprint.cjs');
+const { buildPriorRuns } = require('./resume.cjs');
 const { ABLATION_IDS, parseAblationList, runAblations } = require('./ablation.cjs');
 const { printConsole, writeEvalReport, writeEvalJson, buildMeta } = require('./report.cjs');
 
@@ -93,16 +94,15 @@ const HELP = `
   // 逐条落盘：真实模型一轮几十分钟，断电/崩溃时 partial 文件仍可用
   const partialPath = join(opts.out, 'eval-partial.json');
   // 断点续跑：复用上一次 partial 里"已完成且无故障"的样本；repeat>1 时不做（分不清第几轮）
-  const priorRuns = new Map();
-  if (opts.resume && opts.repeat === 1 && fs.existsSync(partialPath)) {
+  let priorRuns = new Map();
+  if (opts.resume && fs.existsSync(partialPath)) {
     try {
       const prior = JSON.parse(fs.readFileSync(partialPath, 'utf8'));
       if (!prior.meta || prior.meta.fingerprint !== meta.fingerprint) {
         console.log('  续跑：配置指纹不一致（模型/提示词/语料/档位/轮数变了），忽略旧样本');
       } else {
-        for (const row of prior.runs || []) {
-          if (!row.modelFault) priorRuns.set(`${row.tier}|${row.caseId}|0`, row);
-        }
+        // repeat>1 时同一 case 有多轮：key 必须带 repeatIndex，不能只复用第 0 轮
+        priorRuns = buildPriorRuns(prior);
         console.log(`  续跑：复用已完成样本 ${priorRuns.size} 条（故障样本重跑）`);
       }
     } catch { /* partial 坏了就当没有 */ }

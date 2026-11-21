@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
+const { listenSafe } = require('./support/listen-safe.cjs');
 
 const { EvalHttpLLM } = require('../eval/llm-eval.cjs');
 const { GuardedPlanner, validatePlan } = require('../src/planner.cjs');
@@ -10,7 +11,7 @@ const { AuditLog, RiskMeter } = require('../src/governance.cjs');
 const { DOCS } = require('../src/scenario.cjs');
 
 function startFakeModel(replies) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const seen = [];
     let i = 0;
     const server = http.createServer((req, res) => {
@@ -23,9 +24,9 @@ function startFakeModel(replies) {
         res.end(JSON.stringify({ choices: [{ message: { content } }] }));
       });
     });
-    server.listen(0, '127.0.0.1', () => {
-      resolve({ server, seen, endpoint: `http://127.0.0.1:${server.address().port}/v1` });
-    });
+    listenSafe(server).then((port) => {
+      resolve({ server, seen, endpoint: `http://127.0.0.1:${port}/v1` });
+    }).catch(reject);
   });
 }
 

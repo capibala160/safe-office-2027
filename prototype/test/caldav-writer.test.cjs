@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const { listenSafe } = require('./support/listen-safe.cjs');
 const { createCalDavWriter } = require('../src/caldav-writer.cjs');
 
 const ICS = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'UID:meeting-1', 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
@@ -72,14 +73,10 @@ function startMock() {
     res.writeHead(405);
     res.end();
   });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      resolve({
-        server, store, calls,
-        url: `http://127.0.0.1:${server.address().port}/cal/`,
-      });
-    });
-  });
+  return listenSafe(server).then((port) => ({
+    server, store, calls,
+    url: `http://127.0.0.1:${port}/cal/`,
+  }));
 }
 
 const writerFor = (url) => createCalDavWriter({ url, username: 'alice', password: 'secret' });
