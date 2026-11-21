@@ -1,0 +1,8 @@
+
+> safe-office-prototype@0.54.0 relay:test
+> node scripts/relay-lock-check.cjs --port COM12 --device ws63-A --times 1 --hold 500
+
+继电器/锁体自检：ws63-A @ COM12，IO12，1 轮，每轮保持 500ms
+  [1] level=1 → ACK status=0 pin=12 level=1（请听继电器“咔哒”/看锁体开）
+  [1] level=0 → ACK status=0 pin=12 level=0（应回到断电/上锁）
+完成：1/1 轮 ACK 通过

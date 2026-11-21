@@ -1,0 +1,5 @@
+===== RUN 1 20:08:15 =====
+操作 453ef943-88f2-463b-863c-0616169fd208 已冻结：外发｜soak10-1｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）

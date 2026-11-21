@@ -615,6 +615,32 @@ test('草稿编辑：正文改动 → 重新哈希 → 旧挑战作废 → 保�
   assert.equal(history.current.body, '改过的正文：只发这一段。');
 });
 
+test('外发草稿撤销后旧挑战失效，新收件人绑定独立操作', async (t) => {
+  const { service } = setup();
+  t.after(() => service.close());
+  const run = await runSample(service, 'external-confirm');
+  const original = run.operations[0];
+  const challenge = service.beginChallenge(original.operationId);
+
+  const withdrawn = service.rejectOperation(original.operationId);
+  assert.equal(withdrawn.voidedChallenges, 1);
+  assert.equal(withdrawn.operation.state, 'rejected');
+  assert.equal(withdrawn.operation.challenge, null);
+  await assert.rejects(service.decideChallenge(challenge.challengeId, 'approve'), /不能决定/);
+  assert.equal(withdrawn.operation.outbox, null);
+
+  const replacement = await service.runCommand({
+    command: '把选中的资料发给外部合作方 review@partner-example.com',
+    role: '员工', tools: ['readDoc', 'sendExternalEmail'], documentIds: ['M2'], domains: ['partner-example.com'],
+  });
+  const updated = replacement.operations[0];
+  assert.equal(updated.recipient, 'review@partner-example.com');
+  assert.equal(updated.state, 'frozen');
+  assert.notEqual(updated.operationId, original.operationId);
+  assert.notEqual(updated.operationHash, original.operationHash);
+  assert.equal(service.beginChallenge(updated.operationId).targetHash, updated.operationHash);
+});
+
 test('草稿编辑：已确认/已执行的操作不能再改', async (t) => {
   const { service } = setup();
   t.after(() => service.close());

@@ -85,6 +85,7 @@
 
   function mountConfirmDrawer(ch, detail, c) {
     removeConfirmDrawer();
+    const trigger = document.activeElement;
     const op = (detail && detail.operation) || ch.operation || {};
     const subject = op.subject || ch.summary || '待确认操作';
     const body = (detail && detail.operation && detail.operation.body) || '';
@@ -106,19 +107,20 @@
       </div>
       <div class="drawer-body">
         <div class="kv"><span>动作</span><strong>${esc(op.protocolLabel || op.action || '—')}</strong></div>
-        <div class="kv"><span>目标</span><strong>${esc(op.recipient || '—')}</strong></div>
+        <div class="kv confirm-target"><span>${op.action === 'sendExternalEmail' ? '收件人' : '目标'}</span><strong>${esc(op.recipient || '—')}</strong></div>
         <div class="kv"><span>密级</span><strong>${esc(op.level || '—')}</strong></div>
         <div class="kv"><span>剩余时间</span><strong class="countdown" id="drawer-countdown">${esc(ch.remainingSec === undefined ? '—' : `${ch.remainingSec}s`)}</strong></div>
         <div class="sub-text mt8">内容摘要</div>
         <div class="drawer-summary">${esc(ch.summary || subject)}</div>
-        ${attachments.length ? `<div class="sub-text mt8">附件：${attachments.join('、')}</div>` : ''}
+        <div class="sub-text mt8">附件（${attachments.length}）</div>
+        ${attachments.length ? `<ul class="review-files">${attachments.map((name) => `<li>${name}</li>`).join('')}</ul>` : '<div class="sub-text">无附件</div>'}
         <details class="mt8"><summary class="sub-text">查看完整正文</summary>
           <pre class="drawer-body-text mt8">${esc(body || '正文不可用，请到审批页查看详情。')}</pre>
         </details>
         <div class="notice info mt8">批准后将按上面的目标、正文和附件执行；内容一旦改动，旧确认会自动作废。</div>
         ${canDecide ? '' : `<div class="notice block mt8">已发起确认。你的角色是「${esc(role)}」，不能代替设备助手批准；请让设备助手登录后在工作台或审批页完成确认。</div>`}
         <div class="mono sub-text mt8">operationHash ${esc(short(op.operationHash || ch.targetHash, 28))}</div>
-        <div id="drawer-result"></div>
+        <div id="drawer-result" aria-live="polite"></div>
       </div>
       <div class="drawer-actions" id="drawer-actions">
         ${canDecide
@@ -139,6 +141,7 @@
       clearInterval(timer);
       document.removeEventListener('keydown', onKey);
       wrap.remove();
+      if (trigger?.isConnected) trigger.focus();
     };
     const onKey = (e) => { if (e.key === 'Escape') close(); };
     document.addEventListener('keydown', onKey);
@@ -158,6 +161,7 @@
     wrap.querySelector('#drawer-close').addEventListener('click', close);
     wrap.querySelector('#drawer-close-ok')?.addEventListener('click', close);
     wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
+    result.addEventListener('click', (event) => { if (event.target.closest('a')) close(); });
     const decide = async (decision) => {
       if (deciding) return;
       deciding = true;
@@ -183,7 +187,7 @@
     };
     approve?.addEventListener('click', () => decide('approve'));
     reject?.addEventListener('click', () => decide('cancel'));
-    approve?.focus();
+    wrap.querySelector('#drawer-close').focus();
   }
 
   // 返回 true 表示已在当前页打开抽屉；false 表示已转到设备页或给出提示
@@ -252,13 +256,32 @@
   }
 
   function renderRun(run) {
-    return `<section class="card">
-      <div class="card-head"><h2>执行结果</h2><span class="sub">${esc(run.runId)} · ${Number(run.durationMs || 0).toFixed(1)} ms · 风险 ${run.risk.score}/${run.risk.threshold}${run.risk.frozen ? ' · 已冻结' : ''}</span></div>
-      ${renderGates(run)}
-      <div class="lines">${renderLines(run.lines)}</div>
-      <div class="run-meta">工具：${esc((run.tools || []).join('、') || '无')} · 文档：${esc((run.documentIds || []).join('、') || '无')}${run.deniedTools && run.deniedTools.length ? ` · 裁剪工具：${esc(run.deniedTools.join('、'))}` : ''}</div>
-      ${run.operations && run.operations.length ? `<div class="mt12"><div class="sub-text">本次产生 ${run.operations.length} 条冻结操作：</div><div class="stack mt8">${run.operations.map((op) => operationCard(op)).join('')}</div></div>` : ''}
+    const operations = run.operations || [];
+    const actionable = operations.filter((operation) => operation.state === 'frozen').length;
+    const attention = (run.gateSummary || []).filter((gate) => ['block', 'warn'].includes(gate.status));
+    return `<section class="card review-workspace" aria-label="执行结果">
+      <div class="card-head"><h2>执行结果</h2><span class="sub">${esc(run.runId)} · 风险 ${esc(run.risk.score)}/${esc(run.risk.threshold)}${run.risk.frozen ? ' · 已冻结' : ''}</span></div>
+      <div class="review-layout">
+        <aside class="review-panel"><h3>任务步骤</h3>${renderGates(run)}<a class="btn ghost small mt12" href="${replayHref(run.runId)}">查看本任务回放</a></aside>
+        <div class="review-main"><h3>草稿与执行记录</h3>
+          ${operations.length ? `<div class="stack">${operations.map((op) => operationCard(op)).join('')}</div>` : '<div class="sub-text">此任务没有待确认草稿。</div>'}
+          <details class="advanced mt12" ${operations.length ? '' : 'open'}><summary>查看步骤记录</summary><div class="lines mt8">${renderLines(run.lines)}</div></details>
+        </div>
+        <aside class="review-panel"><h3>当前待办</h3><p>${actionable ? `${actionable} 项待核对并确认` : '暂无待确认操作'}</p>
+          ${attention.length ? `<details open><summary>为什么有步骤被暂停或调整？</summary><ul class="list">${attention.map((gate) => `<li><strong>${esc(gate.label)}</strong><div>${esc((gate.notes || []).join('；') || '见步骤记录')}</div></li>`).join('')}</ul></details>` : ''}
+          ${run.documentIds?.length ? `<h4>任务资料</h4><div class="btn-row">${run.documentIds.map((id) => `<button type="button" class="btn ghost small" data-review-doc="${esc(id)}">查看 ${esc(id)}</button>`).join('')}</div>` : ''}
+        </aside>
+      </div>
+      <div class="review-source" data-review-source aria-live="polite"></div>
     </section>`;
+  }
+
+  function replayHref(runId) {
+    return `#/replay?run=${esc(encodeURIComponent(runId))}`;
+  }
+
+  function routeRunId() {
+    return new URLSearchParams(location.hash.split('?')[1] || '').get('run');
   }
 
   function confirmationLabel(op) {
@@ -298,6 +321,14 @@
   }
 
   function bindOpActions(root, c) {
+    root.querySelectorAll('[data-review-doc]').forEach((button) => {
+      button.onclick = () => {
+        const source = button.closest('.review-workspace').querySelector('[data-review-source]');
+        source.textContent = '正在读取资料…';
+        showDocDetail(source, c, button.dataset.reviewDoc);
+        source.scrollIntoView({ block: 'nearest' });
+      };
+    });
     root.querySelectorAll('[data-op-action]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const action = btn.dataset.opAction;
@@ -367,6 +398,7 @@
       container.innerHTML = `<section class="card">
         <div class="card-head"><h2>${esc(d.title)}</h2><span>${badge(d.level)} ${d.tainted ? '<span class="badge block">检出注入</span>' : ''}</span></div>
         <pre class="lines">${esc(d.body)}</pre>
+        ${d.originalBody && d.originalBody !== d.body ? `<details class="advanced mt12"><summary>查看原始资料</summary><pre class="lines">${esc(d.originalBody)}</pre></details>` : ''}
         <div class="sub-text mt8">来源：${esc((d.sourceIds || []).join('、') || d.id)} · 状态：${esc(d.status)}</div>
       </section>`;
     }).catch((err) => {
@@ -467,8 +499,9 @@
         <textarea class="textarea hero-input" id="dash-command" placeholder="例如：把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal">${esc(draft)}</textarea>
         <div class="quick-row">
           <button class="quick" data-quick="纪要" type="button">整理会议纪要</button>
-          <button class="quick" data-quick="外发" type="button">外发邮件确认</button>
-          <button class="quick" data-quick="设备" type="button">门锁控制</button>
+          <button class="quick" data-quick="外发" type="button">合作材料外发</button>
+          <button class="quick" data-quick="日程" type="button">安排来访日程</button>
+          <button class="quick" data-quick="设备" type="button">设备联动演示</button>
         </div>
         <div class="btn-row mt12">
           <button class="btn" id="dash-start" type="button">开始任务</button>
@@ -491,7 +524,7 @@
           <div class="stack">
             ${runs.length ? runs.map((r) => `<div class="task-row">
               <div><strong>${esc(short(r.command || r.runId, 42))}</strong><div class="sub-text">${esc(dateTime(r.at))} · ${(r.operations || []).length} 个动作 · 风险 ${esc((r.risk && r.risk.score) || 0)}</div></div>
-              <a class="btn ghost small" href="#/replay">回放</a>
+              <a class="btn ghost small" href="${replayHref(r.runId)}">回放</a>
             </div>`).join('') : '<div class="empty">还没有任务记录。从上面的输入框开始第一个任务。</div>'}
           </div>
         </section>
@@ -499,13 +532,17 @@
 
     const quickText = {
       纪要: '把周例会纪要整理成正式稿，发到部门内网邮箱 team@corp.internal',
-      外发: '把季度总结发到合作方 partner@partner-example.com，需要设备确认',
+      外发: '把周例会纪要发给外部参会方 partner@partner-example.com',
+      日程: '预约项目对齐会，安排来访接待日程',
       设备: '打开 3 号会议室的门锁',
     };
+    const quickSamples = { 纪要: 'normal-minutes', 外发: 'external-confirm', 设备: 'device' };
     const input = root.querySelector('#dash-command');
     root.querySelectorAll('[data-quick]').forEach((btn) => {
       btn.addEventListener('click', () => {
         input.value = quickText[btn.dataset.quick] || '';
+        input.dataset.sampleId = quickSamples[btn.dataset.quick] || '';
+        c.store.pendingSample = btn.dataset.quick === '日程' ? { tools: ['scheduleMeeting'], documentIds: [] } : null;
         c.store.pendingCommand = input.value;
         input.focus();
       });
@@ -515,6 +552,11 @@
       const text = String(input.value || '').trim();
       if (!text) { toast('先描述一下要完成的任务', 'info'); input.focus(); return; }
       c.store.pendingCommand = text;
+      const sampleId = input.dataset.sampleId;
+      if (sampleId) {
+        const selected = (c.store.bootstrap?.samples || []).find((sample) => sample.id === sampleId);
+        if (selected) c.store.pendingSample = { ...selected, nearfieldOnline: undefined, sandboxPreset: undefined };
+      }
       c.navigate('command');
     });
     bindOpActions(root, c);
@@ -660,6 +702,7 @@
         <div class="sub-text mb8">样例（点击填入表单）：</div>
         <div class="sample-grid">${b.samples.map((s) => `<button class="sample" data-cmd-sample="${esc(s.id)}"><strong>${esc(s.name)}</strong><small>${esc(s.expect)}</small></button>`).join('')}</div>
       </section>
+      ${sample?.replacement ? '<div class="notice info">旧草稿已撤销。请重新核对资料、附件、权限和新收件人，再发起任务。</div>' : ''}
       <div id="cmd-result"></div>`;
 
     const recEl = root.querySelector('#cmd-rec-text');
@@ -698,33 +741,39 @@
       return snap.stage;
     };
     const progressHtml = (snap) => `<section class="card">
-      <div class="card-head"><h2>任务 ${esc(snap.runId)}</h2><span class="sub" id="run-stage">${esc(stageText(snap))}</span></div>
+      <div class="card-head"><h2>任务 ${esc(snap.runId)}</h2><span class="sub" id="run-stage" role="status">${esc(stageText(snap))}</span></div>
       <div class="sub-text" id="run-log">${esc((snap.stageLog || []).map((s) => (s.step ? `${s.stage} ${s.step}/${s.total}` : s.stage)).join(' → '))}</div>
       <div class="btn-row mt8"><button class="btn ghost small" id="run-cancel">取消任务</button></div>
       <div class="sub-text mt8">离开本页任务不受影响；回来会接着显示进度。</div>
     </section>`;
+    const target = root.querySelector('#cmd-result');
     const finish = async (snap) => {
-      const target = root.querySelector('#cmd-result');
+      if (!target.isConnected) return;
       if (snap.status === 'error') {
         target.innerHTML = `<div class="notice block">任务失败：${esc(snap.error || '未知错误')}</div>`;
         return;
       }
       if (snap.result) {
-        target.innerHTML = renderRun(snap.result);
+        const fresh = await Promise.all((snap.result.operations || []).map(async (operation) => {
+          const detail = await API.get(`/api/operations/${encodeURIComponent(operation.operationId)}`).catch(() => null);
+          return detail?.operation || operation;
+        }));
+        if (!target.isConnected) return;
+        target.innerHTML = renderRun({ ...snap.result, operations: fresh });
         bindOpActions(root, c);
       }
       if (snap.cancelRequested) toast('已取消：已执行的步骤保留记录，后续步骤未执行', 'info');
       try { await c.refreshState(); } catch { /* best effort */ }
     };
     const watch = async (runId) => {
-      const target = root.querySelector('#cmd-result');
+      if (!target.isConnected) return;
       target.innerHTML = progressHtml({ runId, stage: '排队', stageLog: [] });
       const snap = await c.pollRun(runId, (s) => {
-        const st = root.querySelector('#run-stage');
-        const lg = root.querySelector('#run-log');
+        const st = target.querySelector('#run-stage');
+        const lg = target.querySelector('#run-log');
         if (st) st.textContent = stageText(s);
         if (lg) lg.textContent = (s.stageLog || []).map((x) => (x.step ? `${x.stage} ${x.step}/${x.total}` : x.stage)).join(' → ');
-        const cancelBtn = root.querySelector('#run-cancel');
+        const cancelBtn = target.querySelector('#run-cancel');
         if (cancelBtn) cancelBtn.disabled = s.status !== 'running' || s.cancelRequested;
       });
       await finish(snap);
@@ -733,6 +782,7 @@
       const btn = ev.currentTarget;
       btn.disabled = true;
       try {
+        root.querySelector('#cmd-result').innerHTML = '<div class="notice info" role="status">正在提交任务…</div>';
         const allFiles = [...(root.querySelector('#cmd-files').files || [])];
         if (allFiles.length > 5) throw new Error(`附件最多 5 个（当前选了 ${allFiles.length} 个），请先删减`);
         const attachments = [];
@@ -747,8 +797,11 @@
         const payload = collect();
         if (attachments.length) payload.attachments = attachments;
         const started = await c.startRun(payload);
+        if (root.contains(btn)) history.replaceState(null, '', `#/command?run=${encodeURIComponent(started.runId)}`);
         await watch(started.runId);
-      } catch (err) { toast(c.errorText(err), 'error'); }
+      } catch (err) {
+        if (root.contains(btn)) root.querySelector('#cmd-result').innerHTML = `<div class="notice block" role="alert">${esc(c.errorText(err))}${c.store.activeRunId ? '。刷新可继续查看现有任务。' : ''}</div>`;
+      }
       finally { btn.disabled = false; }
     });
     root.querySelector('#cmd-result').addEventListener('click', async (ev) => {
@@ -761,12 +814,12 @@
       } catch (err) { toast(c.errorText(err), 'error'); btn.disabled = false; }
     });
     // 回到本页时恢复未跑完的任务
-    let resumeId = c.store.activeRunId;
-    if (!resumeId) { try { resumeId = localStorage.getItem('safe-office.activeRun'); } catch { resumeId = null; } }
+    let resumeId = routeRunId() || (sample?.replacement ? null : c.store.activeRunId);
+    if (!resumeId && !sample?.replacement) { try { resumeId = localStorage.getItem('safe-office.activeRun'); } catch { resumeId = null; } }
     if (resumeId) {
       try {
         const snap = await API.get(`/api/commands/${encodeURIComponent(resumeId)}`).catch(() => null);
-        if (snap && snap.status === 'running') { c.store.activeRunId = resumeId; await watch(resumeId); }
+        if (snap && snap.status === 'running') { c.store.activeRunId = resumeId; void watch(resumeId).catch((err) => toast(c.errorText(err), 'error')); }
         else if (snap) await finish(snap);
       } catch (err) {
         toast(`恢复任务失败：${c.errorText(err)}`, 'error');
@@ -778,6 +831,7 @@
       root.querySelectorAll('#cmd-tools input').forEach((x) => { x.checked = false; });
       root.querySelectorAll('#cmd-docs input').forEach((x) => { x.checked = false; });
       root.querySelector('#cmd-result').innerHTML = '';
+      history.replaceState(null, '', '#/command');
       syncRecommendation();
     });
     root.querySelectorAll('[data-cmd-sample]').forEach((btn) => {
@@ -1164,21 +1218,22 @@
   }
 
   // ---------- 审批与确认 ----------
-  function renderOperationDetail(detail, revisions = null) {
+  function renderOperationDetail(detail, revisions = null, canEdit = false) {
     const op = detail.operation;
     const versionBlock = revisions && revisions.revisions && revisions.revisions.length
       ? `<div class="mt12"><div class="sub-text">版本历史（当前 v${esc(revisions.current.revision)}）</div>
           ${revisions.revisions.slice().reverse().map((r) => `<details class="rev"><summary>v${esc(r.revision)} · ${esc(dateTime(r.createdAt))} · ${esc(r.editor)} · ${esc(short(r.operationHash, 10))}</summary>${renderDiff(r.body, revisions.current.body)}</details>`).join('')}
         </div>`
       : '';
-    const bodyBlock = op.state === 'frozen'
-      ? `<div class="mt12"><div class="sub-text">编辑正文：保存后重新计算 bodyHash / operationHash，旧挑战与确认作废，需要重新确认</div>
-          <textarea class="textarea" id="op-body-edit" rows="10">${esc(op.body || '')}</textarea>
+    const bodyBlock = canEdit && op.state === 'frozen'
+      ? `<div class="mt12"><label class="label" for="op-body-edit">编辑正文</label><div class="sub-text">保存后，待确认挑战作废。请对新版本重新发起确认。</div>
+          <textarea class="textarea" id="op-body-edit" rows="10">${esc(op.body || '')}</textarea><div id="op-body-diff"></div>
           <div class="btn-row mt8"><button class="btn" id="op-body-save">保存并重新冻结</button><button class="btn ghost" id="op-body-reset">还原</button></div>
         </div>`
       : `<div class="mt12"><div class="sub-text">正文预览</div><pre class="lines">${esc(op.body || '（空）')}</pre></div>`;
-    return `<section class="card">
+    return `<section class="card" id="operation-detail" tabindex="-1">
       <div class="card-head"><h2>操作详情</h2><span class="sub mono">${esc(op.operationId)}</span></div>
+      <div class="btn-row">${op.runId ? `<a class="btn ghost small" href="${replayHref(op.runId)}">查看本任务回放</a>` : ''}${op.state === 'frozen' && !op.expired ? `<button type="button" class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}">发起确认</button>` : ''}</div>
       <div class="grid-2">
         <div>
           <div class="sub-text">动作：${esc(op.protocolLabel)} / ${esc(op.action)}</div>
@@ -1195,6 +1250,10 @@
         </div>
       </div>
       ${bodyBlock}
+      ${canEdit && op.state === 'frozen' && op.action === 'sendExternalEmail' ? `<details class="advanced mt12"><summary>更换收件人并重新发起任务</summary>
+        <p>当前收件人 <strong>${esc(op.recipient)}</strong>。更换后会撤销这条待确认草稿，待确认挑战随即失效。请在新任务中重新选择附件并核对权限。</p>
+        <form id="op-replace" class="btn-row"><label for="op-replace-to">新收件人</label><input class="input" id="op-replace-to" type="email" maxlength="254" required><button type="submit" class="btn ghost">撤销旧草稿并继续</button></form>
+      </details>` : ''}
       ${versionBlock}
       <div class="mt12"><div class="sub-text">操作事件（SQLite 事件链）</div>
         <div class="event-list">${(detail.events || []).slice().reverse().map((e) => `<div class="event info"><div><div class="kind">${esc(e.kind)}</div><div class="detail">${esc(summarize(e.detail))}</div></div><div class="seq">${esc(time(e.createdAt))}</div></div>`).join('') || '<div class="empty">无</div>'}</div>
@@ -1208,6 +1267,7 @@
     const ops = await API.get('/api/operations' + (filter ? `?state=${encodeURIComponent(filter)}` : ''));
     const counts = ops.counts || {};
     let detailHtml = '';
+    let selectedOperation = null;
     if (c.store.operationId) {
       try {
         const id = encodeURIComponent(c.store.operationId);
@@ -1215,7 +1275,9 @@
           API.get(`/api/operations/${id}`),
           API.get(`/api/operations/${id}/revisions`).catch(() => null),
         ]);
-        detailHtml = renderOperationDetail(detail, revisions);
+        selectedOperation = detail.operation;
+        const role = c.store.bootstrap?.authUser?.role || c.store.role;
+        detailHtml = renderOperationDetail(detail, revisions, ['员工', '管理员'].includes(role));
       } catch (err) {
         detailHtml = `<div class="notice block">${esc(c.errorText(err))}</div>`;
       }
@@ -1235,10 +1297,38 @@
       ${detailHtml}
       <div id="approvals-result"></div>`;
     bindOpActions(root, c);
+    root.querySelector('#operation-detail')?.focus();
+    root.querySelector('#op-replace')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = form.querySelector('button');
+      const recipient = form.querySelector('input').value.trim();
+      if (recipient.toLowerCase() === selectedOperation.recipient.toLowerCase()) {
+        toast('新收件人与当前收件人相同', 'info');
+        return;
+      }
+      button.disabled = true;
+      try {
+        await API.post(`/api/operations/${encodeURIComponent(selectedOperation.operationId)}/reject`);
+        c.store.pendingCommand = `把选中的资料发给外部合作方 ${recipient}`;
+        c.store.pendingSample = {
+          replacement: true,
+          tools: ['readDoc', 'sendExternalEmail'],
+          documentIds: selectedOperation.sourceDocIds || [],
+          domains: [recipient.split('@').at(-1)],
+        };
+        c.navigate('command');
+      } catch (err) { toast(c.errorText(err), 'error'); button.disabled = false; }
+    });
     const editBox = root.querySelector('#op-body-edit');
     if (editBox) {
       const original = editBox.value;
-      root.querySelector('#op-body-reset').addEventListener('click', () => { editBox.value = original; });
+      const diff = root.querySelector('#op-body-diff');
+      const updateDiff = () => {
+        diff.innerHTML = original === editBox.value ? '' : `<details class="advanced mt8"><summary>核对本次正文差异</summary>${renderDiff(original, editBox.value)}</details>`;
+      };
+      editBox.addEventListener('change', updateDiff);
+      root.querySelector('#op-body-reset').addEventListener('click', () => { editBox.value = original; updateDiff(); });
       root.querySelector('#op-body-save').addEventListener('click', async (ev) => {
         const btn = ev.currentTarget;
         btn.disabled = true;
@@ -1275,8 +1365,9 @@
   }
 
   function renderDeviceResult(res) {
+    const messageId = res.send?.messageId;
     const map = {
-      approved: ['ok', `已批准 → 操作 ${res.operation ? res.operation.state : ''} → 发送 ${res.send ? res.send.state : ''}`],
+      approved: ['ok', res.send?.state === 'sent' ? '已批准 · 已记录执行回执' : '已批准'],
       'approved-but-failed': ['error', `已批准，但执行失败：${res.message || ''}`],
       'approved-but-unknown': ['error', `已批准，但结果待核实：${res.message || ''}`],
       cancelled: ['error', `已取消 → 操作 ${res.operation ? res.operation.state : ''}`],
@@ -1287,7 +1378,7 @@
       rejected: ['error', `拒绝：${res.code} ${res.message || ''}`],
     };
     const [kind, text] = map[res.outcome] || ['error', res.message || res.code || '未知结果'];
-    return `<div class="notice ${kind === 'ok' ? 'info' : 'block'}"><strong>${esc(text)}</strong>${res.approval ? `<div class="sub-text mt8">confirmationId：${esc(res.approval.confirmationId)}</div>` : ''}</div>`;
+    return `<div class="notice ${kind === 'ok' ? 'info' : 'block'}"><strong>${esc(text)}</strong>${messageId ? `<div class="sub-text mt8">回执编号：${esc(messageId)}</div>` : ''}${res.approval ? `<div class="sub-text mt8">确认编号：${esc(res.approval.confirmationId)}</div>` : ''}${res.operation?.runId ? `<a class="btn ghost small mt8" href="${replayHref(res.operation.runId)}">查看本任务回放</a>` : ''}</div>`;
   }
 
   async function device(root, c) {
@@ -1772,7 +1863,8 @@
   async function replay(root, c) {
     let runs = [];
     try { runs = (await API.get('/api/commands')).items || []; } catch { runs = []; }
-    const options = runs.map((r) => `<option value="${esc(r.runId)}">${esc(r.runId)} · ${esc(String(r.command || '').slice(0, 36))}</option>`).join('');
+    const requested = routeRunId();
+    const options = runs.map((r) => `<option value="${esc(r.runId)}" ${r.runId === requested ? 'selected' : ''}>${esc(r.runId)} · ${esc(String(r.command || '').slice(0, 36))}</option>`).join('');
     root.innerHTML = `
       ${page('任务回放', '要求 → 计划/批准 → 闸与风险 → 实际调用 → 回执；含审计链与冻结记录校验')}
       <div class="card">
@@ -1786,22 +1878,24 @@
       </div>`;
 
     const out = root.querySelector('#replay-out');
+    let loadVersion = 0;
     async function load(runId) {
+      const version = ++loadVersion;
       if (!runId) { out.innerHTML = '<div class="notice info">先运行一次命令，再回来回放。</div>'; return; }
       out.innerHTML = '<div class="sub-text">载入中…</div>';
       try {
         const r = await API.get(`/api/runs/${encodeURIComponent(runId)}/replay`);
+        if (version !== loadVersion || !out.isConnected) return;
         const auditOk = Boolean(r.integrity && r.integrity.auditVerified);
         const approvals = (r.approvals || []).length
-          ? `<table class="table"><thead><tr><th>操作</th><th>动作</th><th>对象</th><th>状态</th><th>确认 / 设备</th><th>回执</th></tr></thead><tbody>${
-            r.approvals.map((a) => `<tr>
-              <td>${esc(String(a.operationId).slice(0, 8))}…</td>
-              <td>${esc(a.action)}</td>
-              <td>${esc(a.recipient)}</td>
-              <td>${badge(a.state)}</td>
-              <td>${esc(a.confirmationId || '—')}<div class="sub-text">${esc(a.deviceId || '')}</div></td>
-              <td>${a.receipt ? `${badge(a.receipt.state)}<div class="sub-text">${esc(a.receipt.messageId || '')}</div>` : '—'}</td>
-            </tr>`).join('')}</tbody></table>`
+          ? `<div class="receipt-list">${r.approvals.map((record) => `<article class="receipt-item">
+              <div class="spread"><strong>${esc(toolLabel(record.action))} · ${esc(record.recipient)}</strong>${badge(record.state)}</div>
+              <dl><dt>确认编号</dt><dd>${esc(record.confirmationId || '—')}</dd>
+                <dt>设备</dt><dd>${esc(record.deviceId || '—')}</dd>
+                <dt>执行回执</dt><dd>${record.receipt ? `${badge(record.receipt.state)} ${esc(record.receipt.messageId || '')}` : '暂无'}</dd>
+              </dl>
+              <details class="mt8"><summary>核对绑定版本</summary><div class="sub-text">操作编号 ${esc(record.operationId)}</div><div class="sub-text">版本指纹 ${esc(record.operationHash || '—')}</div></details>
+            </article>`).join('')}</div>`
           : '<div class="sub-text">没有冻结操作</div>';
         const calls = (r.calls || []).length
           ? `<ul class="list">${r.calls.map((x) => `<li>[${esc(x.n)}] ${esc(x.action)} → ${esc(String(x.outcome || '').slice(0, 100))}</li>`).join('')}</ul>`
@@ -1818,11 +1912,11 @@
             <div><span class="badge ${auditOk ? 'executed' : 'failed'}">审计链${auditOk ? '通过' : '未通过'}</span></div>
           </div>
           <h4 class="mt12">批准与回执</h4>${approvals}
-          <h4 class="mt12">实际调用</h4>${calls}
-          <h4 class="mt12">闸与风险事件</h4>${gates}
+          <details class="advanced mt12"><summary>实际调用</summary>${calls}</details>
+          <details class="advanced mt12"><summary>闸与风险事件</summary>${gates}</details>
           ${warnings}`;
       } catch (err) {
-        out.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
+        if (version === loadVersion) out.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
       }
     }
     root.querySelector('#replay-load')?.addEventListener('click', () => load(root.querySelector('#replay-run').value));
@@ -1843,7 +1937,11 @@
     }
     root.querySelector('#replay-export-json')?.addEventListener('click', () => exportReplay('json'));
     root.querySelector('#replay-export-text')?.addEventListener('click', () => exportReplay('text'));
-    if (runs[0]) load(runs[0].runId);
+    if (requested) {
+      const select = root.querySelector('#replay-run');
+      if (select.value !== requested) select.add(new Option(requested, requested, true, true));
+      void load(requested);
+    } else if (runs[0]) void load(runs[0].runId);
   }
 
   window.Views = {

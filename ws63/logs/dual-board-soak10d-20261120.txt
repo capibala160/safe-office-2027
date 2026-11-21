@@ -1,0 +1,101 @@
+准备：15 秒后开始第 1 轮
+===== RUN 1 20:17:07 =====
+操作 67022f71-3480-4ea1-bd3e-60c0deac7ca5 已冻结：外发｜soak10d-1｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-289235e78c79bbc8-2d3e90266559cc0731259662cc7f9b52
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[5,146,181,207,224,75,135,21,26,246,55,195,50,71,247,34]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:17:14.905Z"}
+===== RUN 2 20:17:18 =====
+操作 8a45a7c6-8e6b-471b-97ca-ba295f5cded5 已冻结：外发｜soak10d-2｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-7cb7f18d8cf44c7c-b918d48efd3719fafc875cce28c1adba
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[35,109,91,57,208,42,236,238,23,115,197,226,20,251,199,9]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:17:29.468Z"}
+===== RUN 3 20:17:32 =====
+操作 1f1dc0d3-99a7-45e6-a9d8-854f348ea457 已冻结：外发｜soak10d-3｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-27449950ba39a26c-d2b4a2b05a3740337acd1241148dd20d
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[1,210,15,234,188,11,113,124,119,53,250,57,70,49,68,78]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:17:37.548Z"}
+===== RUN 4 20:17:40 =====
+操作 9335f800-464c-410a-81ca-6316f5e9115f 已冻结：外发｜soak10d-4｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-339bb9629079d6ed-2175d571745b613a024669dfa726391b
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[237,46,29,40,22,9,108,235,210,252,110,90,69,16,89,74]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:17:54.811Z"}
+===== RUN 5 20:17:57 =====
+操作 e7ca8b6b-81b5-4810-ab61-e9cb601fe070 已冻结：外发｜soak10d-5｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-74c86643e72ea774-a541e191303ceaa95cea3b6c6b46757f
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[51,191,6,21,25,37,236,60,127,86,218,232,209,51,125,74]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:18:10.377Z"}
+===== RUN 6 20:18:13 =====
+操作 2ddeb7b1-5443-46c3-ad5b-ebb6d6785cc8 已冻结：外发｜soak10d-6｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-a0d2e8db06e2725d-06bad1d0a471f7bb14632dac64412a55
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[208,55,6,43,247,142,102,94,26,83,163,36,156,224,251,196]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:18:16.139Z"}
+===== RUN 7 20:18:19 =====
+操作 81c05f1c-8775-434a-95e1-b3edf41eb907 已冻结：外发｜soak10d-7｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-77bee86d78b3afce-d669ce9ba97df4ffccf22728936e17ac
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[242,251,16,39,195,7,80,56,3,167,238,173,31,103,209,254]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:18:22.200Z"}
+===== RUN 8 20:18:25 =====
+操作 724fd71e-cc99-4c14-9906-38ae8838c514 已冻结：外发｜soak10d-8｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-aacc5cb725058265-734431a639049672397d96f3f2d13519
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[134,228,61,126,211,77,20,86,206,84,153,161,8,243,136,56]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:18:28.559Z"}
+===== RUN 9 20:18:31 =====
+操作 74b0c3ee-f1bc-4e9f-8881-187ef7f4a09e 已冻结：外发｜soak10d-9｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-3d9252834a5442df-b48d5988951251796e2ca4645f726314
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[148,174,242,18,216,152,117,10,106,209,58,132,104,17,255,104]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:18:34.820Z"}
+===== RUN 10 20:18:37 =====
+操作 5a3784aa-62e7-4fa7-a2c7-3ed189af71e4 已冻结：外发｜soak10d-10｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-6d3947826d908325-64e821052a54316e28cfb592bfd545ef
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[241,89,169,118,11,112,251,110,204,6,252,69,158,177,192,233]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:18:40.981Z"}

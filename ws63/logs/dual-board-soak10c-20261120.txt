@@ -1,0 +1,22 @@
+准备：15 秒后开始第 1 轮
+===== RUN 1 20:12:43 =====
+操作 680230ed-e806-4ff3-8ca6-2a0a24e2f6f3 已冻结：外发｜soak10c-1｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+确认失败：DECISION 用户取消
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[158,209,49,159,207,119,134,22,182,12,122,198,59,39,91,10]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:12:52.071Z"}
+===== RUN 2 20:12:55 =====
+操作 0a5bcb2c-b8cd-4226-bdd3-c1a76d381d0f 已冻结：外发｜soak10c-2｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+确认失败：DECISION 用户取消
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[227,8,39,104,19,49,57,149,121,175,249,226,221,209,123,239]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:12:57.254Z"}
+===== RUN 3 20:13:00 =====
+操作 132526db-a1e4-475b-aeff-e664f66b6500 已冻结：外发｜soak10c-3｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）

@@ -131,8 +131,9 @@ class MockLLM {
 
     // 对外同步（白名单内）
     if (/(同步|发给|知会).*(合作方|参会方|外部)/.test(command)) {
+      const recipient = command.match(/\b[A-Z0-9][A-Z0-9._%+-]*@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0] || 'partner@partner-example.com';
       steps.push({ action: 'readDoc', args: { id: 'M2' } });
-      steps.push({ action: 'sendExternalEmail', args: { to: 'partner@partner-example.com', docId: 'M2' }, reason: '把纪要同步给外部参会方' });
+      steps.push({ action: 'sendExternalEmail', args: { to: recipient, docId: 'M2' }, reason: '把纪要同步给外部参会方' });
       return steps;
     }
 

@@ -2901,16 +2901,7 @@ class ConsoleService {
     });
     this.store.updateFrozenOperation(next);
 
-    // 旧确认一律失效：挑战作废、设备侧 pending 取消
-    let voided = 0;
-    for (const challenge of this.challenges.values()) {
-      if (challenge.operationId === id && challenge.state === 'pending') {
-        try { this.confirmer.cancel(challenge.pending); } catch { /* 已失效 */ }
-        challenge.state = 'expired';
-        this._pushHistory(challenge, { code: 'EXPIRED', outcome: 'superseded' });
-        voided += 1;
-      }
-    }
+    const voided = this._expireOperationChallenges(id, 'superseded');
     this.audit.append('草稿修改', {
       operationId: id,
       revision: { from: currentRevision, to: currentRevision + 1 },
@@ -3057,8 +3048,25 @@ class ConsoleService {
     const operation = this._assertOperationVisible(id, actor, role);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能拒绝`, 409);
     const rejected = this.store.setOperationState(id, 'rejected');
-    if (actor) this.audit.append('操作拒绝', { operationId: id, actor });
-    return { ok: true, operation: this._operationView(rejected) };
+    const voidedChallenges = this._expireOperationChallenges(id, 'withdrawn');
+    if (actor || voidedChallenges) this.audit.append('操作拒绝', { operationId: id, actor, voidedChallenges });
+    return { ok: true, voidedChallenges, operation: this._operationView(rejected) };
+  }
+
+  /**
+   * @param {string} operationId
+   * @param {string} outcome
+   */
+  _expireOperationChallenges(operationId, outcome) {
+    let count = 0;
+    for (const challenge of this.challenges.values()) {
+      if (challenge.operationId !== operationId || challenge.state !== 'pending') continue;
+      try { this.confirmer.cancel(challenge.pending); } catch { /* 已失效 */ }
+      challenge.state = 'expired';
+      this._pushHistory(challenge, { code: 'EXPIRED', outcome });
+      count += 1;
+    }
+    return count;
   }
 
   /**
@@ -3311,6 +3319,7 @@ class ConsoleService {
         operation: this._operationView(operation),
       };
     }
+    if (challenge.state !== 'pending') throw new ConsoleError('CONFLICT', '挑战已作废，请检查当前任务状态', 409);
     if (!reply) {
       this.confirmer.cancel(challenge.pending);
       challenge.state = 'expired';

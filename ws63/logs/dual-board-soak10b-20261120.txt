@@ -1,0 +1,13 @@
+===== RUN 1 20:09:43 =====
+操作 dceb8c23-ceb4-490a-b5b5-a15ef62e2a8b 已冻结：外发｜soak10b-1｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+确认失败：TIMEOUT 确认端无响应（超时）
+----- reset level=0 -----
+reset -> {"type":"actuator-ack","nonce":{"type":"Buffer","data":[168,66,53,211,56,13,190,83,144,79,183,120,108,13,86,154]},"status":0,"pin":12,"level":0,"at":"2026-11-20T12:10:58.962Z"}
+===== RUN 2 20:11:01 =====
+操作 e196002f-fc7a-4adb-85e9-c9009fcf099e 已冻结：外发｜soak10b-2｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）

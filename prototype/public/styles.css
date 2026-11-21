@@ -451,3 +451,28 @@ details.advanced > summary { cursor: pointer; color: var(--sub); font-size: 12.5
 
 /* TOTP 绑定二维码（v0.53.3）：固定白底，避免深色主题下扫不出来 */
 .totp-qr { display: block; margin: 8px auto; width: 200px; height: 200px; background: #fff; padding: 6px; border-radius: 8px; image-rendering: pixelated; }
+
+.review-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.review-main, .review-panel { min-width: 0; overflow-wrap: anywhere; }
+.review-main { grid-row: 1; }
+.review-panel { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.review-layout h3 { margin: 0 0 10px; font-size: 15px; }
+.review-panel h4 { margin: 16px 0 8px; }
+.review-panel p { margin: 0 0 8px; font-weight: 600; }
+.review-panel summary, .review-source summary { cursor: pointer; }
+.review-source:not(:empty) { margin-top: 14px; }
+.review-workspace .op-meta, #operation-detail .mono, .confirm-target strong { overflow-wrap: anywhere; }
+.confirm-target { padding: 10px; background: var(--info-bg); border-radius: 8px; }
+.review-files { margin: 0; padding-inline-start: 18px; overflow-wrap: anywhere; }
+.receipt-list { display: grid; gap: 10px; }
+.receipt-item { border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-wrap: anywhere; }
+.receipt-item dl { margin: 8px 0 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; }
+.receipt-item dt { color: var(--sub); }
+.receipt-item dd { margin: 0; }
+@media (min-width: 1150px) {
+  .review-layout { grid-template-columns: minmax(145px, 1fr) minmax(0, 2.8fr) minmax(175px, 1.2fr); }
+  .review-main { grid-row: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .drawer { animation: none; }
+}

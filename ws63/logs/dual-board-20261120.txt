@@ -1,0 +1,9 @@
+操作 22ab50af-ecf4-4c41-881c-283317aa8230 已冻结：外发｜unlock-demo｜→ partner@example.com
+密钥来源：设备表（data/devices.json）
+请在板端确认：短按 KEY2 = 批准，长按 KEY2 = 取消
+已打开 COM12，等待板端确认（TTL 90s，回复超时 75000ms）
+执行结果：status=0 pin=12 level=1
+确认结果：decision=1（1=批准 0=取消）device=ws63-B
+confirmationId=ws63-2298d0a6989870a2-2b4267f5b9e14d655a7dd215ad7e6f73
+
+[exited with code 0]

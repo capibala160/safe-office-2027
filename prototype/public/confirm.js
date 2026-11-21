@@ -265,9 +265,10 @@
 
     if (data.ok) {
       mark.textContent = '✓';
-      title.textContent = '已确认，动作已发出';
+      title.textContent = data.send?.state === 'sent' ? '已确认，已记录执行回执' : '已确认';
       const cid = (data.approval && data.approval.confirmationId) || '—';
-      detail.textContent = `确认号 ${cid.length > 24 ? `${cid.slice(0, 24)}…` : cid}`;
+      const receipt = data.send?.messageId;
+      detail.textContent = `确认号 ${cid}${receipt ? ` · 回执 ${receipt}` : ''}`;
     } else if (data.outcome === 'cancelled') {
       mark.textContent = '—';
       title.textContent = '已取消';
