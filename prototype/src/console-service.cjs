@@ -47,7 +47,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.55.0';
+const VERSION = '0.55.1';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -2117,7 +2117,7 @@ class ConsoleService {
       });
     }).then((run) => {
       const pending = (run.operations || []).filter((/** @type {any} */ o) => o.state === 'frozen').length;
-      live.stage = run.cancelled ? '已取消' : pending ? '待确认' : '完成';
+      live.stage = run.cancelled ? '已取消' : run.failure ? '已中止' : pending ? '待确认' : '完成';
       live.status = 'done';
       live.pendingOperations = pending;
       live.result = run;
@@ -2175,7 +2175,7 @@ class ConsoleService {
       runId,
       command: done.command,
       role: done.role,
-      stage: done.cancelled ? '已取消' : pending ? '待确认' : '完成',
+      stage: done.cancelled ? '已取消' : done.failure ? '已中止' : pending ? '待确认' : '完成',
       status: 'done',
       cancelRequested: false,
       pendingOperations: pending,
@@ -2609,6 +2609,11 @@ class ConsoleService {
       }
     }
     const runEntries = /** @type {import('./governance.cjs').AuditEntry[]} */ (this.audit.entries.slice(auditStart, auditEnd));
+    const failureEntry = runEntries.find((entry) => entry.kind === '规划失败' || entry.kind === '任务中止');
+    const failure = failureEntry ? {
+      phase: failureEntry.kind === '规划失败' ? '规划' : failureEntry.detail.action === 'summarize' ? '生成纪要' : '执行',
+      category: failureEntry.detail.class,
+    } : undefined;
     const run = {
       runId,
       operator,
@@ -2622,8 +2627,9 @@ class ConsoleService {
       gateSummary: this._gateSummary(auditStart, auditEnd),
       riskEvidence: this._runRiskEvidence(auditStart, auditEnd),
       cancelled: runEntries.some((entry) => entry.kind === '任务取消'),
+      failure,
       nextAction: runEntries.find((entry) => entry.kind === '计划未生成')?.detail.reason
-        || (runEntries.some((entry) => entry.kind === '规划失败' || entry.kind === '任务中止')
+        || (failure
           ? '任务遇到错误。请在步骤记录核对已执行动作与失败原因，再决定是否重试。' : undefined),
       archives: runEntries.filter((entry) => entry.kind === '生成稿' && entry.detail?.archived)
         .map((entry) => ({ id: entry.detail.id, title: entry.detail.title, level: entry.detail.level })),

@@ -382,7 +382,7 @@ class AgentRuntime {
               continue;
             }
           }
-          if (onStage) onStage('执行', { step: i + 1, total: steps.length });
+          if (onStage) onStage('执行', { step: i + 1, total: steps.length, action: steps[i].action });
           lines.push(await this.execStep(steps[i], i + 1, { role, token, nearfieldOnline, sandbox, command, modelLocation, commandLevel, deferActions, onDeferred, operator, taskId }));
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           const fault = classifyModelFault(err);

@@ -810,7 +810,7 @@
     // —— 任务进度：排队 → 规划 → 执行 i/n → 待确认/完成 ——
     const stageText = (snap) => {
       const last = (snap.stageLog || []).slice(-1)[0] || {};
-      if (snap.stage === '执行' && last.step) return `执行 ${last.step}/${last.total}`;
+      if (snap.stage === '执行' && last.step) return `${toolLabel(last.action) || '执行'} ${last.step}/${last.total}`;
       return snap.stage;
     };
     const progressHtml = (snap) => `<section class="card">
@@ -872,7 +872,9 @@
         if (comparison && fresh.some((operation) => operation.action === 'sendExternalEmail')) comparison.hidden = true;
         const outcomeNotice = snap.result.cancelled
           ? '<div class="notice info" role="status">任务已取消，后续步骤已停止。请在任务记录核对已执行的步骤。</div>'
-          : snap.result.nextAction ? `<div class="notice info" role="status">${esc(snap.result.nextAction)}</div>` : '';
+          : snap.result.failure
+            ? `<div class="notice block" role="alert">${esc(snap.result.failure.phase)}阶段中止（${esc(snap.result.failure.category)}）。后续步骤未执行。请先查看步骤记录，再决定是否重试。</div>`
+            : snap.result.nextAction ? `<div class="notice info" role="status">${esc(snap.result.nextAction)}</div>` : '';
         target.innerHTML = outcomeNotice + renderRun({ ...snap.result, operations: fresh }, original);
         bindOpActions(root, c);
       }

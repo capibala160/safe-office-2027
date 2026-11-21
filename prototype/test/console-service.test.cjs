@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.55.0');
+  assert.equal(bootstrap.state.version, '0.55.1');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -688,6 +688,44 @@ test('异步任务：起跑即返回 runId，阶段可轮询，完成有结果',
   assert.ok(snap.stageLog.some((s) => s.stage === '规划'), '应有规划阶段');
   assert.ok(snap.stageLog.some((s) => s.stage === '执行'), '应有执行阶段');
   assert.ok(snap.result, '完成后的任务要能取回结果');
+});
+
+test('纪要生成超时：显示中止阶段，保留读取记录且不创建邮件操作', async (t) => {
+  let failGeneration;
+  const generating = new Promise((resolve) => {
+    failGeneration = resolve;
+  });
+  const llm = {
+    deployment: 'local',
+    async plan() {
+      return [
+        { action: 'readDoc', args: { id: 'M2' } },
+        { action: 'summarize', args: { of: 'M2' } },
+        { action: 'sendInternalEmail', args: { to: 'team@corp.internal', docId: 'draft_M2' } },
+      ];
+    },
+    async generate() {
+      await generating;
+      throw new DOMException('生成超时', 'TimeoutError');
+    },
+  };
+  const { service } = setup({ service: { llm } });
+  t.after(() => service.close());
+  const { runId } = service.startCommand({
+    command: '把周例会纪要整理后发给 team@corp.internal',
+    role: '员工', tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M2'],
+  });
+  failGeneration();
+  await service.liveRuns.get(runId).done;
+  const snapshot = service.getRun(runId);
+  assert.ok(snapshot.stageLog.some((entry) => entry.action === 'summarize'));
+  assert.equal(snapshot.stage, '已中止');
+  assert.deepEqual(snapshot.result.failure, { phase: '生成纪要', category: '模型超时' });
+  assert.ok(snapshot.result.lines.some((line) => line.includes('readDoc(M2) ✓')));
+  assert.deepEqual(snapshot.result.operations, []);
+  service.liveRuns.delete(runId);
+  assert.equal(service.getRun(runId).stage, '已中止');
+  assert.deepEqual(service.getRun(runId).result.failure, snapshot.result.failure);
 });
 
 test('异步任务失败：标记 error，且不产生未处理的 Promise 拒绝', async (t) => {
