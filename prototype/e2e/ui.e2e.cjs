@@ -704,6 +704,99 @@ test('UI：审计员按策略自动回信（固定模板，不读来信正文）
   assert.match(await page.textContent('#auto-reply-result'), /扫描 \d+ 封/);
 });
 
+test('UI：任务状态查询断线后恢复，提交只发生一次', { timeout: 45000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  let submissions = 0;
+  const queriedRuns = [];
+  await page.route('**/api/commands/async', async (route) => {
+    submissions += 1;
+    await route.continue();
+  });
+  await page.route(/\/api\/commands\/RUN-\d+$/, async (route) => {
+    queriedRuns.push(new URL(route.request().url()).pathname);
+    if (queriedRuns.length === 1) await route.abort('internetdisconnected');
+    else await route.continue();
+  });
+
+  await page.goto(started.url);
+  await page.click('[data-quick="外发"]');
+  await page.click('#dash-start');
+  await page.click('#cmd-run');
+  const connection = page.locator('#run-connection');
+  await connection.waitFor();
+  assert.match(await connection.innerText(), /连接恢复后会继续查询此任务/);
+  assert.equal(await page.locator('#cmd-run').isDisabled(), true);
+  assert.equal(await page.locator('#run-cancel').isDisabled(), true);
+
+  await page.locator('#cmd-result .op-card').waitFor();
+  assert.equal(submissions, 1);
+  assert.ok(queriedRuns.length >= 2);
+  assert.equal(new Set(queriedRuns).size, 1);
+  assert.equal(await page.locator('#cmd-run').isEnabled(), true);
+});
+
+test('UI：对照收件人和同名附件改动，撤销旧挑战后核对新回执', { timeout: 60000 }, async (t) => {
+  const password = hashPassword('password123');
+  const auth = new AuthService({ users: [
+    { username: 'emp', role: '员工', ...password },
+    { username: 'dev', role: '设备助手', ...password },
+  ] });
+  const started = await startServer({ port: 0, auth });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const logIn = async (username) => {
+    const page = await browser.newPage();
+    await page.goto(started.url);
+    await page.fill('#username', username);
+    await page.fill('#password', 'password123');
+    await page.click('#submit');
+    await page.waitForSelector('#current-user:not([hidden])');
+    return page;
+  };
+  const file = (content) => ({ name: 'agenda.txt', mimeType: 'text/plain', buffer: Buffer.from(content) });
+  const employee = await logIn('emp');
+  await employee.click('[data-quick="外发"]');
+  await employee.click('#dash-start');
+  await employee.locator('#cmd-files').setInputFiles(file('Agenda: initial draft'));
+  await employee.click('#cmd-run');
+  const initialResult = employee.locator('#cmd-result .op-card');
+  await initialResult.locator('[data-op-action="challenge"]').click();
+  await employee.click('#drawer-close-ok');
+  const original = started.service.store.listOperations()[0];
+  const oldChallenge = started.service.listOperations({ actor: 'emp', role: '员工' }).items[0].challenge;
+  await initialResult.locator('[data-op-action="detail"]').click();
+  await employee.getByText('修改收件人与附件', { exact: true }).click();
+  await employee.fill('#op-replace-to', 'review@partner-example.com');
+  await employee.locator('#op-replace button').click();
+  await employee.locator('#cmd-files').setInputFiles(file('Agenda: updated draft'));
+  assert.match(await employee.locator('#cmd-comparison').innerText(), /review@partner-example\.com/);
+  assert.equal(started.service.store.getOperation(original.operationId).state, 'rejected');
+  assert.equal(started.service.challenges.get(oldChallenge.challengeId).state, 'expired');
+  await employee.click('#cmd-run');
+  const comparison = employee.locator('#cmd-result .mail-comparison');
+  await comparison.waitFor();
+  assert.match(await comparison.innerText(), /agenda\.txt\s+已移除[\s\S]*agenda\.txt\s+已加入/);
+  await employee.reload();
+  await comparison.waitFor();
+  assert.match(await comparison.innerText(), /partner@partner-example\.com[\s\S]*review@partner-example\.com/);
+  await employee.locator('#cmd-result [data-op-action="challenge"]').click();
+  await employee.click('#drawer-close-ok');
+
+  const helper = await logIn('dev');
+  await helper.locator('[data-op-action="challenge"]').click();
+  assert.match(await helper.locator('#confirm-drawer').innerText(), /review@partner-example\.com[\s\S]*agenda\.txt/);
+  await helper.click('#drawer-approve');
+  await helper.locator('#drawer-result').getByText(/回执编号/).waitFor();
+  assert.equal(await helper.locator('#drawer-result a').count(), 0);
+  await employee.locator('#cmd-result').getByText('查看本任务回放').click();
+  await employee.locator('.receipt-item').waitFor();
+  assert.match(await employee.locator('.receipt-item').innerText(), /review@partner-example\.com/);
+  assert.equal(started.service.store.listOperations().filter((operation) => operation.state === 'executed').length, 1);
+});
+
 test('UI：任务回放页展示批准/回执与审计完整性', { timeout: 60000 }, async (t) => {
   const mk = (username, role) => {
     const { salt, hash } = hashPassword('password123');

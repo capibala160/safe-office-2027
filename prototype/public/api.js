@@ -1,11 +1,12 @@
 'use strict';
 // 极简 API 客户端：同源 JSON，统一错误对象
 (function () {
-  async function request(path, { method = 'GET', body } = {}) {
+  async function request(path, { method = 'GET', body, signal } = {}) {
     let res;
     try {
       res = await fetch(path, {
         method,
+        signal,
         headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
@@ -35,7 +36,7 @@
   }
 
   window.API = {
-    get: (path) => request(path),
+    get: (path, options) => request(path, options),
     post: (path, body = {}) => request(path, { method: 'POST', body }),
     del: (path) => request(path, { method: 'DELETE' }),
   };

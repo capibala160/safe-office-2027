@@ -107,9 +107,23 @@
       try { localStorage.setItem('safe-office.activeRun', res.runId); } catch { /* 隐私模式 */ }
       return res;
     },
-    async pollRun(runId, onUpdate, { intervalMs = 900 } = {}) {
-      for (;;) {
-        const snap = await API.get(`/api/commands/${encodeURIComponent(runId)}`);
+    async pollRun(runId, onUpdate, { onRetry, isCurrent = () => true } = {}) {
+      const path = `/api/commands/${encodeURIComponent(runId)}`;
+      let delay = 900;
+      while (isCurrent()) {
+        let snap;
+        try {
+          snap = await API.get(path, { signal: AbortSignal.timeout(8000) });
+        } catch (err) {
+          if (err.code !== 'NETWORK' && ![502, 503, 504].includes(err.status)) throw err;
+          if (!isCurrent()) return null;
+          onRetry?.();
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          delay = Math.min(delay * 2, 5000);
+          continue;
+        }
+        if (!isCurrent()) return null;
+        delay = 900;
         if (onUpdate) onUpdate(snap);
         if (snap.status !== 'running') {
           if (store.activeRunId === runId) {
@@ -118,8 +132,9 @@
           }
           return snap;
         }
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
+      return null;
     },
     async cancelRun(runId) {
       return API.post(`/api/commands/${encodeURIComponent(runId)}/cancel`, {});

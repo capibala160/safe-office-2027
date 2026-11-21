@@ -469,6 +469,15 @@ details.advanced > summary { cursor: pointer; color: var(--sub); font-size: 12.5
 .receipt-item dl { margin: 8px 0 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; }
 .receipt-item dt { color: var(--sub); }
 .receipt-item dd { margin: 0; }
+.mail-comparison { margin-bottom: 14px; overflow-wrap: anywhere; }
+.mail-comparison h3 { margin: 0 0 10px; font-size: 15px; }
+.compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.compare-panel { padding: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
+.compare-panel:last-child { background: var(--info-bg); border-color: #c4d5ef; }
+.compare-panel h4 { margin: 0 0 8px; }
+@media (max-width: 620px) {
+  .compare-grid { grid-template-columns: minmax(0, 1fr); }
+}
 @media (min-width: 1150px) {
   .review-layout { grid-template-columns: minmax(145px, 1fr) minmax(0, 2.8fr) minmax(175px, 1.2fr); }
   .review-main { grid-row: auto; }

@@ -170,7 +170,7 @@
       try {
         const res = await API.post(`/api/device/challenges/${encodeURIComponent(ch.challengeId)}/decide`, { decision });
         clearInterval(timer);
-        if (result) result.innerHTML = renderDeviceResult(res);
+        if (result) result.innerHTML = renderDeviceResult(res, c);
         if (actions) actions.innerHTML = '<button class="btn" id="drawer-done" type="button">完成</button>';
         wrap.querySelector('#drawer-done').addEventListener('click', () => {
           close();
@@ -255,7 +255,7 @@
     )).join('')}</div>`;
   }
 
-  function renderRun(run) {
+  function renderRun(run, original = null) {
     const operations = run.operations || [];
     const actionable = operations.filter((operation) => operation.state === 'frozen').length;
     const attention = (run.gateSummary || []).filter((gate) => ['block', 'warn'].includes(gate.status));
@@ -264,7 +264,7 @@
       <div class="review-layout">
         <aside class="review-panel"><h3>任务步骤</h3>${renderGates(run)}<a class="btn ghost small mt12" href="${replayHref(run.runId)}">查看本任务回放</a></aside>
         <div class="review-main"><h3>草稿与执行记录</h3>
-          ${operations.length ? `<div class="stack">${operations.map((op) => operationCard(op)).join('')}</div>` : '<div class="sub-text">此任务没有待确认草稿。</div>'}
+          ${operations.length ? `<div class="stack">${operations.map((op) => `${original && op.action === 'sendExternalEmail' ? renderMailComparison(original, op) : ''}${operationCard(op)}`).join('')}</div>` : '<div class="sub-text">此任务没有生成待确认草稿。</div>'}
           <details class="advanced mt12" ${operations.length ? '' : 'open'}><summary>查看步骤记录</summary><div class="lines mt8">${renderLines(run.lines)}</div></details>
         </div>
         <aside class="review-panel"><h3>当前待办</h3><p>${actionable ? `${actionable} 项待核对并确认` : '暂无待确认操作'}</p>
@@ -281,7 +281,37 @@
   }
 
   function routeRunId() {
-    return new URLSearchParams(location.hash.split('?')[1] || '').get('run');
+    return routeParams().get('run');
+  }
+
+  function routeParams() {
+    return new URLSearchParams(location.hash.split('?')[1] || '');
+  }
+
+  function renderMailComparison(original, next) {
+    const oldFiles = original.attachments || [];
+    const newFiles = next.attachments || [];
+    const changes = Boolean(next.operationId);
+    const files = (items, other, side) => items.length
+      ? `<ul class="review-files">${items.map((file) => {
+        const same = changes && file.sha256 && other.some((entry) => entry.name === file.name && entry.sha256 === file.sha256);
+        const label = changes ? (same ? '未变' : side) : '';
+        return `<li>${esc(file.name)}${label ? ` <span class="badge ${same ? 'info' : 'warn'}">${label}</span>` : ''}</li>`;
+      }).join('')}</ul>`
+      : '<span class="sub-text">无附件</span>';
+    const panel = (title, operation, attachments) => `<section class="compare-panel">
+      <h4>${title}</h4>
+      <div class="sub-text">收件人${operation === next && next.recipient && original.recipient !== next.recipient ? ' · 已变更' : ''}</div><strong>${esc(operation.recipient || '—')}</strong>
+      <div class="sub-text mt8">附件（${attachments.length}）</div>${files(attachments, operation === original ? newFiles : oldFiles, operation === original ? '已移除' : '已加入')}
+      ${operation.operationHash ? `<div class="sub-text mt8">版本指纹 <span class="mono" title="${esc(operation.operationHash)}">${esc(short(operation.operationHash, 18))}</span></div>` : ''}
+    </section>`;
+    const notice = changes
+      ? (next.state === 'frozen' ? '请核对实际草稿，确认仅绑定右侧所示版本。' : '右侧显示这次任务实际生成的版本和回执。')
+      : '重新选择本次附件。提交后可核对实际生成的草稿。';
+    return `<section class="mail-comparison" aria-label="外发版本对照"><h3>外发版本对照</h3>
+      <div class="compare-grid">${panel('原版本', original, oldFiles)}${panel(changes ? '新版本' : '新任务预览', next, newFiles)}</div>
+      <div class="sub-text mt8">${notice}</div>
+    </section>`;
   }
 
   function confirmationLabel(op) {
@@ -667,6 +697,8 @@
     c.store.pendingSample = null;
     const pendingText = c.store.pendingCommand || '';
     c.store.pendingCommand = null;
+    const replacement = sample?.replacement || null;
+    const comparisonId = replacement?.operationId || routeParams().get('compare');
     const tools = sample ? (sample.tools || []) : ['readDoc', 'summarize', 'sendInternalEmail'];
     const docs = sample ? (sample.documentIds || []) : ['M2'];
     const domains = ((sample && sample.domains) || []).join(',');
@@ -697,12 +729,12 @@
           </div>
           <div class="sub-text mt8">外发、删除、打印和设备动作会转交确认；内网邮件按策略自动确认。这里的勾选只是本次授权，服务端策略始终优先。</div>
         </details>
-        <div class="btn-row mt12"><button class="btn" id="cmd-run">执行</button><button class="btn ghost" id="cmd-clear">清空</button></div>
+        ${replacement ? `<div class="mt12" id="cmd-comparison" aria-live="polite">${renderMailComparison(replacement, { recipient: replacement.nextRecipient })}</div>` : ''}
+        <div class="btn-row mt12"><button class="btn" id="cmd-run">${replacement ? '生成新草稿' : '执行'}</button><button class="btn ghost" id="cmd-clear">清空</button></div>
         <div class="hr"></div>
         <div class="sub-text mb8">样例（点击填入表单）：</div>
         <div class="sample-grid">${b.samples.map((s) => `<button class="sample" data-cmd-sample="${esc(s.id)}"><strong>${esc(s.name)}</strong><small>${esc(s.expect)}</small></button>`).join('')}</div>
       </section>
-      ${sample?.replacement ? '<div class="notice info">旧草稿已撤销。请重新核对资料、附件、权限和新收件人，再发起任务。</div>' : ''}
       <div id="cmd-result"></div>`;
 
     const recEl = root.querySelector('#cmd-rec-text');
@@ -743,10 +775,29 @@
     const progressHtml = (snap) => `<section class="card">
       <div class="card-head"><h2>任务 ${esc(snap.runId)}</h2><span class="sub" id="run-stage" role="status">${esc(stageText(snap))}</span></div>
       <div class="sub-text" id="run-log">${esc((snap.stageLog || []).map((s) => (s.step ? `${s.stage} ${s.step}/${s.total}` : s.stage)).join(' → '))}</div>
-      <div class="btn-row mt8"><button class="btn ghost small" id="run-cancel">取消任务</button></div>
+      <div class="notice info mt8" id="run-connection" role="status" hidden></div>
+      <div class="btn-row mt8"><button class="btn ghost small" id="run-cancel" disabled>取消任务</button></div>
       <div class="sub-text mt8">离开本页任务不受影响；回来会接着显示进度。</div>
     </section>`;
     const target = root.querySelector('#cmd-result');
+    const runButton = root.querySelector('#cmd-run');
+    const clearButton = root.querySelector('#cmd-clear');
+    let watchedRunId = null;
+    let cancelling = false;
+    const comparison = root.querySelector('#cmd-comparison');
+    const prior = comparisonId
+      ? API.get(`/api/operations/${encodeURIComponent(comparisonId)}`).then((detail) => detail.operation).catch(() => null)
+      : Promise.resolve(null);
+    if (comparison) {
+      const updateComparison = () => {
+        const address = root.querySelector('#cmd-text').value.match(/[^\s@]+@[^\s@]+\.[^\s@]+/)?.[0];
+        const files = [...root.querySelector('#cmd-files').files].map((file) => ({ name: file.name }));
+        comparison.innerHTML = renderMailComparison(replacement, { recipient: address, attachments: files });
+      };
+      root.querySelector('#cmd-files').addEventListener('change', updateComparison);
+      root.querySelector('#cmd-text').addEventListener('change', updateComparison);
+      root.querySelector('#cmd-clear').hidden = true;
+    }
     const finish = async (snap) => {
       if (!target.isConnected) return;
       if (snap.status === 'error') {
@@ -758,8 +809,10 @@
           const detail = await API.get(`/api/operations/${encodeURIComponent(operation.operationId)}`).catch(() => null);
           return detail?.operation || operation;
         }));
+        const original = await prior;
         if (!target.isConnected) return;
-        target.innerHTML = renderRun({ ...snap.result, operations: fresh });
+        if (comparison && fresh.some((operation) => operation.action === 'sendExternalEmail')) comparison.hidden = true;
+        target.innerHTML = renderRun({ ...snap.result, operations: fresh }, original);
         bindOpActions(root, c);
       }
       if (snap.cancelRequested) toast('已取消：已执行的步骤保留记录，后续步骤未执行', 'info');
@@ -767,20 +820,41 @@
     };
     const watch = async (runId) => {
       if (!target.isConnected) return;
-      target.innerHTML = progressHtml({ runId, stage: '排队', stageLog: [] });
-      const snap = await c.pollRun(runId, (s) => {
-        const st = target.querySelector('#run-stage');
-        const lg = target.querySelector('#run-log');
-        if (st) st.textContent = stageText(s);
-        if (lg) lg.textContent = (s.stageLog || []).map((x) => (x.step ? `${x.stage} ${x.step}/${x.total}` : x.stage)).join(' → ');
-        const cancelBtn = target.querySelector('#run-cancel');
-        if (cancelBtn) cancelBtn.disabled = s.status !== 'running' || s.cancelRequested;
-      });
-      await finish(snap);
+      watchedRunId = runId;
+      runButton.disabled = true;
+      clearButton.disabled = true;
+      target.innerHTML = progressHtml({ runId, stage: '正在获取进度', stageLog: [] });
+      const stage = target.querySelector('#run-stage');
+      const log = target.querySelector('#run-log');
+      const connection = target.querySelector('#run-connection');
+      const cancelButton = target.querySelector('#run-cancel');
+      try {
+        const snapshot = await c.pollRun(runId, (status) => {
+          connection.hidden = true;
+          stage.textContent = stageText(status);
+          log.textContent = (status.stageLog || []).map((entry) => (entry.step ? `${entry.stage} ${entry.step}/${entry.total}` : entry.stage)).join(' → ');
+          cancelButton.disabled = cancelling || status.status !== 'running' || status.cancelRequested;
+        }, {
+          isCurrent: () => target.isConnected,
+          onRetry: () => {
+            connection.textContent = '暂时无法获取进度，连接恢复后会继续查询此任务。';
+            connection.hidden = false;
+            cancelButton.disabled = true;
+          },
+        });
+        if (snapshot) await finish(snapshot);
+      } catch (err) {
+        if (target.isConnected) target.innerHTML = `<div class="notice block" role="alert">无法查看任务 ${esc(runId)}：${esc(c.errorText(err))}</div>`;
+      } finally {
+        watchedRunId = null;
+        runButton.disabled = false;
+        clearButton.disabled = false;
+      }
     };
-    root.querySelector('#cmd-run').addEventListener('click', async (ev) => {
-      const btn = ev.currentTarget;
-      btn.disabled = true;
+    runButton.addEventListener('click', async () => {
+      runButton.disabled = true;
+      clearButton.disabled = true;
+      let submissionUncertain = false;
       try {
         root.querySelector('#cmd-result').innerHTML = '<div class="notice info" role="status">正在提交任务…</div>';
         const allFiles = [...(root.querySelector('#cmd-files').files || [])];
@@ -796,35 +870,41 @@
         }
         const payload = collect();
         if (attachments.length) payload.attachments = attachments;
+        submissionUncertain = true;
         const started = await c.startRun(payload);
-        if (root.contains(btn)) history.replaceState(null, '', `#/command?run=${encodeURIComponent(started.runId)}`);
+        submissionUncertain = false;
+        if (target.isConnected) {
+          const params = new URLSearchParams({ run: started.runId });
+          if (replacement && comparisonId) params.set('compare', comparisonId);
+          history.replaceState(null, '', `#/command?${params}`);
+        }
         await watch(started.runId);
       } catch (err) {
-        if (root.contains(btn)) root.querySelector('#cmd-result').innerHTML = `<div class="notice block" role="alert">${esc(c.errorText(err))}${c.store.activeRunId ? '。刷新可继续查看现有任务。' : ''}</div>`;
+        submissionUncertain = submissionUncertain && (err.code === 'NETWORK' || err.status >= 500);
+        if (target.isConnected) target.innerHTML = submissionUncertain
+          ? '<div class="notice block" role="alert">未收到提交回执。请在连接恢复后查看工作台的最近任务及待办，核对是否已经接收。<a class="btn ghost small mt8" href="#/dashboard">前往工作台</a></div>'
+          : `<div class="notice block" role="alert">${esc(c.errorText(err))}</div>`;
       }
-      finally { btn.disabled = false; }
+      finally {
+        runButton.disabled = submissionUncertain;
+        clearButton.disabled = submissionUncertain;
+      }
     });
     root.querySelector('#cmd-result').addEventListener('click', async (ev) => {
       const btn = ev.target.closest('#run-cancel');
-      if (!btn) return;
+      if (!btn || !watchedRunId || cancelling) return;
+      cancelling = true;
       btn.disabled = true;
       try {
-        await c.cancelRun(c.store.activeRunId);
+        await c.cancelRun(watchedRunId);
         toast('已请求取消：当前步骤结束后停止，已执行步骤保留记录', 'info');
-      } catch (err) { toast(c.errorText(err), 'error'); btn.disabled = false; }
+      } catch (err) { toast(c.errorText(err), 'error'); }
+      finally { cancelling = false; }
     });
     // 回到本页时恢复未跑完的任务
     let resumeId = routeRunId() || (sample?.replacement ? null : c.store.activeRunId);
     if (!resumeId && !sample?.replacement) { try { resumeId = localStorage.getItem('safe-office.activeRun'); } catch { resumeId = null; } }
-    if (resumeId) {
-      try {
-        const snap = await API.get(`/api/commands/${encodeURIComponent(resumeId)}`).catch(() => null);
-        if (snap && snap.status === 'running') { c.store.activeRunId = resumeId; void watch(resumeId).catch((err) => toast(c.errorText(err), 'error')); }
-        else if (snap) await finish(snap);
-      } catch (err) {
-        toast(`恢复任务失败：${c.errorText(err)}`, 'error');
-      }
-    }
+    if (resumeId) void watch(resumeId);
     root.querySelector('#cmd-clear').addEventListener('click', () => {
       root.querySelector('#cmd-text').value = '';
       c.store.pendingCommand = null;
@@ -839,6 +919,7 @@
         const s = b.samples.find((x) => x.id === btn.dataset.cmdSample);
         if (!s) return;
         c.store.pendingSample = s;
+        history.replaceState(null, '', '#/command');
         if (s.nearfieldOnline !== undefined) c.setNearfield(!!s.nearfieldOnline);
         c.rerender();
       });
@@ -1250,9 +1331,10 @@
         </div>
       </div>
       ${bodyBlock}
-      ${canEdit && op.state === 'frozen' && op.action === 'sendExternalEmail' ? `<details class="advanced mt12"><summary>更换收件人并重新发起任务</summary>
-        <p>当前收件人 <strong>${esc(op.recipient)}</strong>。更换后会撤销这条待确认草稿，待确认挑战随即失效。请在新任务中重新选择附件并核对权限。</p>
-        <form id="op-replace" class="btn-row"><label for="op-replace-to">新收件人</label><input class="input" id="op-replace-to" type="email" maxlength="254" required><button type="submit" class="btn ghost">撤销旧草稿并继续</button></form>
+      ${canEdit && ['frozen', 'executed'].includes(op.state) && op.action === 'sendExternalEmail' ? `<details class="advanced mt12"><summary>${op.state === 'frozen' ? '修改收件人与附件' : '以此为参考新建外发任务'}</summary>
+        <p>${op.state === 'frozen' ? '继续后会撤销当前草稿，待确认挑战随即失效。' : '原任务已执行，原回执保留。继续后会创建另一条外发任务，须单独确认。'}</p>
+        <div id="op-replace-preview" aria-live="polite"></div>
+        <form id="op-replace" class="btn-row mt12"><label for="op-replace-to">新任务收件人</label><input class="input" id="op-replace-to" type="email" value="${esc(op.recipient)}" maxlength="254" required><button type="submit" class="btn ghost">${op.state === 'frozen' ? '撤销旧草稿并继续' : '继续填写新任务'}</button></form>
       </details>` : ''}
       ${versionBlock}
       <div class="mt12"><div class="sub-text">操作事件（SQLite 事件链）</div>
@@ -1298,21 +1380,27 @@
       <div id="approvals-result"></div>`;
     bindOpActions(root, c);
     root.querySelector('#operation-detail')?.focus();
+    const replaceInput = root.querySelector('#op-replace-to');
+    if (replaceInput) {
+      const preview = root.querySelector('#op-replace-preview');
+      const updatePreview = () => { preview.innerHTML = renderMailComparison(selectedOperation, { recipient: replaceInput.value.trim() }); };
+      updatePreview();
+      replaceInput.addEventListener('change', updatePreview);
+    }
     root.querySelector('#op-replace')?.addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const button = form.querySelector('button');
       const recipient = form.querySelector('input').value.trim();
-      if (recipient.toLowerCase() === selectedOperation.recipient.toLowerCase()) {
-        toast('新收件人与当前收件人相同', 'info');
-        return;
-      }
       button.disabled = true;
       try {
-        await API.post(`/api/operations/${encodeURIComponent(selectedOperation.operationId)}/reject`);
+        if (selectedOperation.state === 'frozen') {
+          const result = await API.post(`/api/operations/${encodeURIComponent(selectedOperation.operationId)}/reject`);
+          toast(result.voidedChallenges ? '旧草稿已撤销，旧挑战已作废' : '旧草稿已撤销', 'ok');
+        }
         c.store.pendingCommand = `把选中的资料发给外部合作方 ${recipient}`;
         c.store.pendingSample = {
-          replacement: true,
+          replacement: { ...selectedOperation, nextRecipient: recipient },
           tools: ['readDoc', 'sendExternalEmail'],
           documentIds: selectedOperation.sourceDocIds || [],
           domains: [recipient.split('@').at(-1)],
@@ -1364,8 +1452,10 @@
     </div>`;
   }
 
-  function renderDeviceResult(res) {
+  function renderDeviceResult(res, c) {
     const messageId = res.send?.messageId;
+    const user = c.store.bootstrap?.authUser;
+    const canReplay = !user || ['管理员', '审计员'].includes(user.role) || user.username === res.operation?.createdBy;
     const map = {
       approved: ['ok', res.send?.state === 'sent' ? '已批准 · 已记录执行回执' : '已批准'],
       'approved-but-failed': ['error', `已批准，但执行失败：${res.message || ''}`],
@@ -1378,7 +1468,7 @@
       rejected: ['error', `拒绝：${res.code} ${res.message || ''}`],
     };
     const [kind, text] = map[res.outcome] || ['error', res.message || res.code || '未知结果'];
-    return `<div class="notice ${kind === 'ok' ? 'info' : 'block'}"><strong>${esc(text)}</strong>${messageId ? `<div class="sub-text mt8">回执编号：${esc(messageId)}</div>` : ''}${res.approval ? `<div class="sub-text mt8">确认编号：${esc(res.approval.confirmationId)}</div>` : ''}${res.operation?.runId ? `<a class="btn ghost small mt8" href="${replayHref(res.operation.runId)}">查看本任务回放</a>` : ''}</div>`;
+    return `<div class="notice ${kind === 'ok' ? 'info' : 'block'}"><strong>${esc(text)}</strong>${messageId ? `<div class="sub-text mt8">回执编号：${esc(messageId)}</div>` : ''}${res.approval ? `<div class="sub-text mt8">确认编号：${esc(res.approval.confirmationId)}</div>` : ''}${res.operation?.runId && canReplay ? `<a class="btn ghost small mt8" href="${replayHref(res.operation.runId)}">查看本任务回放</a>` : ''}</div>`;
   }
 
   async function device(root, c) {
@@ -1446,7 +1536,7 @@
     }
 
     const showResult = (res) => {
-      root.querySelector('#device-result').innerHTML = renderDeviceResult(res);
+      root.querySelector('#device-result').innerHTML = renderDeviceResult(res, c);
     };
 
     root.querySelector('#dev-op')?.addEventListener('change', (ev) => { c.store.operationId = ev.currentTarget.value; });
