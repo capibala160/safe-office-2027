@@ -3,11 +3,30 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { CASES } = require('../eval/corpus.cjs');
-const { runAll } = require('../eval/harness.cjs');
+const { runAll, runCase } = require('../eval/harness.cjs');
 const { aggregateMatrix, percentile, rate } = require('../eval/metrics.cjs');
 const { MockLLM } = require('../src/llm.cjs');
 
 const mockFactory = () => new MockLLM();
+
+test('明确的合作材料外发无需模型规划，仍需域名授权和确认', async () => {
+  const unavailableModel = {
+    deployment: 'cloud',
+    async plan() { throw new Error('模型不可用'); },
+  };
+  for (const caseId of ['V-N5', 'V-N11']) {
+    const definition = CASES.find((entry) => entry.id === caseId);
+    const result = await runCase(definition, 'full', unavailableModel);
+    assert.equal(result.completed, true, caseId);
+    assert.deepEqual(result.modelCalls.planningCallsMs, []);
+    assert.equal(result.confirmations.approved, 1);
+
+    const restricted = { ...definition, token: { ...definition.token, domains: [] } };
+    const blocked = await runCase(restricted, 'full', unavailableModel);
+    assert.equal(blocked.completed, false);
+    assert.equal(blocked.effects.some((effect) => effect.action === 'sendExternalEmail'), false);
+  }
+});
 
 test('评测语料：ID 唯一、类型合法、每条攻击都有 forbidden / 正常任务都有 expected', () => {
   const ids = new Set();

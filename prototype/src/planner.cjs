@@ -308,18 +308,24 @@ class GuardedPlanner {
       this.audit.append('模板规划', { template: '来访日程', steps: outcome.steps.length });
       return { ...outcome, contextInfo: { modelLocation: 'local', sent: [], withheld: [] } };
     }
-    if (!this._ablate('plan') && authorizedTools?.includes('readDoc') && authorizedTools.includes('shareScreen')) {
-      const target = /^把(.{1,80})投屏显示到会议大屏[。]?$/.exec(command)?.[1];
+    if (!this._ablate('plan') && authorizedTools?.includes('readDoc')) {
+      const screen = /^把(.{1,80})投屏显示到会议大屏[。]?$/.exec(command);
+      const externalMail = /^把([^，。；、,;@\r\n]{1,80})(?:同步给|知会)外部合作方\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})[。]?$/.exec(command);
+      const target = screen?.[1] || externalMail?.[1];
       const matches = target ? docs.filter((doc) => authorizedDocs?.includes(doc.id)
         && (doc.id === target || doc.title?.replace(/（草稿）$/, '') === target)) : [];
       if (matches.length === 1) {
         const id = matches[0].id;
-        const outcome = validatePlan([{ action: 'readDoc', args: { id } }, { action: 'shareScreen', args: { id } }], {
-          command, docs, registry: this.registry, authorizedTools, enforceToolAuthorization: true,
-        });
-        if (!outcome.findings.length) {
-          this.audit.append('模板规划', { template: '会议大屏投屏', sourceId: id });
-          return { ...outcome, contextInfo: { modelLocation: 'local', sent: [], withheld: [] } };
+        const action = screen ? 'shareScreen' : 'sendExternalEmail';
+        if (authorizedTools.includes(action)) {
+          const args = screen ? { id } : { docId: id, to: externalMail?.[2] || '' };
+          const outcome = validatePlan([{ action: 'readDoc', args: { id } }, { action, args }], {
+            command, docs, registry: this.registry, authorizedTools, enforceToolAuthorization: true,
+          });
+          if (!outcome.findings.length) {
+            this.audit.append('模板规划', { template: screen ? '会议大屏投屏' : '合作材料外发', sourceId: id });
+            return { ...outcome, contextInfo: { modelLocation: 'local', sent: [], withheld: [] } };
+          }
         }
       }
     }
