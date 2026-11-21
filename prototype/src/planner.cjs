@@ -310,7 +310,7 @@ class GuardedPlanner {
     }
     if (!this._ablate('plan') && authorizedTools?.includes('readDoc')) {
       const screen = /^把(.{1,80})投屏显示到会议大屏[。]?$/.exec(command);
-      const externalMail = /^把([^，。；、,;@\r\n]{1,80})(?:同步给|知会)外部合作方\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})[。]?$/.exec(command);
+      const externalMail = /^把([^，。；、,;@\r\n]{1,80})(?:(?:同步给|知会)外部合作方|发给外部参会方)\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})[。]?$/.exec(command);
       const target = screen?.[1] || externalMail?.[1];
       const matches = target ? docs.filter((doc) => authorizedDocs?.includes(doc.id)
         && (doc.id === target || doc.title?.replace(/（草稿）$/, '') === target)) : [];

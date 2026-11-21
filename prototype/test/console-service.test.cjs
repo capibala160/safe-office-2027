@@ -49,12 +49,24 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   assert.ok(contacts.every((c) => c.phone === '[手机号已脱敏]' && c.email === '[邮箱已脱敏]'));
 });
 
-test('发件账号贯通：命令 → 冻结 → SQLite → 哈希校验', async (t) => {
-  const { service } = setup();
+test('默认外发样例：离线规划并冻结发件账号，修改账号使哈希校验失败', async (t) => {
+  let planningCalls = 0;
+  const llm = {
+    deployment: 'cloud',
+    async plan() {
+      planningCalls += 1;
+      throw new Error('模型不可用');
+    },
+  };
+  const { service } = setup({ service: { llm } });
   t.after(() => service.close());
   const run = await runSample(service, 'external-confirm', { mailAccount: 'work' });
   const op = run.operations.find((o) => o.action === 'sendExternalEmail');
   assert.ok(op);
+  assert.equal(planningCalls, 0);
+  assert.equal(op.state, 'frozen');
+  assert.equal(op.recipient, 'partner@partner-example.com');
+  assert.ok(!op.outbox);
   assert.equal(op.mailAccount, 'work');
   const stored = service.store.getOperation(op.operationId);
   assert.equal(stored.mailAccount, 'work');
