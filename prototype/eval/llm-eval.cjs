@@ -35,25 +35,40 @@ class EvalHttpLLM extends HttpLLM {
     this.generatePrompt = generatePrompt;
   }
 
-  async complete(system, command, contextBlocks, meta = {}) {
+  async complete(system, command, contextBlocks, meta = {}, budget = {}) {
     try {
-      return await super.complete(system, command, contextBlocks, meta);
+      return await super.complete(system, command, contextBlocks, meta, budget);
     } catch (err) {
       if (!isTransient(err)) throw err;
-      return super.complete(system, command, contextBlocks, meta);
+      return super.complete(system, command, contextBlocks, meta, budget);
     }
   }
 
   async plan(command, contextBlocks = [], meta = {}) {
-    const text = await this.complete(this.systemPrompt, command, contextBlocks, meta);
+    const text = await this.complete(this.systemPrompt, command, contextBlocks, meta, {
+      maxTokens: this.planMaxTokens, reasoningEffort: this.planReasoningEffort,
+    });
     const json = text.match(/\[[\s\S]*\]/);
     if (!json) throw new Error('LLM 未返回合法 JSON 计划');
     return JSON.parse(json[0]);
   }
 
   async generate(command, contextBlocks = []) {
-    return this.complete(this.generatePrompt, command, contextBlocks);
+    return this.complete(this.generatePrompt, command, contextBlocks, {}, {
+      maxTokens: this.generateMaxTokens, reasoningEffort: this.generateReasoningEffort,
+    });
   }
+}
+
+// 尾延迟预算：工厂、指纹、报告三处共用同一口径（默认全空/0 = 不传）
+function llmBudgetMeta(env = process.env) {
+  return {
+    reasoningEffort: env.SAFE_OFFICE_LLM_REASONING_EFFORT || null,
+    planReasoningEffort: env.SAFE_OFFICE_LLM_PLAN_REASONING_EFFORT || null,
+    generateReasoningEffort: env.SAFE_OFFICE_LLM_GENERATE_REASONING_EFFORT || null,
+    planMaxTokens: Number(env.SAFE_OFFICE_LLM_MAX_TOKENS_PLAN) || 0,
+    generateMaxTokens: Number(env.SAFE_OFFICE_LLM_MAX_TOKENS_GENERATE) || 0,
+  };
 }
 
 // kind: 'mock' | 'http'
@@ -68,6 +83,8 @@ function makeLLMFactory({ kind = 'mock' } = {}) {
     model: process.env.SAFE_OFFICE_LLM_MODEL || 'glm-4-flash',
     // 与 createLlmFromEnv 同口径：真实模型规划常超过 HttpLLM 默认的 15s
     timeoutMs: Number(process.env.SAFE_OFFICE_LLM_TIMEOUT_MS) || 90000,
+    // 尾延迟预算（默认不设）：评测可用环境变量开实验档
+    ...llmBudgetMeta(),
   };
   if (!options.endpoint || !options.apiKey) {
     throw new Error('真实模型未配置：请设置 SAFE_OFFICE_LLM_ENDPOINT / SAFE_OFFICE_LLM_KEY / SAFE_OFFICE_LLM_MODEL');
@@ -84,4 +101,4 @@ function makeLLMFactory({ kind = 'mock' } = {}) {
   };
 }
 
-module.exports = { makeLLMFactory, EvalHttpLLM, PLAIN_SYSTEM_PROMPT, PLAIN_GENERATE_PROMPT };
+module.exports = { makeLLMFactory, EvalHttpLLM, PLAIN_SYSTEM_PROMPT, PLAIN_GENERATE_PROMPT, llmBudgetMeta };

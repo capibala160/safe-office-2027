@@ -8,9 +8,29 @@ function promptFingerprint() {
   return crypto.createHash('sha256').update(PLAN_SYSTEM_PROMPT).digest('hex');
 }
 
+// 尾延迟预算归一化：默认（全空/0）不进指纹，保持旧实验可续跑；
+// 一旦显式开档，指纹必须变化，避免把不同预算的实验混在一起续跑。
+function normalizeBudget(budget = {}) {
+  return {
+    reasoningEffort: budget.reasoningEffort || null,
+    planReasoningEffort: budget.planReasoningEffort || null,
+    generateReasoningEffort: budget.generateReasoningEffort || null,
+    planMaxTokens: Number(budget.planMaxTokens) || 0,
+    generateMaxTokens: Number(budget.generateMaxTokens) || 0,
+  };
+}
+
+function isDefaultBudget(normalized) {
+  return normalized.reasoningEffort === null
+    && normalized.planReasoningEffort === null
+    && normalized.generateReasoningEffort === null
+    && normalized.planMaxTokens === 0
+    && normalized.generateMaxTokens === 0;
+}
+
 function experimentFingerprint({
   modelName = '', llmKind = '', corpusVersion = '', split = 'all',
-  tiers = [], repeats = 1, ablation = [],
+  tiers = [], repeats = 1, ablation = [], budget = {},
 } = {}) {
   const payload = {
     modelName,
@@ -22,6 +42,8 @@ function experimentFingerprint({
     ablation: [...(ablation || [])].map(String).sort(),
     prompt: promptFingerprint(),
   };
+  const normalized = normalizeBudget(budget);
+  if (!isDefaultBudget(normalized)) payload.budget = normalized;
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 

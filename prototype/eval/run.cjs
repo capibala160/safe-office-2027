@@ -15,7 +15,7 @@ const { loadConfigFile } = require('../src/load-config.cjs');
 const { CASES, CORPUS_VERSION } = require('./corpus.cjs');
 const { runAll, TIERS } = require('./harness.cjs');
 const { aggregateMatrix } = require('./metrics.cjs');
-const { makeLLMFactory } = require('./llm-eval.cjs');
+const { makeLLMFactory, llmBudgetMeta } = require('./llm-eval.cjs');
 const { experimentFingerprint } = require('./fingerprint.cjs');
 const { buildPriorRuns } = require('./resume.cjs');
 const { ABLATION_IDS, parseAblationList, runAblations } = require('./ablation.cjs');
@@ -93,9 +93,12 @@ const HELP = `
   });
   const fingerprintSplit = opts.kind === 'all' ? opts.split : `${opts.split}:${opts.kind}`;
   meta.caseKind = opts.kind;
+  // 尾延迟预算进指纹与报告：默认档不进指纹，旧实验仍可续跑；开档后指纹必变
+  const budget = llmBudgetMeta();
+  meta.llmBudget = budget;
   meta.fingerprint = experimentFingerprint({
     modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: fingerprintSplit,
-    tiers, repeats: opts.repeat,
+    tiers, repeats: opts.repeat, budget,
   });
   // 逐条落盘：真实模型一轮几十分钟，断电/崩溃时 partial 文件仍可用
   const partialPath = join(opts.out, 'eval-partial.json');
@@ -133,7 +136,7 @@ const HELP = `
       ablation: ablationIds,
       fingerprint: experimentFingerprint({
         modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: fingerprintSplit,
-        tiers: ['full'], repeats: opts.repeat, ablation: ablationIds,
+        tiers: ['full'], repeats: opts.repeat, ablation: ablationIds, budget,
       }),
     };
     const ablationPartialPath = join(opts.out, 'ablation-partial.json');
