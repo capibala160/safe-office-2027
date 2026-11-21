@@ -49,6 +49,7 @@ function buildTaskReplay({ run, auditEntries, operations, outboxByOperation, ver
       operationId: op.operationId,
       action: op.action,
       recipient: op.recipient,
+      attachmentNames: (op.attachments || []).map((/** @type {any} */ file) => file.name || file.filename).filter(Boolean),
       level: op.level,
       state: op.state,
       operationHash: op.operationHash,

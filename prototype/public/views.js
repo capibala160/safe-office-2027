@@ -86,7 +86,7 @@
   function renderApprovalFields(op, { hash = op.operationHash, attachmentNames } = {}) {
     const names = attachmentNames ?? (op.attachments || []).map((file) => file.name || file.filename).filter(Boolean);
     return `<dl class="approval-fields">
-      <div><dt>动作</dt><dd>${esc(op.protocolLabel || toolLabel(op.action) || '—')}</dd></div>
+      <div><dt>动作</dt><dd>${esc(TOOL_LABELS[op.action] || op.protocolLabel || op.action || '—')}</dd></div>
       <div class="confirm-target"><dt>${op.action === 'sendExternalEmail' ? '收件人' : '目标'}</dt><dd>${esc(op.recipient || '—')}</dd></div>
       <div><dt>附件（${names.length}）</dt><dd>${names.length ? `<ul class="review-files">${names.map((name) => `<li>${esc(name)}</li>`).join('')}</ul>` : '无附件'}</dd></div>
       <div><dt>版本指纹</dt><dd class="mono">${esc(hash || '—')}</dd></div>
@@ -180,8 +180,7 @@
           close();
           c.refreshState().catch(() => {}).then(() => c.rerender());
         });
-        await c.refreshState();
-        c.rerender();
+        c.refreshState().then(() => c.rerender()).catch(() => {});
       } catch (err) {
         deciding = false;
         if (approve) approve.disabled = false;
@@ -189,6 +188,7 @@
         if (result) result.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
       }
       result.scrollIntoView({ block: 'nearest' });
+      wrap.querySelector('#drawer-done')?.focus({ preventScroll: true });
     };
     approve?.addEventListener('click', () => decide('approve'));
     reject?.addEventListener('click', () => decide('cancel'));

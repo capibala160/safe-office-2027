@@ -938,6 +938,7 @@ test('UI：对照收件人和同名附件改动，撤销旧挑战后核对新回
   const drawer = helper.locator('#confirm-drawer');
   const confirmation = await drawer.innerText();
   assert.ok(confirmation.includes(recipient) && confirmation.includes(filename));
+  const approvalFields = await drawer.locator('.approval-fields').innerText();
   await assertFits(drawer.locator('.drawer-body'));
   assert.ok((await helper.locator('#drawer-approve').boundingBox()).height >= 44);
   await helper.click('#drawer-approve');
@@ -945,7 +946,7 @@ test('UI：对照收件人和同名附件改动，撤销旧挑战后核对新回
   assert.equal(await helper.locator('#drawer-result a').count(), 0);
   await employee.locator('#cmd-result').getByText('查看本任务回放').click();
   await employee.locator('.receipt-item').waitFor();
-  assert.ok((await employee.locator('.receipt-item').innerText()).includes(recipient));
+  assert.equal(await employee.locator('.receipt-item .approval-fields').innerText(), approvalFields);
   await assertFits(employee.locator('.receipt-item'));
   assert.equal(started.service.store.listOperations().filter((operation) => operation.state === 'executed').length, 1);
 });
