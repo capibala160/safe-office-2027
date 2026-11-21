@@ -16,6 +16,7 @@ const { CASES, CORPUS_VERSION } = require('./corpus.cjs');
 const { runAll, TIERS } = require('./harness.cjs');
 const { aggregateMatrix } = require('./metrics.cjs');
 const { makeLLMFactory, llmBudgetMeta } = require('./llm-eval.cjs');
+const { acquireEvalLock } = require('./lock.cjs');
 const { experimentFingerprint } = require('./fingerprint.cjs');
 const { buildPriorRuns } = require('./resume.cjs');
 const { ABLATION_IDS, parseAblationList, runAblations } = require('./ablation.cjs');
@@ -86,6 +87,16 @@ const HELP = `
 
   // 真实模型：与 server.cjs 一致，先读 prototype/config.env（已存在的环境变量优先）
   if (opts.llm === 'http') loadConfigFile(join(__dirname, '..', 'config.env'));
+
+  // 真实模型评测互斥：同一账号并行会互相拖慢（只锁 http；Mock 不经过模型，允许并行）
+  if (opts.llm === 'http') {
+    let releaseEvalLock = acquireEvalLock(join(__dirname, '..', 'out', '.eval.lock'), { out: opts.out });
+    const release = () => { if (releaseEvalLock) { releaseEvalLock(); releaseEvalLock = null; } };
+    process.once('exit', release);
+    for (const sig of ['SIGINT', 'SIGTERM']) {
+      process.once(sig, () => { release(); process.exit(130); });
+    }
+  }
 
   const { kind, factory, modelName } = makeLLMFactory({ kind: opts.llm });
   const meta = buildMeta({
