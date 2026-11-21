@@ -9,9 +9,21 @@
 const { TOOL_META } = require('./capabilities.cjs');
 const { prepareModelInput, resolveTargets } = require('./model-boundary.cjs');
 const { createRegistry } = require('./tool-registry.cjs');
+const { parseWhen } = require('./calendar-adapter.cjs');
+const { AUDIOS } = require('./scenario.cjs');
+
+/** @param {any} steps @param {string} command */
+function normalizeDevicePlan(steps, command) {
+  if (!Array.isArray(steps) || !/^(?:请)?(?:把|打开|关闭|锁上|解锁)会议室[- ]*(?:的)?门锁(?:关上|打开|锁上|关闭)?[。！!]?$/.test(command)) return steps;
+  return steps.map((step) => {
+    if (step?.action !== 'deviceControl' || !['门锁', '会议室门锁', '会议室-门锁'].includes(step.args?.device)) return step;
+    const op = step.args.op === 'unlock' ? 'open' : step.args.op;
+    return { ...step, args: { ...step.args, device: '会议室-门锁', op } };
+  });
+}
 
 /**
- * @typedef {{id: string, level: string, body: string}} Doc
+ * @typedef {{id: string, level: string, body: string, title?: string}} Doc
  * @typedef {{action: string, args?: Record<string, string>, reason?: string}} PlanStep
  * @typedef {{
  *   level: string,
@@ -265,13 +277,52 @@ class GuardedPlanner {
    *   authorizedAudios?: string[] | null,
    *   authorizedImages?: string[] | null,
    * }} [options]
-   * @returns {Promise<{steps: PlanStep[], findings: Finding[], notes: PlanNote[], contextInfo: any, ablated?: string[]}>}
+   * @returns {Promise<{steps: PlanStep[], findings: Finding[], notes: PlanNote[], contextInfo: any, ablated?: string[], emptyPlanReason?: string}>}
    */
   async makePlan(command, {
     docs = [], modelLocation, commandLevel, delegation = null, delegationVerifier = null,
     authorizedTools = null, authorizedDocs = null,
     authorizedAudios = null, authorizedImages = null,
   } = {}) {
+    if (command.startsWith('纪要归档：')) {
+      const sourceId = /^纪要归档：([A-Za-z0-9_-]{1,120})$/.exec(command)?.[1];
+      if (!sourceId || !authorizedDocs?.includes(sourceId) || !docs.some((doc) => doc.id === sourceId)) {
+        throw new Error('请选择本次有权读取的纪要原件');
+      }
+      const outcome = validatePlan([
+        { action: 'readDoc', args: { id: sourceId } },
+        { action: 'summarize', args: { of: sourceId } },
+      ], { command, docs, registry: this.registry, authorizedTools, enforceToolAuthorization: true });
+      if (outcome.findings.length) throw new Error('纪要归档需要读取资料和生成摘要权限');
+      this.audit.append('模板规划', { template: '纪要归档', sourceId });
+      return { ...outcome, contextInfo: { modelLocation, sent: [], withheld: [] } };
+    }
+    if (command.startsWith('来访日程：')) {
+      const fields = /^来访日程：([^\r\n]{1,120})\n开始时间：(\S{1,32})$/.exec(command);
+      const title = fields?.[1].trim();
+      const at = fields?.[2];
+      if (!title || !at || !parseWhen(at)) throw new Error('请填写有效的来访主题和开始时间');
+      const outcome = validatePlan([{ action: 'scheduleMeeting', args: { title, at } }], {
+        command, docs: [], registry: this.registry, authorizedTools, enforceToolAuthorization: true,
+      });
+      this.audit.append('模板规划', { template: '来访日程', steps: outcome.steps.length });
+      return { ...outcome, contextInfo: { modelLocation: 'local', sent: [], withheld: [] } };
+    }
+    if (!this._ablate('plan') && authorizedTools?.includes('readDoc') && authorizedTools.includes('shareScreen')) {
+      const target = /^把(.{1,80})投屏显示到会议大屏[。]?$/.exec(command)?.[1];
+      const matches = target ? docs.filter((doc) => authorizedDocs?.includes(doc.id)
+        && (doc.id === target || doc.title?.replace(/（草稿）$/, '') === target)) : [];
+      if (matches.length === 1) {
+        const id = matches[0].id;
+        const outcome = validatePlan([{ action: 'readDoc', args: { id } }, { action: 'shareScreen', args: { id } }], {
+          command, docs, registry: this.registry, authorizedTools, enforceToolAuthorization: true,
+        });
+        if (!outcome.findings.length) {
+          this.audit.append('模板规划', { template: '会议大屏投屏', sourceId: id });
+          return { ...outcome, contextInfo: { modelLocation: 'local', sent: [], withheld: [] } };
+        }
+      }
+    }
     // gate1 关停：外部资料不经消毒直接进提示词（消融实验专用）
     const prepared = prepareModelInput(this.llm, command, docs, {
       modelLocation, commandLevel, sanitize: !this._ablate('gate1'),
@@ -310,7 +361,15 @@ class GuardedPlanner {
     }
 
     // 2.5) 模型出计划
-    const raw = await this.llm.plan(prepared.command, contextBlocks, { authNote });
+    const selectedAudioRequest = !this._ablate('plan') && authorizedTools?.includes('transcribeAudio')
+      && /^把?这段[^\s，。；、,.!?！？\r\n]{0,8}录音转写成文字[。！!]?$/u.test(command);
+    const selectedAudios = selectedAudioRequest ? Object.values(AUDIOS).filter((audio) => authorizedDocs?.includes(audio.id)) : [];
+    const raw = selectedAudioRequest
+      ? (selectedAudios.length === 1 ? [{ action: 'transcribeAudio', args: { id: selectedAudios[0].id } }] : [])
+      : await this.llm.plan(prepared.command, contextBlocks, { authNote });
+    if (selectedAudioRequest && selectedAudios.length !== 1) {
+      return { steps: [], findings: [], notes: [], contextInfo, emptyPlanReason: '请只选择一段要转写的录音，再提交任务。' };
+    }
 
     // 2.6) 目标占位符回填：规划层用真值做溯源，模型本身从未见过真值（F-05）
     let resolved = resolveTargets(raw, prepared.targets);
@@ -327,7 +386,7 @@ class GuardedPlanner {
 
     // 3) 计划校验（出模型后的第一道保险）
     /** @param {any} stepsIn @returns {PlanResult} */
-    const validate = (stepsIn) => validatePlan(stepsIn, {
+    const validate = (stepsIn) => validatePlan(normalizeDevicePlan(stepsIn, command), {
       command, docs, delegation, delegationVerifier, registry: this.registry, authorizedTools,
       enforceToolAuthorization: true,
     });

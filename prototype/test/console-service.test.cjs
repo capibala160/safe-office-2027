@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.54.2');
+  assert.equal(bootstrap.state.version, '0.55.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -798,6 +798,9 @@ test('取消：规划期间请求取消 → 后续步骤全部不执行，已发
   const run = await service.liveRuns.get(started.runId).done;
   assert.ok(run.lines.some((l) => l.includes('任务取消')), '结果里要写明已取消');
   assert.equal(service.getRun(started.runId).status, 'done');
+  assert.equal(service.getRun(started.runId).stage, '已取消');
+  service.liveRuns.delete(started.runId);
+  assert.equal(service.getRun(started.runId).stage, '已取消');
   assert.ok(service.audit.entries.some((e) => e.kind === '任务取消'), '取消要进审计');
 });
 

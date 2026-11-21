@@ -24,6 +24,16 @@ async function launch(t) {
   return browser;
 }
 
+async function dropFirstTaskPoll(page) {
+  let dropped = false;
+  await page.route(/\/api\/commands\/RUN-\d+$/, async (route) => {
+    if (!dropped) {
+      dropped = true;
+      await route.abort('internetdisconnected');
+    } else await route.continue();
+  });
+}
+
 test('UI：登录 → 运行样例 → 审批页 → 上传 → 改密重登 → 退出', { timeout: 90000 }, async (t) => {
   const mk = (username, role) => {
     const { salt, hash } = hashPassword('password123');
@@ -721,6 +731,60 @@ test('UI：风险说明可定位到隔离原文并展示移除的动作', { time
   assert.equal(await result.locator('[data-op-action="challenge"]').count(), 0);
 });
 
+test('UI：来访日程保留表单填写的主题和时间并标记模拟回执', { timeout: 45000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage({ timezoneId: 'Asia/Shanghai' });
+  await dropFirstTaskPoll(page);
+  await page.goto(started.url);
+  await page.click('[data-quick="日程"]');
+  await page.click('#dash-start');
+  await page.fill('#visit-title', '合作单位来访交流');
+  const year = new Date().getFullYear() + 1;
+  await page.fill('#visit-time', `${year}-01-08T14:30`);
+  await page.click('#cmd-run');
+  await page.locator('#run-connection').getByText(/连接恢复后会继续查询此任务/).waitFor();
+  await page.locator('#cmd-result').getByText(/合作单位来访交流.*模拟/).waitFor();
+  const entry = started.service.listCalendar().find((event) => event.title === '合作单位来访交流');
+  assert.equal(entry.at, `${year}-01-08T06:30:00.000Z`);
+  assert.equal(entry.status, 'simulated');
+  await page.reload();
+  await page.locator('#cmd-result').getByText(/合作单位来访交流.*模拟/).waitFor();
+  assert.equal(await page.inputValue('#visit-title'), '合作单位来访交流');
+  assert.equal(await page.inputValue('#visit-time'), `${year}-01-08T14:30`);
+  await page.getByRole('link', { name: '查看日历', exact: true }).click();
+  await page.getByText('合作单位来访交流', { exact: true }).waitFor();
+});
+
+test('UI：从工作台归档会议纪要并打开本次归档稿', { timeout: 45000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await dropFirstTaskPoll(page);
+  await page.goto(started.url);
+  await page.click('[data-quick="纪要"]');
+  await page.click('#dash-start');
+  await page.selectOption('#minutes-source', 'M2');
+  await page.getByRole('button', { name: '生成归档稿' }).click();
+  await page.locator('#run-connection').getByText(/连接恢复后会继续查询此任务/).waitFor();
+  const result = page.locator('#cmd-result');
+  const archiveLink = result.getByRole('link', { name: '在纪要中心打开' });
+  await archiveLink.waitFor();
+  const run = started.service.listRuns()[0];
+  assert.deepEqual(run.operations, []);
+  const archive = run.archives[0];
+  assert.equal(await archiveLink.getAttribute('href'), `#/minutes?archive=${archive.id}`);
+  await page.reload();
+  await archiveLink.waitFor();
+  assert.equal(await page.inputValue('#minutes-source'), 'M2');
+  await archiveLink.click();
+  const detail = page.locator('#minutes-detail');
+  await detail.getByRole('heading', { name: archive.title }).waitFor();
+  await detail.getByText('来源：M2 · 状态：已归档').waitFor();
+});
+
 test('UI：任务状态查询断线后恢复，提交只发生一次', { timeout: 45000 }, async (t) => {
   const started = await startServer({ port: 0 });
   t.after(() => started.close());
@@ -830,8 +894,14 @@ test('UI：对照收件人和同名附件改动，撤销旧挑战后核对新回
     await page.waitForSelector('#current-user:not([hidden])');
     return page;
   };
-  const file = (content) => ({ name: 'agenda.txt', mimeType: 'text/plain', buffer: Buffer.from(content) });
+  const filename = `${'research-collaboration-'.repeat(4)}agenda.txt`;
+  const recipient = `${'review-team-'.repeat(4)}@partner-example.com`;
+  const file = (content) => ({ name: filename, mimeType: 'text/plain', buffer: Buffer.from(content) });
+  const assertFits = async (locator) => {
+    assert.ok(await locator.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), '关键内容应在容器内换行');
+  };
   const employee = await logIn('emp');
+  await employee.setViewportSize({ width: 1280, height: 720 });
   await employee.click('[data-quick="外发"]');
   await employee.click('#dash-start');
   await employee.locator('#cmd-files').setInputFiles(file('Agenda: initial draft'));
@@ -843,31 +913,40 @@ test('UI：对照收件人和同名附件改动，撤销旧挑战后核对新回
   const oldChallenge = started.service.listOperations({ actor: 'emp', role: '员工' }).items[0].challenge;
   await initialResult.locator('[data-op-action="detail"]').click();
   await employee.getByText('修改收件人与附件', { exact: true }).click();
-  await employee.fill('#op-replace-to', 'review@partner-example.com');
+  await employee.fill('#op-replace-to', recipient);
   await employee.locator('#op-replace button').click();
   await employee.locator('#cmd-files').setInputFiles(file('Agenda: updated draft'));
-  assert.match(await employee.locator('#cmd-comparison').innerText(), /review@partner-example\.com/);
+  assert.ok((await employee.locator('#cmd-comparison').innerText()).includes(recipient));
   assert.equal(started.service.store.getOperation(original.operationId).state, 'rejected');
   assert.equal(started.service.challenges.get(oldChallenge.challengeId).state, 'expired');
   await employee.click('#cmd-run');
   const comparison = employee.locator('#cmd-result .mail-comparison');
   await comparison.waitFor();
-  assert.match(await comparison.innerText(), /agenda\.txt\s+已移除[\s\S]*agenda\.txt\s+已加入/);
+  const diffText = await comparison.innerText();
+  assert.ok(diffText.includes(filename));
+  assert.match(diffText, /agenda\.txt\s+已移除[\s\S]*agenda\.txt\s+已加入/);
+  await assertFits(comparison);
   await employee.reload();
   await comparison.waitFor();
-  assert.match(await comparison.innerText(), /partner@partner-example\.com[\s\S]*review@partner-example\.com/);
+  assert.ok((await comparison.innerText()).includes(recipient));
   await employee.locator('#cmd-result [data-op-action="challenge"]').click();
   await employee.click('#drawer-close-ok');
 
   const helper = await logIn('dev');
+  await helper.setViewportSize({ width: 390, height: 844 });
   await helper.locator('[data-op-action="challenge"]').click();
-  assert.match(await helper.locator('#confirm-drawer').innerText(), /review@partner-example\.com[\s\S]*agenda\.txt/);
+  const drawer = helper.locator('#confirm-drawer');
+  const confirmation = await drawer.innerText();
+  assert.ok(confirmation.includes(recipient) && confirmation.includes(filename));
+  await assertFits(drawer.locator('.drawer-body'));
+  assert.ok((await helper.locator('#drawer-approve').boundingBox()).height >= 44);
   await helper.click('#drawer-approve');
   await helper.locator('#drawer-result').getByText(/回执编号/).waitFor();
   assert.equal(await helper.locator('#drawer-result a').count(), 0);
   await employee.locator('#cmd-result').getByText('查看本任务回放').click();
   await employee.locator('.receipt-item').waitFor();
-  assert.match(await employee.locator('.receipt-item').innerText(), /review@partner-example\.com/);
+  assert.ok((await employee.locator('.receipt-item').innerText()).includes(recipient));
+  await assertFits(employee.locator('.receipt-item'));
   assert.equal(started.service.store.listOperations().filter((operation) => operation.state === 'executed').length, 1);
 });
 

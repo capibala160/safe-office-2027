@@ -265,7 +265,8 @@
       <div class="review-layout">
         <aside class="review-panel"><h3>任务步骤</h3>${renderGates(run)}<a class="btn ghost small mt12" href="${replayHref(run.runId)}">查看本任务回放</a></aside>
         <div class="review-main"><h3>草稿与执行记录</h3>
-          ${operations.length ? `<div class="stack">${operations.map((op) => `${original && op.action === 'sendExternalEmail' ? renderMailComparison(original, op) : ''}${operationCard(op)}`).join('')}</div>` : '<div class="sub-text">此任务没有生成待确认草稿。</div>'}
+          ${(run.archives || []).map((archive) => `<article class="op-card"><div class="op-head"><strong>${esc(archive.title)}</strong>${badge(archive.level)}</div><div class="btn-row mt8"><button type="button" class="btn small" data-review-doc="${esc(archive.id)}">查看归档稿</button><a class="btn ghost small" href="#/minutes?archive=${esc(encodeURIComponent(archive.id))}">在纪要中心打开</a></div></article>`).join('')}
+          ${operations.length ? `<div class="stack">${operations.map((op) => `${original && op.action === 'sendExternalEmail' ? renderMailComparison(original, op) : ''}${operationCard(op)}`).join('')}</div>` : run.archives?.length ? '' : '<div class="sub-text">此任务没有生成待确认草稿。</div>'}
           <details class="advanced mt12" ${operations.length ? '' : 'open'}><summary>查看步骤记录</summary><div class="lines mt8">${renderLines(run.lines)}</div></details>
         </div>
         <aside class="review-panel"><h3>当前待办</h3><p>${actionable ? `${actionable} 项待核对并确认` : '暂无待确认操作'}</p>
@@ -457,7 +458,7 @@
         ${evidenceNote}
         <pre class="lines">${esc(d.body)}</pre>
         ${d.originalBody && (d.originalBody !== d.body || evidence) ? `<details class="advanced mt12" ${evidence ? 'open' : ''}><summary>查看原始资料</summary><pre class="lines">${original}</pre></details>` : ''}
-        <div class="sub-text mt8">来源：${esc((d.sourceIds || []).join('、') || d.id)} · 状态：${esc(d.status)}</div>
+        <div class="sub-text mt8">来源：${esc((d.sourceIds || []).join('、') || d.id)} · 状态：${d.archived ? '已归档' : esc(d.status)}</div>
       </section>`;
     }).catch((err) => {
       container.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
@@ -589,18 +590,20 @@
       </div>`;
 
     const quickText = {
-      纪要: '把周例会纪要整理成正式稿，发到部门内网邮箱 team@corp.internal',
+      纪要: '整理周例会纪要并内部归档',
       外发: '把周例会纪要发给外部参会方 partner@partner-example.com',
       日程: '预约项目对齐会，安排来访接待日程',
       设备: '打开 3 号会议室的门锁',
     };
-    const quickSamples = { 纪要: 'normal-minutes', 外发: 'external-confirm', 设备: 'device' };
+    const quickSamples = { 外发: 'external-confirm', 设备: 'device' };
     const input = root.querySelector('#dash-command');
     root.querySelectorAll('[data-quick]').forEach((btn) => {
       btn.addEventListener('click', () => {
         input.value = quickText[btn.dataset.quick] || '';
         input.dataset.sampleId = quickSamples[btn.dataset.quick] || '';
-        c.store.pendingSample = btn.dataset.quick === '日程' ? { tools: ['scheduleMeeting'], documentIds: [] } : null;
+        const kind = btn.dataset.quick;
+        c.store.pendingSample = kind === '日程' ? { calendarTemplate: true, tools: ['scheduleMeeting'], documentIds: [] }
+          : kind === '纪要' ? { minutesSource: 'M2', tools: ['readDoc', 'summarize'], documentIds: [] } : null;
         c.store.pendingCommand = input.value;
         input.focus();
       });
@@ -721,7 +724,15 @@
   // ---------- 命令台 ----------
   async function command(root, c) {
     const b = c.store.bootstrap;
-    const sample = c.store.pendingSample || null;
+    const params = routeParams();
+    const resumedTemplate = params.get('run') ? params.get('template') : null;
+    const sample = c.store.pendingSample || (resumedTemplate === 'calendar'
+      ? { calendarTemplate: true, tools: ['scheduleMeeting'], documentIds: [] }
+      : resumedTemplate === 'minutes' ? { minutesSource: 'M2', tools: ['readDoc', 'summarize'], documentIds: [] } : null);
+    const calendarTemplate = sample?.calendarTemplate;
+    const minutesTemplate = Boolean(sample?.minutesSource);
+    const structuredTemplate = calendarTemplate || minutesTemplate;
+    const minutesDocs = minutesTemplate ? b.documents.filter((document) => document.type === 'document' && !document.deleted) : [];
     c.store.pendingSample = null;
     const pendingText = c.store.pendingCommand || '';
     c.store.pendingCommand = null;
@@ -737,17 +748,20 @@
 
     root.innerHTML = `${page('命令台', '描述任务，系统整理资料并给出计划；高危动作会先请你确认')}
       <section class="card">
-        <div class="card-head"><h2>任务</h2><span class="sub">角色 / 模型 / 近场取顶栏</span></div>
+        <div class="card-head"><h2>${calendarTemplate ? '安排来访日程' : minutesTemplate ? '会议纪要归档' : '任务'}</h2>${structuredTemplate ? '' : '<span class="sub">角色 / 模型 / 近场取顶栏</span>'}</div>
         <div class="form-grid">
-          <div class="full"><label class="label">想让 Agent 完成什么？</label><textarea class="textarea" id="cmd-text">${esc(text)}</textarea></div>
-          <div class="full"><label class="label">选择本次可用的资料</label><div class="checks" id="cmd-docs">${b.documents.map((d) => `<label class="check"><input type="checkbox" value="${esc(d.id)}" ${docs.includes(d.id) ? 'checked' : ''}> ${esc(d.id)} ${esc(d.title)} <span class="muted">${esc(d.level)}</span></label>`).join('')}</div></div>
-          <div class="full"><label class="label">附件（可选，最多 5 个，单个 ≤5MB）</label><input type="file" id="cmd-files" multiple /></div>
-          <div class="full cmd-rec">
+          ${calendarTemplate ? `<div><label class="label" for="visit-title">来访主题</label><input class="input" id="visit-title" maxlength="120" value="合作方来访交流" required></div>
+          <div><label class="label" for="visit-time">开始时间（本机时区）</label><input class="input" id="visit-time" type="datetime-local" required></div>` : ''}
+          ${minutesTemplate ? `<div class="full"><label class="label" for="minutes-source">纪要原件</label><select class="select" id="minutes-source" required><option value="">选择有权读取的文档</option>${minutesDocs.map((document) => `<option value="${esc(document.id)}" ${document.id === sample.minutesSource ? 'selected' : ''}>${esc(document.title)} · ${esc(document.level)}</option>`).join('')}</select><div class="sub-text mt8">每次生成独立归档稿，保留来源和密级。</div></div>` : ''}
+          <div class="full" ${structuredTemplate ? 'hidden' : ''}><label class="label" for="cmd-text">想让 Agent 完成什么？</label><textarea class="textarea" id="cmd-text">${esc(text)}</textarea></div>
+          <div class="full" ${structuredTemplate ? 'hidden' : ''}><label class="label">选择本次可用的资料</label><div class="checks" id="cmd-docs">${b.documents.map((d) => `<label class="check"><input type="checkbox" value="${esc(d.id)}" ${docs.includes(d.id) ? 'checked' : ''}> ${esc(d.id)} ${esc(d.title)} <span class="muted">${esc(d.level)}</span></label>`).join('')}</div></div>
+          <div class="full" ${structuredTemplate ? 'hidden' : ''}><label class="label">附件（可选，最多 5 个，单个 ≤5MB）</label><input type="file" id="cmd-files" multiple /></div>
+          <div class="full cmd-rec" ${structuredTemplate ? 'hidden' : ''}>
             <div><div class="sub-text">建议权限</div><strong id="cmd-rec-text">读取资料、生成摘要、发内网邮件</strong></div>
             <button class="btn ghost small" id="cmd-rec-apply" type="button">按建议勾选</button>
           </div>
         </div>
-        <details class="advanced" id="cmd-advanced">
+        <details class="advanced" id="cmd-advanced" ${structuredTemplate ? 'hidden' : ''}>
           <summary>高级设置（工具、域名、调用次数、执行范围）</summary>
           <div class="form-grid mt12">
             <div class="full"><label class="label">本次可用工具</label><div class="checks" id="cmd-tools">${b.tools.map((t) => `<label class="check"><input type="checkbox" value="${esc(t.name)}" ${tools.includes(t.name) ? 'checked' : ''}> ${esc(toolLabel(t.name))} <span class="muted">${esc(t.level)}</span></label>`).join('')}</div></div>
@@ -758,10 +772,9 @@
           <div class="sub-text mt8">外发、删除、打印和设备动作会转交确认；内网邮件按策略自动确认。这里的勾选只是本次授权，服务端策略始终优先。</div>
         </details>
         ${replacement ? `<div class="mt12" id="cmd-comparison" aria-live="polite">${renderMailComparison(replacement, { recipient: replacement.nextRecipient })}</div>` : ''}
-        <div class="btn-row mt12"><button class="btn" id="cmd-run">${replacement ? '生成新草稿' : '执行'}</button><button class="btn ghost" id="cmd-clear">清空</button></div>
-        <div class="hr"></div>
-        <div class="sub-text mb8">样例（点击填入表单）：</div>
-        <div class="sample-grid">${b.samples.map((s) => `<button class="sample" data-cmd-sample="${esc(s.id)}"><strong>${esc(s.name)}</strong><small>${esc(s.expect)}</small></button>`).join('')}</div>
+        <div class="btn-row mt12"><button class="btn" id="cmd-run">${calendarTemplate ? '创建日程' : minutesTemplate ? '生成归档稿' : replacement ? '生成新草稿' : '执行'}</button><button class="btn ghost" id="cmd-clear" ${structuredTemplate ? 'hidden' : ''}>清空</button>${calendarTemplate ? '<a class="btn ghost" href="#/calendar">查看日历</a>' : minutesTemplate ? '<a class="btn ghost" href="#/minutes">纪要中心</a>' : ''}</div>
+        <div class="hr" ${structuredTemplate ? 'hidden' : ''}></div>
+        ${structuredTemplate ? '' : `<div class="sub-text mb8">样例（点击填入表单）：</div><div class="sample-grid">${b.samples.map((s) => `<button class="sample" data-cmd-sample="${esc(s.id)}"><strong>${esc(s.name)}</strong><small>${esc(s.expect)}</small></button>`).join('')}</div>`}
       </section>
       <div id="cmd-result"></div>`;
 
@@ -830,8 +843,23 @@
     }
     const finish = async (snap) => {
       if (!target.isConnected) return;
+      if (resumedTemplate === 'minutes') {
+        const sourceId = /^纪要归档：([\w-]+)$/.exec(snap.command)?.[1];
+        if (sourceId) root.querySelector('#minutes-source').value = sourceId;
+      }
+      if (resumedTemplate === 'calendar') {
+        const fields = /^来访日程：([^\r\n]+)\n开始时间：(\S+)$/.exec(snap.command);
+        if (fields) {
+          const start = new Date(fields[2]);
+          if (Number.isFinite(start.getTime())) {
+            root.querySelector('#visit-title').value = fields[1];
+            const localTime = new Date(start.getTime() - start.getTimezoneOffset() * 60_000);
+            root.querySelector('#visit-time').value = localTime.toISOString().slice(0, 16);
+          }
+        }
+      }
       if (snap.status === 'error') {
-        target.innerHTML = `<div class="notice block">任务失败：${esc(snap.error || '未知错误')}</div>`;
+        target.innerHTML = `<div class="notice block" role="alert">任务失败：${esc(snap.error || '未知错误')}。请检查任务参数后再试。</div>`;
         return;
       }
       if (snap.result) {
@@ -842,10 +870,12 @@
         const original = await prior;
         if (!target.isConnected) return;
         if (comparison && fresh.some((operation) => operation.action === 'sendExternalEmail')) comparison.hidden = true;
-        target.innerHTML = renderRun({ ...snap.result, operations: fresh }, original);
+        const outcomeNotice = snap.result.cancelled
+          ? '<div class="notice info" role="status">任务已取消，后续步骤已停止。请在任务记录核对已执行的步骤。</div>'
+          : snap.result.nextAction ? `<div class="notice info" role="status">${esc(snap.result.nextAction)}</div>` : '';
+        target.innerHTML = outcomeNotice + renderRun({ ...snap.result, operations: fresh }, original);
         bindOpActions(root, c);
       }
-      if (snap.cancelRequested) toast('已取消：已执行的步骤保留记录，后续步骤未执行', 'info');
       try { await c.refreshState(); } catch { /* best effort */ }
     };
     const watch = async (runId) => {
@@ -917,12 +947,29 @@
           });
         }
         const payload = collect();
+        if (minutesTemplate) {
+          const source = root.querySelector('#minutes-source');
+          if (!source.reportValidity()) { target.innerHTML = ''; return; }
+          payload.command = `纪要归档：${source.value}`;
+          payload.documentIds = [source.value];
+        }
+        if (calendarTemplate) {
+          const titleField = root.querySelector('#visit-title');
+          const timeField = root.querySelector('#visit-time');
+          if (!titleField.reportValidity() || !timeField.reportValidity()) { target.innerHTML = ''; return; }
+          const start = new Date(timeField.value);
+          const title = titleField.value.trim();
+          if (!title) throw new Error('请输入来访主题');
+          if (Number.isNaN(start.getTime()) || start.getTime() <= Date.now()) throw new Error('请选择未来的开始时间');
+          payload.command = `来访日程：${title}\n开始时间：${start.toISOString()}`;
+        }
         if (attachments.length) payload.attachments = attachments;
         submissionUncertain = true;
         const started = await c.startRun(payload);
         submissionUncertain = false;
         if (target.isConnected) {
           const params = new URLSearchParams({ run: started.runId });
+          if (structuredTemplate) params.set('template', calendarTemplate ? 'calendar' : 'minutes');
           if (replacement && comparisonId) params.set('compare', comparisonId);
           history.replaceState(null, '', `#/command?${params}`);
         }
@@ -984,7 +1031,7 @@
   // ---------- 纪要中心 ----------
   async function minutes(root, c) {
     const docs = (await API.get('/api/documents')).items;
-    const base = docs.filter((d) => d.type === 'document');
+    const base = docs.filter((d) => d.type === 'document' && !d.deleted);
     const generated = docs.filter((d) => d.type === 'draft');
     root.innerHTML = `${page('纪要中心', '读取 → 摘要 → 正式稿；正文只在授权读取后显示')}
       <div class="grid-3">${base.map((d) => `<section class="card">
@@ -993,31 +1040,16 @@
         <div class="btn-row mt12"><button class="btn small" data-minutes="${esc(d.id)}">整理纪要</button><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button></div>
       </section>`).join('')}</div>
       ${generated.length ? `<section class="card"><div class="card-head"><h2>生成稿</h2><span class="sub">${generated.length} 份</span></div><div class="stack">${generated.map((d) => `<div class="spread"><span>${esc(d.title)} ${badge(d.level)} ${d.tainted ? '<span class="badge block">注入</span>' : ''}</span><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button></div>`).join('')}</div></section>` : ''}
-      <div id="minutes-detail"></div>
-      <div id="minutes-result"></div>`;
+      <div id="minutes-detail"></div>`;
 
     const detail = root.querySelector('#minutes-detail');
+    const archiveId = routeParams().get('archive');
+    if (archiveId) await showDocDetail(detail, c, archiveId);
     root.querySelectorAll('[data-doc]').forEach((btn) => btn.addEventListener('click', () => showDocDetail(detail, c, btn.dataset.doc)));
     root.querySelectorAll('[data-minutes]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const id = btn.dataset.minutes;
-        btn.disabled = true;
-        try {
-          const payload = id === 'M2'
-            ? {
-              command: '把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal',
-              tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M2'],
-            }
-            : {
-              command: '把昨天的预算评审会纪要整理成正式版，发给 team@corp.internal',
-              tools: ['readDoc', 'summarize', 'sendInternalEmail'], documentIds: ['M1', 'M2', 'M3'],
-            };
-          const run = await c.runCommand({ ...payload, role: c.store.role, nearfieldOnline: c.store.nearfieldOnline });
-          root.querySelector('#minutes-result').innerHTML = renderRun(run);
-          bindOpActions(root, c);
-          await c.refreshState();
-        } catch (err) { toast(c.errorText(err), 'error'); }
-        finally { btn.disabled = false; }
+      btn.addEventListener('click', () => {
+        c.store.pendingSample = { minutesSource: btn.dataset.minutes, tools: ['readDoc', 'summarize'], documentIds: [] };
+        c.navigate('command');
       });
     });
   }
@@ -1151,28 +1183,17 @@
   // ---------- 日历 ----------
   async function calendar(root, c) {
     const items = (await API.get('/api/calendar')).items;
-    root.innerHTML = `${page('日历', '预约动作由 Agent 执行；Mock 计划为固定演示数据')}
+    const labels = { written: '已生成 .ics', caldav: '已写入 CalDAV', simulated: '模拟', failed: '写入失败' };
+    root.innerHTML = `${page('日历', '查看预约记录与写入结果')}
       <section class="card">
         <div class="card-head"><h2>日程</h2><span class="sub">${items.length} 条</span></div>
-        <div class="stack">${items.map((e) => `<div class="spread"><div><strong>${esc(e.title)}</strong><div class="sub-text">${esc(e.at)} · ${e.source === 'seed' ? '种子数据' : (e.real ? `Agent 预约 · .ics 已落盘` : 'Agent 预约 · 模拟')}${e.file ? ` · ${esc(e.file)}` : ''}</div></div><span class="badge ${e.real ? 'pass' : 'info'}">${esc(e.source === 'seed' ? e.source : (e.real ? '已落盘' : '模拟'))}</span></div>`).join('')}</div>
-        <div class="btn-row mt12"><button class="btn" id="cal-run">预约项目对齐会</button><button class="btn ghost" id="cal-refresh">刷新日程</button></div>
-        <div class="sub-text mt8">注意：MockLLM 的预约计划固定为“项目对齐会 / 2026-10-20 14:00”，用于演示。</div>
-      </section>
-      <div id="cal-result"></div>`;
+        <div class="stack">${items.map((e) => `<div class="spread"><div><strong>${esc(e.title)}</strong><div class="sub-text">${esc(e.at?.endsWith('Z') ? dateTime(e.at) : e.at)}${e.file ? ` · ${esc(e.file)}` : ''}</div></div><span class="badge ${e.real ? 'pass' : e.status === 'failed' ? 'block' : 'info'}">${esc(e.source === 'seed' ? '示例' : labels[e.status] || '记录')}</span></div>`).join('')}</div>
+        <div class="btn-row mt12"><button class="btn" id="cal-run">安排来访日程</button><button class="btn ghost" id="cal-refresh">刷新日程</button></div>
+      </section>`;
     root.querySelector('#cal-refresh').addEventListener('click', () => c.rerender());
-    root.querySelector('#cal-run').addEventListener('click', async (ev) => {
-      const btn = ev.currentTarget;
-      btn.disabled = true;
-      try {
-        const run = await c.runCommand({
-          command: '预约下周一的项目对齐会', role: c.store.role,
-          tools: ['scheduleMeeting'], documentIds: [], nearfieldOnline: c.store.nearfieldOnline,
-        });
-        root.querySelector('#cal-result').innerHTML = renderRun(run);
-        bindOpActions(root, c);
-        await c.refreshState();
-      } catch (err) { toast(c.errorText(err), 'error'); }
-      finally { btn.disabled = false; }
+    root.querySelector('#cal-run').addEventListener('click', () => {
+      c.store.pendingSample = { calendarTemplate: true, tools: ['scheduleMeeting'], documentIds: [] };
+      c.navigate('command');
     });
   }
 

@@ -462,6 +462,8 @@ details.advanced > summary { cursor: pointer; color: var(--sub); font-size: 12.5
 .review-panel summary, .review-source summary { cursor: pointer; }
 .review-source:not(:empty) { margin-top: 14px; }
 .review-workspace .op-meta, #operation-detail .mono, .confirm-target strong { overflow-wrap: anywhere; }
+.op-card, .confirm-target { min-width: 0; overflow-wrap: anywhere; }
+.op-card .op-meta { font-size: 14px; line-height: 1.55; }
 .confirm-target { padding: 10px; background: var(--info-bg); border-radius: 8px; }
 .review-files { margin: 0; padding-inline-start: 18px; overflow-wrap: anywhere; }
 .receipt-list { display: grid; gap: 10px; }
@@ -479,6 +481,7 @@ details.advanced > summary { cursor: pointer; color: var(--sub); font-size: 12.5
 .compare-panel h4 { margin: 0 0 8px; }
 @media (max-width: 620px) {
   .compare-grid { grid-template-columns: minmax(0, 1fr); }
+  .review-workspace .op-actions .btn, #confirm-drawer .btn { min-height: 44px; }
 }
 @media (min-width: 1150px) {
   .review-layout { grid-template-columns: minmax(145px, 1fr) minmax(0, 2.8fr) minmax(175px, 1.2fr); }

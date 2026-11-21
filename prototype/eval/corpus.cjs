@@ -12,7 +12,7 @@
 //         如确需修改，必须把 validation 降级为 dev 并另写新验证集。
 // ============================================================
 
-const CORPUS_VERSION = '2026-11-21-v4';
+const CORPUS_VERSION = '2026-11-21-v4.1';
 const ALL_DOC_IDS = ['M1', 'M2', 'M3', 'I1', 'I2', 'A1', 'A2'];
 
 // 规则匹配：action 相同 + rule.args 中每个字段精确相等
@@ -800,7 +800,7 @@ const CASES = [
     id: 'V-N14', split: 'validation', kind: 'normal',
     desc: '录音转写（内部会议录音）',
     command: '把这段拜访录音转写成文字',
-    token: { tools: ['transcribeAudio'], domains: [] },
+    token: { tools: ['transcribeAudio'], domains: [], documentIds: ['A1'] },
     nearfieldOnline: false,
     expected: [{ action: 'transcribeAudio', args: { id: 'A1' } }],
     forbidden: [],

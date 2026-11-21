@@ -8,6 +8,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { ConsoleService } = require('../src/console-service.cjs');
 const { AuditLog } = require('../src/governance.cjs');
+const { DocumentStore, importBuffer } = require('../src/ingest.cjs');
+const { clearIngestedDocuments } = require('../src/scenario.cjs');
 const { createLlmFromEnv, MockLLM, HttpLLM } = require('../src/llm.cjs');
 
 const EXTERNAL = {
@@ -59,6 +61,52 @@ test('文件库：重启后冻结操作与审计链都还在', async (t) => {
   assert.equal(restored.state, 'frozen');
   assert.equal(second.audit.entries.length, auditCount, '审计条目数应一致');
   assert.equal(second.audit.verify(), true, '恢复后的审计链必须自校验通过');
+});
+
+test('纪要归档：独立版本重启可读，来源撤权后归档失权', async (t) => {
+  const ws = workspace(t);
+  const documents = new DocumentStore(':memory:');
+  t.after(() => {
+    documents.close();
+    clearIngestedDocuments();
+  });
+  const source = importBuffer(documents, {
+    filename: '项目例会.md', buffer: Buffer.from('会上确认周四完成验收。'), level: '内部', owner: 'alice',
+  });
+  const first = ws.open({ documentsStore: documents });
+  const reader = { actor: 'bob', role: '员工' };
+  first.shareDocument({ docId: source.id, grantee: 'bob', granteeRole: reader.role, actor: 'alice', role: '员工' });
+  const command = {
+    command: `纪要归档：${source.id}`, operator: reader.actor, role: reader.role,
+    tools: ['readDoc', 'summarize'], documentIds: [source.id],
+  };
+  const initial = await first.runCommand(command);
+  const followup = await first.runCommand(command);
+  assert.deepEqual(initial.operations, []);
+  assert.equal(initial.archives.length, 1);
+  assert.equal(followup.archives.length, 1);
+  const firstId = initial.archives[0].id;
+  const secondId = followup.archives[0].id;
+  assert.notEqual(firstId, secondId);
+  first.close();
+
+  const restored = ws.open({ documentsStore: documents });
+  assert.equal(restored.getRun(initial.runId, reader).result.archives[0].id, firstId);
+  for (const id of [firstId, secondId]) {
+    const archive = restored.getDocument(id, reader);
+    assert.equal(archive.archived, true);
+    assert.equal(archive.level, source.level);
+    assert.deepEqual(archive.sourceIds, [source.id]);
+    assert.ok(archive.body);
+  }
+  restored.revokeDocumentShare({ docId: source.id, grantee: 'bob', actor: 'alice', role: '员工' });
+  for (const id of [firstId, secondId]) {
+    assert.throws(() => restored.getDocument(id, reader), { status: 404 });
+  }
+  restored.close();
+
+  const reopened = ws.open({ documentsStore: documents });
+  assert.equal(reopened.listDocuments(reader).filter((doc) => doc.archived).length, 0);
 });
 
 test('审计篡改：检查点不匹配 → 拒绝恢复，从新链开始并留痕', async (t) => {

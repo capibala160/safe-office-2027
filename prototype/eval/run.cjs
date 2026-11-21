@@ -22,7 +22,7 @@ const { ABLATION_IDS, parseAblationList, runAblations } = require('./ablation.cj
 const { printConsole, writeEvalReport, writeEvalJson, buildMeta } = require('./report.cjs');
 
 function parseArgs(argv) {
-  const opts = { llm: 'mock', repeat: 1, tiers: TIERS.slice(), split: 'all', resume: false, ablate: null, out: join(__dirname, '..', 'out', 'eval') };
+  const opts = { llm: 'mock', repeat: 1, tiers: TIERS.slice(), split: 'all', kind: 'all', resume: false, ablate: null, out: join(__dirname, '..', 'out', 'eval') };
   for (const arg of argv.slice(2)) {
     const m = arg.match(/^--([^=]+)=(.*)$/);
     if (!m) {
@@ -37,6 +37,7 @@ function parseArgs(argv) {
     else if (key === 'repeat') opts.repeat = Math.max(1, Number.parseInt(value, 10) || 1);
     else if (key === 'tiers') opts.tiers = value.split(',').map((s) => s.trim()).filter(Boolean);
     else if (key === 'split') opts.split = value;
+    else if (key === 'kind') opts.kind = value;
     else if (key === 'ablate') opts.ablate = value || 'all';
     else if (key === 'out') opts.out = resolve(value);
     else throw new Error(`无法识别的参数：--${key}`);
@@ -46,6 +47,7 @@ function parseArgs(argv) {
     if (!TIERS.includes(tier)) throw new Error(`未知档位：${tier}（可选 ${TIERS.join('/')}）`);
   }
   if (!['all', 'dev', 'validation'].includes(opts.split)) throw new Error(`未知数据集：${opts.split}`);
+  if (!['all', 'normal'].includes(opts.kind)) throw new Error(`未知用例类型：${opts.kind}`);
   return opts;
 }
 
@@ -56,6 +58,7 @@ const HELP = `
   --repeat=N             每条用例重复轮数（真实模型建议 ≥3，默认 1）
   --tiers=a,b,c          档位：none / prompt / full（默认全部）
   --split=all|dev|validation  数据集（默认 all；消融跑分同样按此筛选）
+  --kind=all|normal      只跑正常任务时选 normal（默认 all）
   --ablate[=all|id,id]   追加单层消融：完整网关分别关掉一层再跑
                          可选：${ABLATION_IDS.join('/')}
   --out=DIR              输出目录（默认 prototype/out/eval）
@@ -71,7 +74,8 @@ const HELP = `
     return;
   }
 
-  const cases = opts.split === 'all' ? CASES : CASES.filter((c) => c.split === opts.split);
+  const cases = CASES.filter((entry) => (opts.split === 'all' || entry.split === opts.split)
+    && (opts.kind === 'all' || entry.kind === opts.kind));
   if (cases.length === 0) throw new Error('筛选后没有可用用例');
 
   // 消融必须有完整网关基线；没选 full 就自动补上（只多跑一遍基线，不改变其它档位）
@@ -87,8 +91,10 @@ const HELP = `
   const meta = buildMeta({
     llmKind: kind, modelName, repeats: opts.repeat, corpusVersion: CORPUS_VERSION, cases, split: opts.split,
   });
+  const fingerprintSplit = opts.kind === 'all' ? opts.split : `${opts.split}:${opts.kind}`;
+  meta.caseKind = opts.kind;
   meta.fingerprint = experimentFingerprint({
-    modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: opts.split,
+    modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: fingerprintSplit,
     tiers, repeats: opts.repeat,
   });
   // 逐条落盘：真实模型一轮几十分钟，断电/崩溃时 partial 文件仍可用
@@ -126,7 +132,7 @@ const HELP = `
       ...meta,
       ablation: ablationIds,
       fingerprint: experimentFingerprint({
-        modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: opts.split,
+        modelName, llmKind: kind, corpusVersion: CORPUS_VERSION, split: fingerprintSplit,
         tiers: ['full'], repeats: opts.repeat, ablation: ablationIds,
       }),
     };

@@ -47,7 +47,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.54.2';
+const VERSION = '0.55.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -844,6 +844,14 @@ class ConsoleService {
           if (Array.isArray(saved.business.calendarSeed)) this.business.calendarSeed = saved.business.calendarSeed;
         }
         if (Array.isArray(saved.runs)) this.runs = saved.runs.slice(0, 50);
+        for (const archive of saved.minutesArchives || []) {
+          if (!archive.archived || !archive.id?.startsWith('archive_')) continue;
+          if (!archive.sourceIds?.every((/** @type {string} */ id) => {
+            const source = getDocumentById(id);
+            return source && !this.business.deletedDocIds.has(id) && this._docRowVisible(source, archive.owner, null);
+          })) continue;
+          this.runtime.knowledge[archive.id] = archive;
+        }
         if (saved.autoMode) this.autoMode = saved.autoMode;
       }
       // 重启后 seq 从历史最大编号继续：否则新的 RUN-1 会和已落库的 RUN-1 撞车，
@@ -885,6 +893,7 @@ class ConsoleService {
           deviceStates: this.business.deviceStates,
         },
         runs: this.runs.slice(0, 50),
+        minutesArchives: Object.values(this.runtime.knowledge).filter((document) => document.archived),
         autoMode: this.autoMode,
       });
     } catch { /* 落盘失败不能影响主流程 */ }
@@ -1823,7 +1832,7 @@ class ConsoleService {
       items.push({
         id: k.id, type: k.generated ? 'draft' : k.transcript ? 'transcript' : 'ocr',
         title: k.title, level: k.level, status: 'available', deleted: false,
-        tainted: !!k.tainted, generated: !!k.generated, owner: k.owner || '',
+        tainted: !!k.tainted, generated: !!k.generated, archived: !!k.archived, owner: k.owner || '',
       });
     }
     return items;
@@ -1848,6 +1857,7 @@ class ConsoleService {
         documentHash: sha256Hex(knowledge.body || ''),
         tainted: !!knowledge.tainted,
         generated: !!knowledge.generated,
+        archived: !!knowledge.archived,
         transcript: !!knowledge.transcript,
         ocr: !!knowledge.ocr,
         sourceIds: knowledge.sourceIds || [],
@@ -1950,6 +1960,7 @@ class ConsoleService {
     // 撤销后对方已读进知识库的副本一并清除（含由该文档派生的摘要/正式稿），
     // 否则"撤销"只是挡住列表，正文仍能从这里读到。
     const purged = this._purgeKnowledgeFor(doc.id, target);
+    if (purged) this._persistConsoleState();
     this._withAuditActor(actor, () => {
       this.audit.append('取消共享', {
         docId: doc.id, owner: doc.owner || '', grantee: target, purged,
@@ -2001,7 +2012,8 @@ class ConsoleService {
           title: (e.detail.args && e.detail.args.title) || '预约会议',
           at: (e.detail.args && e.detail.args.at) || '',
           source: 'agent',
-          real: !!fileMatch,                       // v0.37：是否真写了 .ics
+          real: !!fileMatch || e.detail.calendarStatus === 'caldav',
+          status: e.detail.calendarStatus || (fileMatch ? 'written' : (outcome.startsWith('会议预约失败') ? 'failed' : 'simulated')),
           file: fileMatch ? fileMatch[1].trim() : null,
           seq: e.seq,
         };
@@ -2105,7 +2117,7 @@ class ConsoleService {
       });
     }).then((run) => {
       const pending = (run.operations || []).filter((/** @type {any} */ o) => o.state === 'frozen').length;
-      live.stage = pending ? '待确认' : '完成';
+      live.stage = run.cancelled ? '已取消' : pending ? '待确认' : '完成';
       live.status = 'done';
       live.pendingOperations = pending;
       live.result = run;
@@ -2163,7 +2175,7 @@ class ConsoleService {
       runId,
       command: done.command,
       role: done.role,
-      stage: pending ? '待确认' : '完成',
+      stage: done.cancelled ? '已取消' : pending ? '待确认' : '完成',
       status: 'done',
       cancelRequested: false,
       pendingOperations: pending,
@@ -2596,6 +2608,7 @@ class ConsoleService {
         this.store.saveOperationMeta(operationId, meta);
       }
     }
+    const runEntries = /** @type {import('./governance.cjs').AuditEntry[]} */ (this.audit.entries.slice(auditStart, auditEnd));
     const run = {
       runId,
       operator,
@@ -2608,6 +2621,12 @@ class ConsoleService {
       lines,
       gateSummary: this._gateSummary(auditStart, auditEnd),
       riskEvidence: this._runRiskEvidence(auditStart, auditEnd),
+      cancelled: runEntries.some((entry) => entry.kind === '任务取消'),
+      nextAction: runEntries.find((entry) => entry.kind === '计划未生成')?.detail.reason
+        || (runEntries.some((entry) => entry.kind === '规划失败' || entry.kind === '任务中止')
+          ? '任务遇到错误。请在步骤记录核对已执行动作与失败原因，再决定是否重试。' : undefined),
+      archives: runEntries.filter((entry) => entry.kind === '生成稿' && entry.detail?.archived)
+        .map((entry) => ({ id: entry.detail.id, title: entry.detail.title, level: entry.detail.level })),
       operations,
       risk: { score: this.risk.score, threshold: this.risk.threshold, frozen: this.risk.frozen },
       audit: { from: auditStart + 1, to: auditEnd, count: auditEnd - auditStart, verified: this.audit.verify() },
@@ -4444,6 +4463,9 @@ class ConsoleService {
       unregisterDocument(operation.recipient);
       this.business.deletedDocIds.add(operation.recipient);
       delete this.runtime.knowledge[operation.recipient];
+      for (const [id, document] of Object.entries(this.runtime.knowledge)) {
+        if (document.archived && document.sourceIds.includes(operation.recipient)) delete this.runtime.knowledge[id];
+      }
       return;
     }
     if (operation.protocolAction === 3) {

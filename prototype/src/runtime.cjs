@@ -25,6 +25,7 @@ const { ConfirmationService, digest } = require('./confirmation.cjs');
 const { classifyModelFault, asModelFault } = require('./faults.cjs');
 const { verifyAgentManifest } = require('./agents.cjs');
 const { sha256Hex } = require('./operation.cjs');
+const { randomUUID } = require('node:crypto');
 
 /* 密级排序：未知密级按最高处理（fail-closed） */
 /** @type {Record<string, number>} */
@@ -337,7 +338,7 @@ class AgentRuntime {
         settle('planning-failed');
         return lines;
       }
-      const { steps, findings, notes, contextInfo } = plan;
+      const { steps, findings, notes, contextInfo, emptyPlanReason } = plan;
       if (contextInfo && (contextInfo.modelLocation === 'cloud' || contextInfo.withheld.length > 0)) {
         lines.push(`  〔模型边界〕规划走云侧模型：送入 [${contextInfo.sent.join(', ') || '无'}]，` +
           `机密 ${contextInfo.withheld.length} 篇正文已分流（不送云，仅本地处理）——数据流向已入审计`);
@@ -350,6 +351,11 @@ class AgentRuntime {
       }
       if (findings.length > 0) {
         lines.push(`  〔计划〕模型输出 ${findings.length + steps.length} 步 → 校验后 ${steps.length} 步`);
+      }
+      if (!steps.length && !findings.length) {
+        const reason = emptyPlanReason || '没有生成可执行步骤。请明确要处理的资料和动作，再提交任务。';
+        this.audit.append('计划未生成', { reason });
+        lines.push(`  〔计划〕${reason}`);
       }
 
       // 执行：任一步骤抛出模型故障（如生成阶段超时）→ 立即中止剩余步骤（fail-closed）
@@ -701,6 +707,7 @@ class AgentRuntime {
 
     // —— 执行（模拟副作用）——
     let effect = '';
+    let calendarStatus = '';
     if (action === 'summarize') {
       const doc = this.knowledge[args.of];
       if (!doc) {
@@ -733,20 +740,23 @@ class AgentRuntime {
           this.audit.append('闸5拒绝', { n, action, reasons: oc.reasons });
           effect = `生成内容未通过输出检测（${oc.reasons.join('、')}）→ 已拦截，不输出`;
         } else {
-          const id = `draft_${doc.id}`;
+          const archived = ctx.command?.startsWith('纪要归档：') || false;
+          const id = archived ? `archive_${randomUUID()}` : `draft_${doc.id}`;
+          const title = `${doc.title}（${archived ? '归档稿' : '正式稿'}）`;
           this.knowledge[id] = {
-            id, title: `${doc.title}（正式稿）`, level: inheritedLevel,
+            id, title, level: inheritedLevel,
             body: oc.content, cleaned: oc.content,
-            sourceIds: prov.sources, generated: true,
+            sourceIds: prov.sources, generated: true, archived,
             tainted: Boolean(doc.tainted || prov.tainted),
             transforms: [...prov.transforms, 'summarize'],
             owner: ctx.operator || '',
           };
           this.audit.append('生成稿', {
             id, sourceIds: prov.sources, level: inheritedLevel,
+            ...(archived ? { archived, title } : {}),
             tainted: this.knowledge[id].tainted, transforms: this.knowledge[id].transforms,
           });
-          effect = `生成正式稿 ${id}《${doc.title}》`;
+          effect = archived ? `生成归档稿《${title}》` : `生成正式稿 ${id}《${doc.title}》`;
         }
       }
     } else if (action === 'sendInternalEmail' || action === 'sendExternalEmail') {
@@ -768,18 +778,26 @@ class AgentRuntime {
             description: '由安全智慧办公 Agent 预约（已经过策略与沙箱检查）',
           });
           if (written && written.mode === 'written') {
+            calendarStatus = 'written';
             effect = `会议「${args.title}」已预约（${args.at}）→ .ics 已写入 ${written.file}`;
             this.audit.append('日历写入', { n, file: written.file, uid: written.uid });
+          } else if (written && written.mode === 'caldav') {
+            calendarStatus = 'caldav';
+            effect = `会议「${args.title}」（${args.at}）已写入 CalDAV（HTTP ${written.status}）`;
+            this.audit.append('日历写入', { n, mode: 'caldav', status: written.status });
           } else {
+            calendarStatus = 'simulated';
             effect = `会议「${args.title}」已预约（${args.at}）〔模拟：未配置日历目录〕`;
           }
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
+          calendarStatus = 'failed';
           this.risk.add(10, '日历写入失败');
           this.audit.append('执行失败', { n, action, reason: err.message });
           effect = `会议预约失败：${err.message}（未伪造成功）`;
         }
       } else {
-        effect = `会议「${args.title}」已预约（${args.at}）`;
+        calendarStatus = 'simulated';
+        effect = `会议「${args.title}」已预约（${args.at}）〔模拟〕`;
       }
     } else if (action === 'readContact') {
       const c = /** @type {Record<string, any>} */ (CONTACTS)[args.name];
@@ -867,7 +885,7 @@ class AgentRuntime {
     }
 
     // args 一并入审计：调用链审计需要"对谁/对什么"的完整证据（评测 harness 也据此计分）
-    this.audit.append('执行', { n, action, args, outcome: effect });
+    this.audit.append('执行', { n, action, args, outcome: effect, ...(calendarStatus ? { calendarStatus } : {}) });
     return `  [${n}] ${action} ✓ ${effect}${confirmNote}`;
   }
 }

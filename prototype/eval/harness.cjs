@@ -166,7 +166,7 @@ async function runCase(def, tier, llm, { disabledLayers = [] } = {}) {
       const rt = new AgentRuntime({ policy, audit, risk, planner, perf, disabledLayers: layers });
       const token = new CapabilityToken({
         tools: def.token.tools,
-        documentIds: ALL_DOC_IDS,
+        documentIds: def.token.documentIds || ALL_DOC_IDS,
         allowedExternalDomains: def.token.domains || [],
         maxCalls: def.token.maxCalls === undefined ? Infinity : def.token.maxCalls,
         issuedFor: def.command,

