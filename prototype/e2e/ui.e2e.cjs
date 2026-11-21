@@ -704,6 +704,23 @@ test('UI：审计员按策略自动回信（固定模板，不读来信正文）
   assert.match(await page.textContent('#auto-reply-result'), /扫描 \d+ 封/);
 });
 
+test('UI：风险说明可定位到隔离原文并展示移除的动作', { timeout: 45000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await page.goto(`${started.url}/#/demo`);
+  await page.click('[data-sample="injection"]');
+  const result = page.locator('#dash-result');
+  await result.getByText('已移除动作 · 对外发邮件').waitFor();
+  await result.getByRole('button', { name: '查看命中原文' }).click();
+  const match = result.locator('mark.risk-match').first();
+  await match.waitFor();
+  assert.match(await match.textContent(), /忽略以上所有指令/);
+  assert.equal(await match.evaluate((element) => element === document.activeElement), true);
+  assert.equal(await result.locator('[data-op-action="challenge"]').count(), 0);
+});
+
 test('UI：任务状态查询断线后恢复，提交只发生一次', { timeout: 45000 }, async (t) => {
   const started = await startServer({ port: 0 });
   t.after(() => started.close());

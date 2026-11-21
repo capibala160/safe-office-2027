@@ -47,7 +47,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.54.1';
+const VERSION = '0.54.2';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -1845,6 +1845,7 @@ class ConsoleService {
         level: knowledge.level,
         body: knowledge.cleaned || knowledge.body || '',
         originalBody: knowledge.body || '',
+        documentHash: sha256Hex(knowledge.body || ''),
         tainted: !!knowledge.tainted,
         generated: !!knowledge.generated,
         transcript: !!knowledge.transcript,
@@ -2606,6 +2607,7 @@ class ConsoleService {
       deniedDocs,
       lines,
       gateSummary: this._gateSummary(auditStart, auditEnd),
+      riskEvidence: this._runRiskEvidence(auditStart, auditEnd),
       operations,
       risk: { score: this.risk.score, threshold: this.risk.threshold, frozen: this.risk.frozen },
       audit: { from: auditStart + 1, to: auditEnd, count: auditEnd - auditStart, verified: this.audit.verify() },
@@ -2755,7 +2757,7 @@ class ConsoleService {
       { key: 'exec', label: '执行 / 闭环', kinds: ['执行', '读入文档', '图片识别', '转写', '生成稿', '快照', '快照回滚', '自动批准'] },
     ];
     const BLOCK = new Set(['规划失败', '规划拒绝', '闸2拒绝', '策略拒绝', 'Agent拒绝', '沙箱拒绝', '数据访问拒绝', '目标授权拒绝', '共享拒绝', '打印拒绝', '闸3拒绝', '闸5拒绝', '闸4拒绝', '冻结拦截', '转交失败']);
-    const WARN = new Set(['闸3脱敏', '闸5脱敏', '计划校正']);
+    const WARN = new Set(['闸1触发', '闸3脱敏', '闸5脱敏', '计划校正']);
     const DEFER = new Set(['转交确认闭环']);
     return stages.map((stage) => {
       const items = entries.filter((/** @type {any} */ e) => stage.kinds.includes(e.kind));
@@ -2772,6 +2774,25 @@ class ConsoleService {
       });
       return { key: stage.key, label: stage.label, status, count: items.length, notes };
     });
+  }
+
+  /** @param {number} from @param {number} to */
+  _runRiskEvidence(from, to) {
+    const items = [];
+    for (const entry of this.audit.entries.slice(from, to)) {
+      const detail = entry.detail || {};
+      if (entry.kind === '闸1触发' && typeof detail.docId === 'string') {
+        items.push({
+          type: 'source', docId: detail.docId, documentHash: detail.documentHash,
+          ranges: detail.ranges, reason: (detail.reasons || []).join('、'),
+        });
+      }
+      if (entry.kind === '计划校验' && detail.level === 'block') {
+        items.push({ type: 'removed', action: detail.step?.action, reason: detail.reason });
+      }
+      if (items.length === 20) break;
+    }
+    return items;
   }
 
   // ---------- 操作 ----------

@@ -28,21 +28,27 @@ const INJECTION_PATTERNS = [
 
 // 把外部内容按"句子"过筛：命中可疑模式的句子 → 隔离，不再当指令看待
 // 一句话可同时命中多个模式——收集全部命中（检测理由要写全，别只报第一条）
-/** @param {string} text @returns {{safe:boolean, reasons:string[], cleaned:string}} */
+/** @param {string} text @returns {{safe:boolean, reasons:string[], cleaned:string, ranges: Array<{start:number, end:number}>}} */
 function sanitizeInput(text) {
   const sentences = String(text).split(/(?<=[。！？\n])/);
   const reasons = new Set();
+  /** @type {Array<{start:number, end:number}>} */
+  const ranges = [];
+  let offset = 0;
   const cleaned = sentences
     .map((s) => {
+      const start = offset;
+      offset += s.length;
       const hits = INJECTION_PATTERNS.filter((p) => p.re.test(s));
       if (hits.length > 0) {
+        if (ranges.length < 20) ranges.push({ start, end: offset });
         for (const h of hits) reasons.add(h.label);
         return '【⚠ 已隔离：疑似注入指令，仅作数据展示】';
       }
       return s;
     })
     .join('');
-  return { safe: reasons.size === 0, reasons: [...reasons], cleaned };
+  return { safe: reasons.size === 0, reasons: [...reasons], cleaned, ranges };
 }
 
 // ---------- 闸2 · 权限令牌（任务级最小权限） ----------

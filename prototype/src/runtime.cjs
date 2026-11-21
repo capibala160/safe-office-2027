@@ -24,6 +24,7 @@ const { prepareModelInput } = require('./model-boundary.cjs');
 const { ConfirmationService, digest } = require('./confirmation.cjs');
 const { classifyModelFault, asModelFault } = require('./faults.cjs');
 const { verifyAgentManifest } = require('./agents.cjs');
+const { sha256Hex } = require('./operation.cjs');
 
 /* 密级排序：未知密级按最高处理（fail-closed） */
 /** @type {Record<string, number>} */
@@ -508,7 +509,10 @@ class AgentRuntime {
       this.audit.append('读入文档', { docId: doc.id, level: doc.level, tainted: !san.safe });
       if (!san.safe) {
         this.risk.add(25, `文档「${doc.title}」检出注入并隔离：${san.reasons.join('、')}`);
-        this.audit.append('闸1触发', { docId: doc.id, level: doc.level, reasons: san.reasons });
+        this.audit.append('闸1触发', {
+          docId: doc.id, level: doc.level, reasons: san.reasons,
+          documentHash: sha256Hex(doc.body), ranges: san.ranges,
+        });
         return `  [${n}] readDoc(${doc.id}) ⚠️ 检出注入并隔离（${san.reasons.join('、')}）→ 内容仅作数据展示`;
       }
       return `  [${n}] readDoc(${doc.id}) ✓（密级=${doc.level}）`;

@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.54.1');
+  assert.equal(bootstrap.state.version, '0.54.2');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -433,6 +433,12 @@ test('注入：计划校验移除外部发送；机密正式稿内网发送被�
   assert.ok(run.lines.some((l) => l.includes('仅出现于外部材料')));
   assert.ok(run.lines.some((l) => l.includes('闸3拒绝')));
   assert.ok(!run.lines.some((l) => l.includes('sendExternalEmail') && l.includes('⇥')));
+  const source = run.riskEvidence.find((item) => item.type === 'source' && item.docId === 'M3');
+  const document = service.getDocument('M3');
+  assert.equal(source.documentHash, document.documentHash);
+  assert.ok(source.ranges.every(({ start, end }) => end > start && end <= document.originalBody.length));
+  assert.ok(source.ranges.length > 0);
+  assert.ok(run.riskEvidence.some((item) => item.type === 'removed' && item.action === 'sendExternalEmail'));
 });
 
 test('风险冻结：高危在转交前被拦，无新操作', async (t) => {

@@ -259,6 +259,7 @@
     const operations = run.operations || [];
     const actionable = operations.filter((operation) => operation.state === 'frozen').length;
     const attention = (run.gateSummary || []).filter((gate) => ['block', 'warn'].includes(gate.status));
+    const evidence = run.riskEvidence || [];
     return `<section class="card review-workspace" aria-label="执行结果">
       <div class="card-head"><h2>执行结果</h2><span class="sub">${esc(run.runId)} · 风险 ${esc(run.risk.score)}/${esc(run.risk.threshold)}${run.risk.frozen ? ' · 已冻结' : ''}</span></div>
       <div class="review-layout">
@@ -269,6 +270,9 @@
         </div>
         <aside class="review-panel"><h3>当前待办</h3><p>${actionable ? `${actionable} 项待核对并确认` : '暂无待确认操作'}</p>
           ${attention.length ? `<details open><summary>为什么有步骤被暂停或调整？</summary><ul class="list">${attention.map((gate) => `<li><strong>${esc(gate.label)}</strong><div>${esc((gate.notes || []).join('；') || '见步骤记录')}</div></li>`).join('')}</ul></details>` : ''}
+          ${evidence.length ? `<ul class="list risk-evidence">${evidence.map((item) => item.type === 'source'
+            ? `<li><strong>已隔离资料 ${esc(item.docId)}</strong><div>${esc(item.reason)}</div><button type="button" class="btn ghost small" data-review-doc="${esc(item.docId)}" data-risk-evidence="${esc(JSON.stringify({ documentHash: item.documentHash, ranges: item.ranges }))}">查看命中原文</button></li>`
+            : `<li><strong>已移除动作 · ${esc(toolLabel(item.action) || '未识别动作')}</strong><div>${esc(item.reason)}</div></li>`).join('')}</ul>` : ''}
           ${run.documentIds?.length ? `<h4>任务资料</h4><div class="btn-row">${run.documentIds.map((id) => `<button type="button" class="btn ghost small" data-review-doc="${esc(id)}">查看 ${esc(id)}</button>`).join('')}</div>` : ''}
         </aside>
       </div>
@@ -352,11 +356,20 @@
 
   function bindOpActions(root, c) {
     root.querySelectorAll('[data-review-doc]').forEach((button) => {
-      button.onclick = () => {
+      button.onclick = async () => {
         const source = button.closest('.review-workspace').querySelector('[data-review-source]');
-        source.textContent = '正在读取资料…';
-        showDocDetail(source, c, button.dataset.reviewDoc);
-        source.scrollIntoView({ block: 'nearest' });
+        const destination = document.createElement('div');
+        destination.textContent = '正在读取资料…';
+        source.replaceChildren(destination);
+        const evidence = button.dataset.riskEvidence ? JSON.parse(button.dataset.riskEvidence) : null;
+        await showDocDetail(destination, c, button.dataset.reviewDoc, evidence);
+        if (!destination.isConnected) return;
+        const match = destination.querySelector('mark') || destination.querySelector('h2, .notice');
+        if (match) {
+          match.tabIndex = -1;
+          match.focus({ preventScroll: true });
+          match.scrollIntoView({ block: 'center' });
+        }
       };
     });
     root.querySelectorAll('[data-op-action]').forEach((btn) => {
@@ -417,18 +430,33 @@
     </div>`;
   }
 
-  function showDocDetail(container, c, id) {
-    API.get(`/api/documents/${encodeURIComponent(id)}`).then((res) => {
+  function showDocDetail(container, c, id, evidence = null) {
+    return API.get(`/api/documents/${encodeURIComponent(id)}`).then((res) => {
       const d = res.document;
       if (!d) { container.innerHTML = ''; return; }
       if (!d.body) {
         container.innerHTML = `<section class="card"><div class="card-head"><h2>${esc(d.title)}</h2>${badge(d.level)}</div><div class="notice info">${esc(d.note || '正文尚未进入授权知识库。')}</div></section>`;
         return;
       }
+      let original = esc(d.originalBody || '');
+      let evidenceNote = '';
+      if (evidence && evidence.documentHash && evidence.documentHash === d.documentHash && evidence.ranges?.length) {
+        let end = 0;
+        original = '';
+        for (const range of evidence.ranges) {
+          original += esc(d.originalBody.slice(end, range.start));
+          original += `<mark class="risk-match">${esc(d.originalBody.slice(range.start, range.end))}</mark>`;
+          end = range.end;
+        }
+        original += esc(d.originalBody.slice(end));
+      } else if (evidence) {
+        evidenceNote = '<div class="notice info">这条记录缺少与当前文档版本匹配的原文定位。</div>';
+      }
       container.innerHTML = `<section class="card">
         <div class="card-head"><h2>${esc(d.title)}</h2><span>${badge(d.level)} ${d.tainted ? '<span class="badge block">检出注入</span>' : ''}</span></div>
+        ${evidenceNote}
         <pre class="lines">${esc(d.body)}</pre>
-        ${d.originalBody && d.originalBody !== d.body ? `<details class="advanced mt12"><summary>查看原始资料</summary><pre class="lines">${esc(d.originalBody)}</pre></details>` : ''}
+        ${d.originalBody && (d.originalBody !== d.body || evidence) ? `<details class="advanced mt12" ${evidence ? 'open' : ''}><summary>查看原始资料</summary><pre class="lines">${original}</pre></details>` : ''}
         <div class="sub-text mt8">来源：${esc((d.sourceIds || []).join('、') || d.id)} · 状态：${esc(d.status)}</div>
       </section>`;
     }).catch((err) => {
