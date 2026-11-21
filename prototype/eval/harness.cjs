@@ -174,6 +174,8 @@ async function runCase(def, tier, llm, { disabledLayers = [] } = {}) {
 
       await rt.runCommand(def.command, {
         role: '员工', token, nearfieldOnline: !!def.nearfieldOnline, scene: def.id,
+        // 物理通道按用例声明开放（设备联动正常路径）；未声明的用例保持默认沙箱关闭
+        sandbox: def.sandbox || undefined,
       });
       summary = summarizeAudit(audit, perf);
     } else {

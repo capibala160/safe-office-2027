@@ -51,6 +51,15 @@ class MockLLM {
       return steps;
     }
 
+    // 单个删除（不可逆动作：确认 + 快照兜底）
+    //   放在纪要/评审分支之前：含"删"的指令必须真的规划删除，不能被通用纪要分支吞掉
+    if (/删/.test(command)) {
+      const delId = /预算|评审|机密/.test(command) ? 'M1' : /外部|参会方/.test(command) ? 'M3' : 'M2';
+      steps.push({ action: 'readDoc', args: { id: delId } });
+      steps.push({ action: 'deleteDoc', args: { id: delId } });
+      return steps;
+    }
+
     // 共享屏幕（闸4 真板确认演示：shareScreen 不在 DEFERRED_ACTIONS，会真正经过闸4）
     if (/投屏|共享屏幕|屏幕共享/.test(command)) {
       const shareId = /预算|评审|机密/.test(command) ? 'M1' : 'M2';
@@ -69,7 +78,7 @@ class MockLLM {
 
     // 打印（含含"例会"字样的命令，须先于纪要通用分支）
     if (/打印/.test(command)) {
-      const printId = /预算|评审|机密/.test(command) ? 'M1' : 'M2';
+      const printId = /预算|评审|机密/.test(command) ? 'M1' : /外部|参会方/.test(command) ? 'M3' : 'M2';
       steps.push({ action: 'readDoc', args: { id: printId } });
       steps.push({ action: 'printDoc', args: { id: printId } });
       return steps;
@@ -152,12 +161,6 @@ class MockLLM {
       steps.push({ action: 'readDoc', args: { id: 'M2' } });
       steps.push({ action: 'summarize', args: { of: 'M2' } });
       steps.push({ action: 'sendInternalEmail', args: { to: 'team@corp.internal', docId: 'draft_M2' } });
-      return steps;
-    }
-
-    // 单个删除（不可逆动作：确认 + 快照兜底）
-    if (/删/.test(command)) {
-      steps.push({ action: 'deleteDoc', args: { id: 'M2' } });
       return steps;
     }
 
