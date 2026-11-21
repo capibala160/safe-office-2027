@@ -178,7 +178,8 @@ async function runConfirmRound(phase, index, opts) {
     },
   });
   const endedAt = Date.now();
-  const parsed = parseSerialConfirmOutput(out);
+  // 批准结果走 stdout；取消/超时的“确认失败”走 stderr——两路都解析
+  const parsed = parseSerialConfirmOutput(`${out}\n${err}`);
   const judged = judgeSerialRound(phase, { code, killed }, parsed);
   const round = {
     phase,
@@ -343,17 +344,26 @@ async function main() {
   if (!Number.isInteger(pin) || pin < 0 || pin > 31) throw Object.assign(new Error('--pin 必须是 0–31'), { code: 'ARG' });
 
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-  const outDir = path.join(ROOT, 'out', `hardware-evidence-${stamp}`);
+  const append = hasFlag('append');
+  const outDir = path.resolve(arg('out', '') || path.join(ROOT, 'out', `hardware-evidence-${stamp}`));
   fs.mkdirSync(outDir, { recursive: true });
   const logFile = path.join(outDir, 'transcript.log');
   const roundsFile = path.join(outDir, 'rounds.jsonl');
+  let priorRounds = [];
+  if (append && fs.existsSync(roundsFile)) {
+    priorRounds = fs.readFileSync(roundsFile, 'utf8').split(/\r?\n/).filter(Boolean)
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } else {
+    fs.writeFileSync(roundsFile, '');
+  }
   const log = (line) => {
     const stamped = `[${new Date().toISOString()}] ${line}`;
     console.log(line);
     fs.appendFileSync(logFile, `${stamped}\n`);
   };
 
-  log(`硬件证据运行：${matrix.length} 轮；执行端 ${port}；确认端 ${confirmPort}；确认设备 ${device}；执行设备 ${actuatorDevice}；IO${pin}`);
+  log(`硬件证据运行：本轮 ${matrix.length} 轮；已有 ${priorRounds.length} 轮；执行端 ${port}；确认端 ${confirmPort}；确认设备 ${device}；执行设备 ${actuatorDevice}；IO${pin}`);
   log(`输出目录：${outDir}`);
   log('口径：短按 KEY2=批准，长按 KEY2=取消；超时/断链必须不执行；每轮批准后自动补发 level=0。');
 
@@ -375,9 +385,10 @@ async function main() {
     onRound: (round) => fs.appendFileSync(roundsFile, `${JSON.stringify(round)}\n`),
   });
 
-  const summary = summarize(rounds);
-  const meta = { startedAt: new Date().toISOString(), port, confirmPort, device, actuatorDevice, pin };
-  fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify({ meta, summary, rounds }, null, 2));
+  const allRounds = [...priorRounds, ...rounds];
+  const summary = summarize(allRounds);
+  const meta = { startedAt: new Date().toISOString(), port, confirmPort, device, actuatorDevice, pin, appended: priorRounds.length };
+  fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify({ meta, summary, rounds: allRounds }, null, 2));
   fs.writeFileSync(path.join(outDir, 'summary.md'), `${renderSummaryMarkdown(summary, meta)}\n`);
 
   console.log('');
