@@ -83,6 +83,16 @@
     if (old) old.remove();
   }
 
+  function renderApprovalFields(op, { hash = op.operationHash, attachmentNames } = {}) {
+    const names = attachmentNames ?? (op.attachments || []).map((file) => file.name || file.filename).filter(Boolean);
+    return `<dl class="approval-fields">
+      <div><dt>动作</dt><dd>${esc(op.protocolLabel || toolLabel(op.action) || '—')}</dd></div>
+      <div class="confirm-target"><dt>${op.action === 'sendExternalEmail' ? '收件人' : '目标'}</dt><dd>${esc(op.recipient || '—')}</dd></div>
+      <div><dt>附件（${names.length}）</dt><dd>${names.length ? `<ul class="review-files">${names.map((name) => `<li>${esc(name)}</li>`).join('')}</ul>` : '无附件'}</dd></div>
+      <div><dt>版本指纹</dt><dd class="mono">${esc(hash || '—')}</dd></div>
+    </dl>`;
+  }
+
   function mountConfirmDrawer(ch, detail, c) {
     removeConfirmDrawer();
     const trigger = document.activeElement;
@@ -90,7 +100,6 @@
     const subject = op.subject || ch.summary || '待确认操作';
     const body = (detail && detail.operation && detail.operation.body) || '';
     const expires = ch.expiresAt ? new Date(ch.expiresAt).getTime() : Date.now() + (Number(ch.remainingSec) || 30) * 1000;
-    const attachments = (op.attachments || []).map((a) => esc(a.name || a.filename || '')).filter(Boolean);
     const authUser = (c.store.bootstrap && c.store.bootstrap.authUser) || null;
     const role = authUser ? authUser.role : null;
     const canDecide = !role || ['设备助手', '管理员'].includes(role);
@@ -106,20 +115,15 @@
         <button class="btn ghost small" id="drawer-close" type="button">关闭</button>
       </div>
       <div class="drawer-body">
-        <div class="kv"><span>动作</span><strong>${esc(op.protocolLabel || op.action || '—')}</strong></div>
-        <div class="kv confirm-target"><span>${op.action === 'sendExternalEmail' ? '收件人' : '目标'}</span><strong>${esc(op.recipient || '—')}</strong></div>
+        ${renderApprovalFields(op, { hash: op.operationHash || ch.targetHash })}
         <div class="kv"><span>密级</span><strong>${esc(op.level || '—')}</strong></div>
         <div class="kv"><span>剩余时间</span><strong class="countdown" id="drawer-countdown">${esc(ch.remainingSec === undefined ? '—' : `${ch.remainingSec}s`)}</strong></div>
-        <div class="sub-text mt8">内容摘要</div>
-        <div class="drawer-summary">${esc(ch.summary || subject)}</div>
-        <div class="sub-text mt8">附件（${attachments.length}）</div>
-        ${attachments.length ? `<ul class="review-files">${attachments.map((name) => `<li>${name}</li>`).join('')}</ul>` : '<div class="sub-text">无附件</div>'}
+        ${ch.summary && ch.summary !== subject ? `<section class="drawer-summary"><h3>内容摘要</h3><div>${esc(ch.summary)}</div></section>` : ''}
         <details class="mt8"><summary class="sub-text">查看完整正文</summary>
           <pre class="drawer-body-text mt8">${esc(body || '正文不可用，请到审批页查看详情。')}</pre>
         </details>
         <div class="notice info mt8">批准后将按上面的目标、正文和附件执行；内容一旦改动，旧确认会自动作废。</div>
         ${canDecide ? '' : `<div class="notice block mt8">已发起确认。你的角色是「${esc(role)}」，不能代替设备助手批准；请让设备助手登录后在工作台或审批页完成确认。</div>`}
-        <div class="mono sub-text mt8">operationHash ${esc(short(op.operationHash || ch.targetHash, 28))}</div>
         <div id="drawer-result" aria-live="polite"></div>
       </div>
       <div class="drawer-actions" id="drawer-actions">
@@ -184,6 +188,7 @@
         if (reject) reject.disabled = false;
         if (result) result.innerHTML = `<div class="notice block">${esc(c.errorText(err))}</div>`;
       }
+      result.scrollIntoView({ block: 'nearest' });
     };
     approve?.addEventListener('click', () => decide('approve'));
     reject?.addEventListener('click', () => decide('cancel'));
@@ -546,31 +551,31 @@
       <section class="card hero">
         <div class="hero-top">
           <div>
-            <div class="hero-kicker">任务工作台</div>
-            <h2>今天要完成什么？</h2>
+            <h2><label for="dash-command">今天要完成什么？</label></h2>
             <div class="sub-text">描述任务，系统整理资料并给出执行计划；外发、删除、打印和设备动作会先请你确认。</div>
           </div>
           <div class="hero-pills">
-            <span class="pill ${pending.length ? 'warn' : 'ok'}">待你确认 ${pending.length}</span>
             <span class="pill ${risk.frozen ? 'block' : (risk.score > 0 ? 'warn' : 'ok')}">风险 ${esc(risk.score || 0)}/${esc(risk.threshold || 60)}</span>
           </div>
         </div>
         <textarea class="textarea hero-input" id="dash-command" placeholder="例如：把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal">${esc(draft)}</textarea>
-        <div class="quick-row">
-          <button class="quick" data-quick="纪要" type="button">整理会议纪要</button>
-          <button class="quick" data-quick="外发" type="button">合作材料外发</button>
-          <button class="quick" data-quick="日程" type="button">安排来访日程</button>
-          <button class="quick" data-quick="设备" type="button">设备联动演示</button>
-        </div>
-        <div class="btn-row mt12">
+        <div class="hero-actions">
           <button class="btn" id="dash-start" type="button">开始任务</button>
           <a class="btn ghost" href="#/demo">演示场景</a>
-          <a class="btn ghost" href="#/approvals">全部审批</a>
         </div>
       </section>
-      <div class="two-col">
+      <section class="dashboard-templates" aria-labelledby="dashboard-templates-title">
+        <h2 id="dashboard-templates-title">快捷模板</h2>
+        <div class="quick-row">
+          <button class="quick" data-quick="纪要" type="button"><strong>整理会议纪要</strong><span>汇总周例会要点并归档</span></button>
+          <button class="quick" data-quick="外发" type="button"><strong>合作材料外发</strong><span>准备草稿并核对收件人</span></button>
+          <button class="quick" data-quick="日程" type="button"><strong>安排来访日程</strong><span>填写会议主题与时间</span></button>
+          <button class="quick" data-quick="设备" type="button"><strong>设备联动演示</strong><span>体验会议室门锁确认流程</span></button>
+        </div>
+      </section>
+      <div class="two-col dashboard-lists">
         <section class="card">
-          <div class="card-head"><h2>待你处理</h2><span class="sub">${pending.length} 条</span></div>
+          <div class="card-head"><h2>待你处理 <span class="sub">${pending.length} 条</span></h2><a href="#/approvals">全部审批</a></div>
           <div class="stack">
             ${pending.length ? pending.slice(0, 4).map((op) => `<article class="task-row">
               <div><strong>${esc(op.subject)}</strong><div class="sub-text">${esc(op.protocolLabel)} · 目标 ${esc(op.recipient)} · ${confirmationLabel(op)}</div></div>
@@ -2057,12 +2062,13 @@
         const auditOk = Boolean(r.integrity && r.integrity.auditVerified);
         const approvals = (r.approvals || []).length
           ? `<div class="receipt-list">${r.approvals.map((record) => `<article class="receipt-item">
-              <div class="spread"><strong>${esc(toolLabel(record.action))} · ${esc(record.recipient)}</strong>${badge(record.state)}</div>
-              <dl><dt>确认编号</dt><dd>${esc(record.confirmationId || '—')}</dd>
+              <div class="spread"><strong>确认记录</strong>${badge(record.state)}</div>
+              ${renderApprovalFields(record, { attachmentNames: record.attachmentNames })}
+              <dl class="receipt-meta"><dt>确认编号</dt><dd>${esc(record.confirmationId || '—')}</dd>
                 <dt>设备</dt><dd>${esc(record.deviceId || '—')}</dd>
                 <dt>执行回执</dt><dd>${record.receipt ? `${badge(record.receipt.state)} ${esc(record.receipt.messageId || '')}` : '暂无'}</dd>
               </dl>
-              <details class="mt8"><summary>核对绑定版本</summary><div class="sub-text">操作编号 ${esc(record.operationId)}</div><div class="sub-text">版本指纹 ${esc(record.operationHash || '—')}</div></details>
+              <div class="sub-text mt8">操作编号 ${esc(record.operationId)}</div>
             </article>`).join('')}</div>`
           : '<div class="sub-text">没有冻结操作</div>';
         const calls = (r.calls || []).length
