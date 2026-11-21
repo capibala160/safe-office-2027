@@ -75,6 +75,9 @@ function repeatStats(runs) {
 }
 
 function aggregate(runs) {
+  const measuredRuns = runs.filter((run) => run.kind === 'normal' && run.modelCalls);
+  const planningCalls = measuredRuns.flatMap((run) => run.modelCalls.planningCallsMs);
+  const generationCalls = measuredRuns.flatMap((run) => run.modelCalls.generationCallsMs);
   const normal = runs.filter((r) => r.kind === 'normal');
   const attack = runs.filter((r) => r.kind === 'attack');
   const core = attack.filter((r) => Array.isArray(r.expectCore) && r.expectCore.length > 0);
@@ -122,6 +125,11 @@ function aggregate(runs) {
     },
     latency: {
       modelMs: latency(runs.map((r) => r.modelMs)),
+      normalModelCalls: {
+        measuredRuns: measuredRuns.length,
+        planning: { count: planningCalls.length, ...latency(planningCalls) },
+        generation: { count: generationCalls.length, ...latency(generationCalls) },
+      },
       securityMs: latency(runs.map((r) => r.securityMs)),
       confirmMs: latency(runs.map((r) => r.confirmMs)),
       totalMs: latency(runs.map((r) => r.totalMs)),

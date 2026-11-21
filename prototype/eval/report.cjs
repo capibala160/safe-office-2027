@@ -125,6 +125,9 @@ function buildEvalReport({ runs, matrix, meta, ablationRuns = null }) {
   const rows = caseMatrixRows(runs, cases);
   const devCount = cases.filter((c) => c.split === 'dev').length;
   const valCount = cases.filter((c) => c.split === 'validation').length;
+  const slowNormalRuns = runs.filter((run) => run.tier === 'full' && run.kind === 'normal' && Number.isFinite(run.totalMs))
+    .sort((first, second) => second.totalMs - first.totalMs)
+    .slice(0, 5);
 
   const blocksRows = full
     ? Object.entries(full.blocksByLayer).sort((a, b) => b[1] - a[1])
@@ -250,6 +253,7 @@ function buildEvalReport({ runs, matrix, meta, ablationRuns = null }) {
     <span>语料版本 ${esc(meta.corpusVersion)}</span>
     <span>模型：${esc(meta.modelName)}</span>
     <span>数据集：${esc({ all: '全部', dev: '开发集', validation: '验证集' }[meta.split] || meta.split || '全部')}</span>
+    ${meta.caseIds?.length ? `<span>指定用例 ${esc(meta.caseIds.join('、'))}</span>` : ''}
     <span>用例 ${cases.length} 条（开发 ${devCount} / 验证 ${valCount}）× ${meta.repeats} 轮</span>
     <span>Node ${esc(meta.node)} · ${esc(meta.platform)}</span>
     <span>设备：${esc(meta.cpu)} · ${esc(meta.memoryGB)} GB</span>
@@ -284,6 +288,29 @@ function buildEvalReport({ runs, matrix, meta, ablationRuns = null }) {
     }).join('')}
   </table>
   <p class="sub">确认等待为模拟确认（无真实 SLE 往返）；安全逻辑耗时 = 总耗时 − 模型耗时，含计划校验与执行模拟，不是纯安全开销。</p>
+
+  <h2>正常任务的模型调用耗时</h2>
+  <table>
+    <tr><th>档位</th><th>有分项记录的任务</th><th>规划次数</th><th>规划 P50 / P95</th><th>生成次数</th><th>生成 P50 / P95</th></tr>
+    ${['none', 'prompt', 'full'].filter((tier) => matrix[tier]).map((tier) => {
+      const calls = matrix[tier].all.latency.normalModelCalls;
+      if (!calls) return '';
+      return `<tr><td><b>${esc(TIER_LABEL[tier])}</b></td><td>${calls.measuredRuns}</td><td>${calls.planning.count}</td><td>${p50p95(calls.planning)}</td><td>${calls.generation.count}</td><td>${p50p95(calls.generation)}</td></tr>`;
+    }).join('')}
+  </table>
+  <p class="sub">统计单位为单次调用，包含规划修正和超时调用。走本地模板的任务可能没有模型调用。续跑旧数据时以表中的记录数为准。</p>
+
+  ${slowNormalRuns.length ? `<h2>完整网关耗时最长的正常任务</h2>
+  <table>
+    <tr><th>用例</th><th>轮次</th><th>结果</th><th>总耗时</th><th>规划累计</th><th>生成累计</th></tr>
+    ${slowNormalRuns.map((run) => {
+      const result = run.completed ? '完成' : run.modelFault || '未完成';
+      const planning = run.modelCalls?.planningCallsMs.reduce((total, duration) => total + duration, 0);
+      const generation = run.modelCalls?.generationCallsMs.reduce((total, duration) => total + duration, 0);
+      return `<tr><td>${esc(run.caseId)} · ${esc(run.desc)}</td><td>${(run.repeatIndex ?? 0) + 1}</td><td>${esc(result)}</td><td>${fmtMs(run.totalMs)}</td><td>${fmtMs(planning)}</td><td>${fmtMs(generation)}</td></tr>`;
+    }).join('')}
+  </table>
+  <p class="sub">按总耗时列出前五轮。0 ms 表示未调用或用时低于显示精度，— 表示缺少分项记录。</p>` : ''}
 
   <h2>开发集 vs 验证集（防过拟合视角）</h2>
   <table>
@@ -347,6 +374,7 @@ function printConsole({ matrix, runs, meta, ablationRuns = null }) {
   console.log('  安全智慧办公 · 评测 harness');
   const splitLabel = { all: '全部', dev: '开发集', validation: '验证集' }[meta.split] || meta.split || '全部';
   console.log(`  模型：${meta.modelName} · 语料 ${meta.corpusVersion} · 数据集 ${splitLabel} · ${meta.repeats} 轮`);
+  if (meta.caseIds?.length) console.log(`  指定用例 ${meta.caseIds.join('、')}`);
   console.log('');
   console.log('  档位        攻击成功率   攻击核心完成   正常完成   误拦率    拦过必需   确认/任务   安全P50/P95        总P50/P95');
   for (const tier of ['none', 'prompt', 'full'].filter((t) => matrix[t])) {

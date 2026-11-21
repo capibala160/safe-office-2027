@@ -65,11 +65,19 @@ function wrapLLM(llm, acc) {
     async plan(command, blocks, meta) {
       const t0 = performance.now();
       // meta 必须透传：授权提示与修正反馈都在里面，吞掉就等于评测没测到新功能
-      try { return await llm.plan(command, blocks, meta); } finally { acc.modelMs += performance.now() - t0; }
+      try {
+        return await llm.plan(command, blocks, meta);
+      } finally {
+        acc.planningCallsMs.push(performance.now() - t0);
+      }
     },
     async generate(command, blocks) {
       const t0 = performance.now();
-      try { return await llm.generate(command, blocks); } finally { acc.modelMs += performance.now() - t0; }
+      try {
+        return await llm.generate(command, blocks);
+      } finally {
+        acc.generationCallsMs.push(performance.now() - t0);
+      }
     },
   };
 }
@@ -140,7 +148,7 @@ function summarizeAudit(audit, perf) {
 }
 
 async function runCase(def, tier, llm, { disabledLayers = [] } = {}) {
-  const acc = { modelMs: 0 };
+  const acc = { planningCallsMs: [], generationCallsMs: [] };
   const wrapped = wrapLLM(llm, acc);
   const t0 = performance.now();
   // 消融档位命名 abl:<layer>；未知档位按 full 之外处理会静默变成 none，故显式判定。
@@ -194,6 +202,7 @@ async function runCase(def, tier, llm, { disabledLayers = [] } = {}) {
   const totalMs = performance.now() - t0;
   const score = scoreCase(def, summary.effects, { blocks: summary.blocks });
 
+  const modelMs = [...acc.planningCallsMs, ...acc.generationCallsMs].reduce((total, duration) => total + duration, 0);
   return {
     caseId: def.id,
     split: def.split,
@@ -209,8 +218,9 @@ async function runCase(def, tier, llm, { disabledLayers = [] } = {}) {
     confirmations: summary.confirmations,
     repairs: summary.repairs,
     modelFault: summary.modelFault,
-    modelMs: acc.modelMs,
-    securityMs: Math.max(0, totalMs - acc.modelMs),
+    modelMs,
+    modelCalls: acc,
+    securityMs: Math.max(0, totalMs - modelMs),
     confirmMs: summary.confirmMs,
     totalMs,
     ...(harnessError ? { harnessError } : {}),

@@ -39,6 +39,10 @@ function parseArgs(argv) {
     else if (key === 'tiers') opts.tiers = value.split(',').map((s) => s.trim()).filter(Boolean);
     else if (key === 'split') opts.split = value;
     else if (key === 'kind') opts.kind = value;
+    else if (key === 'cases') {
+      opts.caseIds = [...new Set(value.split(',').map((id) => id.trim()).filter(Boolean))].sort();
+      if (!opts.caseIds.length) throw new Error('--cases 至少需要一个用例编号');
+    }
     else if (key === 'ablate') opts.ablate = value || 'all';
     else if (key === 'out') opts.out = resolve(value);
     else throw new Error(`无法识别的参数：--${key}`);
@@ -60,6 +64,7 @@ const HELP = `
   --tiers=a,b,c          档位：none / prompt / full（默认全部）
   --split=all|dev|validation  数据集（默认 all；消融跑分同样按此筛选）
   --kind=all|normal      只跑正常任务时选 normal（默认 all）
+  --cases=ID,ID          仅复测指定用例，仍须符合数据集和用例类型筛选
   --ablate[=all|id,id]   追加单层消融：完整网关分别关掉一层再跑
                          可选：${ABLATION_IDS.join('/')}
   --out=DIR              输出目录（默认 prototype/out/eval）
@@ -75,8 +80,13 @@ const HELP = `
     return;
   }
 
-  const cases = CASES.filter((entry) => (opts.split === 'all' || entry.split === opts.split)
+  let cases = CASES.filter((entry) => (opts.split === 'all' || entry.split === opts.split)
     && (opts.kind === 'all' || entry.kind === opts.kind));
+  if (opts.caseIds) {
+    cases = cases.filter((entry) => opts.caseIds.includes(entry.id));
+    const missing = opts.caseIds.filter((id) => !cases.some((entry) => entry.id === id));
+    if (missing.length) throw new Error(`用例不存在或不符合筛选条件：${missing.join('、')}`);
+  }
   if (cases.length === 0) throw new Error('筛选后没有可用用例');
 
   // 消融必须有完整网关基线；没选 full 就自动补上（只多跑一遍基线，不改变其它档位）
@@ -102,8 +112,10 @@ const HELP = `
   const meta = buildMeta({
     llmKind: kind, modelName, repeats: opts.repeat, corpusVersion: CORPUS_VERSION, cases, split: opts.split,
   });
-  const fingerprintSplit = opts.kind === 'all' ? opts.split : `${opts.split}:${opts.kind}`;
+  const datasetKey = opts.kind === 'all' ? opts.split : `${opts.split}:${opts.kind}`;
+  const fingerprintSplit = opts.caseIds ? `${datasetKey}:${opts.caseIds.join(',')}` : datasetKey;
   meta.caseKind = opts.kind;
+  if (opts.caseIds) meta.caseIds = opts.caseIds;
   // 尾延迟预算进指纹与报告：默认档不进指纹，旧实验仍可续跑；开档后指纹必变
   const budget = llmBudgetMeta();
   meta.llmBudget = budget;
