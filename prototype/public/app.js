@@ -19,6 +19,7 @@
     { route: 'dashboard', label: '工作台', icon: '◈' },
     { route: 'command', label: '命令台', icon: '⌘' },
     { divider: '办公' },
+    { route: 'office', label: '三维办公场景', icon: '◇' },
     { route: 'minutes', label: '纪要中心', icon: '▤' },
     { route: 'mail', label: '邮件', icon: '✉' },
     { route: 'calendar', label: '日历', icon: '▦' },
@@ -35,7 +36,7 @@
   const TITLES = {
     dashboard: '工作台', command: '命令台', minutes: '纪要中心', mail: '邮件',
     calendar: '日历', contacts: '通讯录', files: '文件', approvals: '审批与确认',
-    device: '设备', governance: '治理审计', replay: '任务回放', demo: '演示场景',
+    device: '设备', governance: '治理审计', replay: '任务回放', demo: '演示场景', office: '三维办公场景',
   };
 
   const store = {
@@ -173,7 +174,7 @@
     const nav = document.getElementById('nav');
     nav.innerHTML = PAGES.map((p) => {
       if (p.divider) return `<div class="nav-divider">${esc(p.divider)}</div>`;
-      return `<a class="nav-item ${store.route === p.route ? 'active' : ''}" href="#/${p.route}"><span class="ico">${esc(p.icon)}</span><span>${esc(p.label)}</span></a>`;
+      return `<a class="nav-item" href="#/${p.route}"><span class="ico" aria-hidden="true">${esc(p.icon)}</span><span>${esc(p.label)}</span></a>`;
     }).join('');
   }
 
@@ -260,15 +261,18 @@
       if (!state) { eventsEl.innerHTML = '<h3>安全事件</h3><div class="empty">加载中…</div>'; return; }
       const events = (state.audit && state.audit.recent) || [];
       eventsEl.innerHTML = `<h3>安全事件</h3>
-        <div class="event-list">${events.slice().reverse().map((e) => `<div class="event ${kindClass(e.kind, e.detail)}"><div><div class="kind">${esc(e.kind)}</div><div class="detail">${esc(summarize(e.detail))}</div></div><div class="seq">#${esc(e.seq)}<br>${esc(time(e.ts))}</div></div>`).join('') || '<div class="empty">暂无事件</div>'}</div>`;
+        <div class="event-list">${events.slice().reverse().slice(0, 4).map((e) => `<div class="event ${kindClass(e.kind, e.detail)}"><div><div class="kind">${esc(e.kind)}</div><div class="detail">${esc(summarize(e.detail))}</div></div><div class="seq">#${esc(e.seq)}<br>${esc(time(e.ts))}</div></div>`).join('') || '<div class="empty">暂无事件</div>'}</div>`;
     }
   }
 
   function updateCrumbs() {
     const el = document.getElementById('crumbs');
     if (el) el.textContent = TITLES[store.route] || '工作台';
-    document.querySelectorAll('.nav-item').forEach((a) => {
-      a.classList.toggle('active', a.getAttribute('href') === `#/${store.route}`);
+    document.querySelectorAll('.nav-item').forEach((link) => {
+      const active = link.getAttribute('href') === `#/${store.route}`;
+      link.classList.toggle('active', active);
+      if (active) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
     });
   }
 
@@ -285,6 +289,7 @@
     updateCrumbs();
     const root = document.getElementById('view');
     if (!root) return;
+    root.parentElement.dataset.route = store.route;
     root.innerHTML = '<div class="empty">加载中…</div>';
     try {
       await window.Views[store.route](root, ctx);

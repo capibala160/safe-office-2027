@@ -33,8 +33,8 @@ html, body {
   min-height: 100vh;
 }
 
-.brand { text-align: center; padding-top: 8px; }
-.logo { font-size: 22px; font-weight: 700; letter-spacing: 2px; }
+.brand { padding: 14px 18px; border: 1px solid #32476a; border-radius: 14px; background: linear-gradient(120deg, #111f38, #1d365a); }
+.logo { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: 2px; }
 .sub { color: var(--muted); font-size: 13px; letter-spacing: 1px; margin-top: 4px; }
 
 .panel {
@@ -99,10 +99,10 @@ button {
 }
 .summary { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.45; }
 
-.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0; }
+.facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; }
 .facts div { background: #0e1626; border-radius: 14px; padding: 12px; }
 .facts dt { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
-.facts dd { margin: 0; font-size: 17px; font-weight: 600; }
+.facts dd { margin: 0; font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
 #countdown.low { color: var(--warn); }
 
 .progress { height: 4px; border-radius: 999px; background: #0e1626; overflow: hidden; }
@@ -121,6 +121,7 @@ button {
   animation: pulse 1.8s ease-in-out infinite;
 }
 @keyframes pulse { 0%, 100% { transform: scale(0.8); opacity: 0.6; } 50% { transform: scale(1.15); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .idle-ring span { animation: none; } }
 
 .result-mark {
   width: 72px; height: 72px; margin: 0 auto;

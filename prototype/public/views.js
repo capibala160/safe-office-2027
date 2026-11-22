@@ -234,8 +234,11 @@
   }
 
   // ---------- 通用 ----------
-  function page(title, sub) {
-    return `<div class="spread"><div><h2 class="page-title">${esc(title)}</h2><div class="sub-text">${esc(sub)}</div></div></div>`;
+  function page(title, sub, actions = '') {
+    return `<header class="page-heading">
+      <div><h1 class="page-title">${esc(title)}</h1><p>${esc(sub)}</p></div>
+      ${actions ? `<div class="btn-row">${actions}</div>` : ''}
+    </header>`;
   }
 
   function stat(label, value, hint) {
@@ -537,63 +540,102 @@
     const state = c.store.state || await c.refreshState();
     const risk = state.risk || {};
     const [opsRes, runsRes] = await Promise.all([
-      API.get('/api/operations?state=frozen').catch(() => ({ items: [] })),
-      API.get('/api/commands').catch(() => ({ items: [] })),
+      API.get('/api/operations?state=frozen').catch(() => null),
+      API.get('/api/commands').catch(() => null),
     ]);
-    const pending = opsRes.items || [];
-    const runs = (runsRes.items || []).slice(0, 5);
+    const pending = opsRes?.items || [];
+    const allRuns = runsRes?.items || [];
+    const runs = allRuns.slice(0, 5);
+    const dayKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const trendDays = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(today);
+      date.setDate(today.getDate() - 6 + index);
+      return { key: dayKey(date), label: `${date.getMonth() + 1}/${date.getDate()}`, count: 0 };
+    });
+    const trendByDay = new Map(trendDays.map((day) => [day.key, day]));
+    for (const run of allRuns) {
+      const at = new Date(run.at);
+      const day = Number.isFinite(at.getTime()) ? trendByDay.get(dayKey(at)) : null;
+      if (day) day.count += 1;
+    }
+    const peakDay = Math.max(1, ...trendDays.map((day) => day.count));
     const draft = c.store.pendingCommand || '';
     const authUser = (c.store.bootstrap && c.store.bootstrap.authUser) || null;
     const role = authUser ? authUser.role : null;
     const canDecide = !role || ['设备助手', '管理员'].includes(role);
     root.innerHTML = `
       ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<a href="#/governance">去人工复核</a></div>` : ''}
-      <section class="card hero">
-        <div class="hero-top">
-          <div>
-            <h2><label for="dash-command">今天要完成什么？</label></h2>
-            <div class="sub-text">描述任务，系统整理资料并给出执行计划；外发、删除、打印和设备动作会先请你确认。</div>
-          </div>
-          <div class="hero-pills">
-            <span class="pill ${risk.frozen ? 'block' : (risk.score > 0 ? 'warn' : 'ok')}">风险 ${esc(risk.score || 0)}/${esc(risk.threshold || 60)}</span>
+      <section class="card hero" aria-labelledby="dash-title">
+        <div class="hero-compose">
+          <h1 id="dash-title"><label for="dash-command">今天要完成什么？</label></h1>
+          <textarea class="textarea hero-input" id="dash-command" placeholder="例如：整理周例会纪要并内部归档">${esc(draft)}</textarea>
+          <div class="hero-actions">
+            <button class="btn" id="dash-start" type="button">开始任务 <span aria-hidden="true">→</span></button>
+            <a class="btn ghost" href="#/demo">演示场景</a>
           </div>
         </div>
-        <textarea class="textarea hero-input" id="dash-command" placeholder="例如：把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal">${esc(draft)}</textarea>
-        <div class="hero-actions">
-          <button class="btn" id="dash-start" type="button">开始任务</button>
-          <a class="btn ghost" href="#/demo">演示场景</a>
+        <div class="hero-flow">
+          <h2>任务如何处理</h2>
+          <ol>
+            <li><strong>生成计划</strong><span>根据任务整理资料和执行步骤</span></li>
+            <li><strong>核对高危动作</strong><span>外发、删除、打印和设备操作按当前模式转交确认</span></li>
+            <li><strong>查看结果</strong><span>在任务回放中核对记录和回执</span></li>
+          </ol>
         </div>
       </section>
       <section class="dashboard-templates" aria-labelledby="dashboard-templates-title">
         <h2 id="dashboard-templates-title">快捷模板</h2>
         <div class="quick-row">
-          <button class="quick" data-quick="纪要" type="button"><strong>整理会议纪要</strong><span>汇总周例会要点并归档</span></button>
-          <button class="quick" data-quick="外发" type="button"><strong>合作材料外发</strong><span>准备草稿并核对收件人</span></button>
-          <button class="quick" data-quick="日程" type="button"><strong>安排来访日程</strong><span>填写会议主题与时间</span></button>
-          <button class="quick" data-quick="设备" type="button"><strong>设备联动演示</strong><span>体验会议室门锁确认流程</span></button>
+          <button class="quick" data-quick="纪要" type="button"><span class="quick-icon" aria-hidden="true">▤</span><strong>整理会议纪要</strong><span>汇总周例会要点并归档</span></button>
+          <button class="quick" data-quick="外发" type="button"><span class="quick-icon" aria-hidden="true">✉</span><strong>合作材料外发</strong><span>准备草稿并核对收件人</span></button>
+          <button class="quick" data-quick="日程" type="button"><span class="quick-icon" aria-hidden="true">▦</span><strong>安排来访日程</strong><span>填写会议主题与时间</span></button>
+          <button class="quick" data-quick="设备" type="button"><span class="quick-icon" aria-hidden="true">◇</span><strong>设备联动演示</strong><span>体验会议室门锁确认流程</span></button>
         </div>
       </section>
+      <div class="dashboard-insights">
+        <section class="card dashboard-trend" aria-labelledby="dashboard-trend-title">
+          <div class="card-head"><h2 id="dashboard-trend-title">近 7 天任务</h2><span class="sub">${trendDays.reduce((sum, day) => sum + day.count, 0)} 项</span></div>
+          ${runsRes ? `<div class="trend-chart" role="img" aria-label="近 7 天每日任务数量：${trendDays.map((day) => `${day.label} ${day.count} 项`).join('，')}">
+            ${trendDays.map((day) => `<div class="trend-column"><span class="trend-value">${day.count}</span><div class="trend-track"><span class="trend-fill" data-height="${day.count ? Math.max(8, day.count / peakDay * 100) : 3}"></span></div><span class="trend-label">${esc(day.label)}</span></div>`).join('')}
+          </div>` : '<div class="empty">任务记录暂时不可用</div>'}
+        </section>
+        <section class="dashboard-scene" aria-labelledby="dashboard-scene-title">
+          <div class="dashboard-scene-head"><div><h2 id="dashboard-scene-title">办公现场</h2><p class="sub-text">实时预览办公区域</p></div><a href="#/office">查看完整场景</a></div>
+          <div id="dashboard-office-preview"></div>
+        </section>
+      </div>
       <div class="two-col dashboard-lists">
         <section class="card">
-          <div class="card-head"><h2>待你处理 <span class="sub">${pending.length} 条</span></h2><a href="#/approvals">全部审批</a></div>
+          <div class="card-head"><h2>待你处理${opsRes ? ` <span class="sub">${pending.length} 条</span>` : ''}</h2><a href="#/approvals">全部审批</a></div>
           <div class="stack">
             ${pending.length ? pending.slice(0, 4).map((op) => `<article class="task-row">
               <div><strong>${esc(op.subject)}</strong><div class="sub-text">${esc(op.protocolLabel)} · 目标 ${esc(op.recipient)} · ${confirmationLabel(op)}</div></div>
               <div class="btn-row"><button class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}" type="button">${canDecide ? '现在确认' : '发起确认'}</button><button class="btn ghost small" data-op-action="detail" data-id="${esc(op.operationId)}" type="button">详情</button></div>
-            </article>`).join('') : '<div class="empty">没有待确认的操作。完成一个任务后，高危动作会出现在这里。</div>'}
+            </article>`).join('') : `<div class="dashboard-empty">
+              <strong>${opsRes ? '暂无待确认操作' : '待办暂不可用'}</strong>
+              <span>${opsRes ? '需要确认的动作会列在这里，可先核对操作目标和详情。' : '可前往审批页重新查询。'}</span>
+            </div>`}
           </div>
         </section>
         <section class="card">
-          <div class="card-head"><h2>最近任务</h2><span class="sub">${runs.length} 条</span></div>
+          <div class="card-head"><h2>最近任务</h2>${runsRes ? `<span class="sub">${runs.length} 条</span>` : ''}</div>
           <div class="stack">
             ${runs.length ? runs.map((r) => `<div class="task-row">
               <div><strong>${esc(short(r.command || r.runId, 42))}</strong><div class="sub-text">${esc(dateTime(r.at))} · ${(r.operations || []).length} 个动作 · 风险 ${esc((r.risk && r.risk.score) || 0)}</div></div>
               <a class="btn ghost small" href="${replayHref(r.runId)}">回放</a>
-            </div>`).join('') : '<div class="empty">还没有任务记录。从上面的输入框开始第一个任务。</div>'}
+            </div>`).join('') : `<div class="dashboard-empty">
+              <strong>${runsRes ? '还没有任务记录' : '任务记录暂不可用'}</strong>
+              <span>${runsRes ? '可用快捷模板运行第一个任务，之后从这里打开回放。' : '连接恢复后，刷新页面即可重新查询。'}</span>
+            </div>`}
           </div>
         </section>
       </div>`;
 
+    window.OfficeScene?.mount(root.querySelector('#dashboard-office-preview'));
+    // CSP 禁止内联 style 属性，柱高用 CSSOM 设置
+    root.querySelectorAll('.trend-fill').forEach((fill) => { fill.style.height = `${fill.dataset.height}%`; });
     const quickText = {
       纪要: '整理周例会纪要并内部归档',
       外发: '把周例会纪要发给外部参会方 partner@partner-example.com',
@@ -636,7 +678,7 @@
     const events = (state.audit && state.audit.recent) || [];
     const samples = c.store.bootstrap.samples || [];
     const pick = ['normal-minutes', 'external-confirm', 'injection', 'private-mailbox', 'bulk-delete', 'device'];
-    root.innerHTML = `${page('演示场景', '答辩用：正常流 → 攻击样例 → 硬件确认 → 治理回溯；日常任务请回工作台')}
+    root.innerHTML = `${page('演示场景', '按场景体验任务执行、安全拦截、硬件确认和审计回溯。')}
       ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<button class="btn ghost small" id="dash-review" type="button">人工复核</button></div>` : ''}
       <div class="stats">
         ${stat('文档 / 图片 / 录音', (counts.documents || 0) + (counts.images || 0) + (counts.audios || 0), '演示数据')}
@@ -751,7 +793,7 @@
     const maxCalls = sample && sample.maxCalls ? String(sample.maxCalls) : '';
     if (sample && sample.nearfieldOnline !== undefined) c.setNearfield(!!sample.nearfieldOnline);
 
-    root.innerHTML = `${page('命令台', '描述任务，系统整理资料并给出计划；高危动作会先请你确认')}
+    root.innerHTML = `${page('命令台', '描述任务、选择资料，再核对计划、确认要求和执行结果。')}
       <section class="card">
         <div class="card-head"><h2>${calendarTemplate ? '安排来访日程' : minutesTemplate ? '会议纪要归档' : '任务'}</h2>${structuredTemplate ? '' : '<span class="sub">角色 / 模型 / 近场取顶栏</span>'}</div>
         <div class="form-grid">
@@ -1040,14 +1082,22 @@
     const docs = (await API.get('/api/documents')).items;
     const base = docs.filter((d) => d.type === 'document' && !d.deleted);
     const generated = docs.filter((d) => d.type === 'draft');
-    root.innerHTML = `${page('纪要中心', '读取 → 摘要 → 正式稿；正文只在授权读取后显示')}
-      <div class="grid-3">${base.map((d) => `<section class="card">
+    root.innerHTML = `${page('纪要中心', '从可访问的资料生成会议纪要，或查看已整理的稿件。', '<a class="btn ghost" href="#/files">导入资料</a>')}
+      <div class="card collection-panel">
+        <div class="collection-list">
+          <div class="card-head"><h2>来源资料</h2><span class="sub">${base.length} 份</span></div>
+          ${base.length ? `<div class="collection-items">${base.map((d) => `<section class="card">
         <div class="spread"><h3>${esc(d.title)}</h3>${badge(d.level)}</div>
         <div class="sub-text">${esc(d.id)} · ${esc(d.status)}</div>
         <div class="btn-row mt12"><button class="btn small" data-minutes="${esc(d.id)}">整理纪要</button><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button></div>
-      </section>`).join('')}</div>
-      ${generated.length ? `<section class="card"><div class="card-head"><h2>生成稿</h2><span class="sub">${generated.length} 份</span></div><div class="stack">${generated.map((d) => `<div class="spread"><span>${esc(d.title)} ${badge(d.level)} ${d.tainted ? '<span class="badge block">注入</span>' : ''}</span><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button></div>`).join('')}</div></section>` : ''}
-      <div id="minutes-detail"></div>`;
+          </section>`).join('')}</div>` : '<div class="empty">暂无可用于整理纪要的资料，可先导入文档。</div>'}
+          ${generated.length ? `<section class="card mt12"><div class="card-head"><h2>生成稿</h2><span class="sub">${generated.length} 份</span></div><div class="stack">${generated.map((d) => `<div class="spread"><span>${esc(d.title)} ${badge(d.level)} ${d.tainted ? '<span class="badge block">注入</span>' : ''}</span><button class="btn ghost small" data-doc="${esc(d.id)}">查看</button></div>`).join('')}</div></section>` : ''}
+        </div>
+        <section class="card collection-detail">
+          <div class="card-head"><h2>资料详情</h2></div>
+          <div id="minutes-detail"><div class="empty">选择一份资料，点击「查看」即可预览。</div></div>
+        </section>
+      </div>`;
 
     const detail = root.querySelector('#minutes-detail');
     const archiveId = routeParams().get('archive');
@@ -1068,7 +1118,7 @@
     const autoReply = (c.store.bootstrap && c.store.bootstrap.autoReply) || { enabled: false };
     const authUser = c.store.bootstrap && c.store.bootstrap.authUser;
     const canScanAutoReply = !authUser || ['管理员', '审计员'].includes(authUser.role);
-    root.innerHTML = `${page('邮件', '内网邮件策略自动确认；外发需 WS63 虚拟确认')}
+    root.innerHTML = `${page('邮件', '从办公资料生成邮件草稿，核对收件人和通道，并查看发送记录。')}
       <section class="card">
         <div class="card-head"><h2>写邮件</h2><span class="sub">MockLLM 计划固定演示收件人</span></div>
         <div class="form-grid">
@@ -1191,11 +1241,10 @@
   async function calendar(root, c) {
     const items = (await API.get('/api/calendar')).items;
     const labels = { written: '已生成 .ics', caldav: '已写入 CalDAV', simulated: '模拟', failed: '写入失败' };
-    root.innerHTML = `${page('日历', '查看预约记录与写入结果')}
+    root.innerHTML = `${page('日历', '查看会议预约及其写入结果。', '<button class="btn" id="cal-run">安排来访日程</button><button class="btn ghost" id="cal-refresh">刷新日程</button>')}
       <section class="card">
         <div class="card-head"><h2>日程</h2><span class="sub">${items.length} 条</span></div>
-        <div class="stack">${items.map((e) => `<div class="spread"><div><strong>${esc(e.title)}</strong><div class="sub-text">${esc(e.at?.endsWith('Z') ? dateTime(e.at) : e.at)}${e.file ? ` · ${esc(e.file)}` : ''}</div></div><span class="badge ${e.real ? 'pass' : e.status === 'failed' ? 'block' : 'info'}">${esc(e.source === 'seed' ? '示例' : labels[e.status] || '记录')}</span></div>`).join('')}</div>
-        <div class="btn-row mt12"><button class="btn" id="cal-run">安排来访日程</button><button class="btn ghost" id="cal-refresh">刷新日程</button></div>
+        <div class="stack">${items.map((e) => `<div class="task-row"><div><strong>${esc(e.title)}</strong><div class="sub-text">${esc(e.at?.endsWith('Z') ? dateTime(e.at) : e.at)}${e.file ? ` · ${esc(e.file)}` : ''}</div></div><span class="badge ${e.real ? 'pass' : e.status === 'failed' ? 'block' : 'info'}">${esc(e.source === 'seed' ? '示例' : labels[e.status] || '记录')}</span></div>`).join('') || '<div class="empty">暂无预约。可以从安排来访日程开始。</div>'}</div>
       </section>`;
     root.querySelector('#cal-refresh').addEventListener('click', () => c.rerender());
     root.querySelector('#cal-run').addEventListener('click', () => {
@@ -1207,15 +1256,29 @@
   // ---------- 通讯录 ----------
   async function contacts(root, c) {
     const items = (await API.get('/api/contacts')).items;
-    root.innerHTML = `${page('通讯录', '仅单条查询；结果默认脱敏；批量/导出不提供')}
-      <div class="grid-2">${items.map((p) => `<section class="card">
+    const roleCount = new Set(items.map((person) => person.title).filter(Boolean)).size;
+    root.innerHTML = `${page('通讯录', '按姓名或关键字查询单个联系人，结果默认脱敏。')}
+      <div class="card collection-panel">
+        <div class="collection-list">
+          <div class="card-head"><h2>联系人</h2><span class="sub">${items.length} 人</span></div>
+          <div class="collection-items">${items.map((p) => `<section class="card">
         <div class="spread"><h3>${esc(p.name)}</h3><span class="badge info">${esc(p.title)}</span></div>
         <div class="sub-text">手机：${esc(p.phone)}</div>
         <div class="sub-text">邮箱：${esc(p.email)}</div>
         <div class="btn-row mt12"><button class="btn small" data-contact="${esc(p.name)}">单条查询</button></div>
-      </section>`).join('')}</div>
-      <div class="notice info">查询会走完整命令链路并写入审计；批量导出工具不存在，计划校验会移除。</div>
-      <div id="contacts-result"></div>`;
+          </section>`).join('') || '<div class="empty">暂无联系人。</div>'}</div>
+          <div class="notice info mt12">查询记录会写入审计，仅支持单条查询。</div>
+        </div>
+        <section class="card collection-detail">
+          <div class="card-head"><h2>查询结果</h2></div>
+          <div id="contacts-result"><div class="empty">点击联系人卡片上的「单条查询」，在这里查看结果。</div></div>
+        </section>
+      </div>
+      <section class="stats contact-stats" aria-label="通讯录概览">
+        <article class="stat"><span>联系人</span><strong>${items.length}</strong><small>可单条查询</small></article>
+        <article class="stat"><span>岗位类别</span><strong>${roleCount}</strong><small>按联系人资料统计</small></article>
+        <article class="stat"><span>隐私保护</span><strong>默认脱敏</strong><small>查询结果写入审计</small></article>
+      </section>`;
     root.querySelectorAll('[data-contact]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         btn.disabled = true;
@@ -1248,7 +1311,7 @@
 
   async function files(root, c) {
     const docs = (await API.get('/api/documents')).items;
-    root.innerHTML = `${page('文件', '文档/图片/录音/生成稿；删除需令牌上限 + 快照 + WS63 确认')}
+    root.innerHTML = `${page('文件', '导入资料、转写录音，并按密级管理共享与访问。删除操作需要确认。')}
       <section class="card">
         <div class="card-head"><h2>导入真实资料</h2><span class="sub">.txt / .md / .docx，单个 ≤5MB</span></div>
         <div class="btn-row">
@@ -1449,7 +1512,7 @@
     }
     const virtualConfirm = !(c.store.bootstrap && c.store.bootstrap.virtualConfirm === false);
     const serialMode = !!(c.store.bootstrap && c.store.bootstrap.nearfieldSerial);
-    root.innerHTML = `${page('审批与确认', '冻结记录 → WS63 确认 → 发送/执行；取消/超时/重放/篡改')}
+    root.innerHTML = `${page('审批与确认', '核对冻结记录里的操作目标和内容，并跟踪审批与执行结果。')}
       ${virtualConfirm ? '' : '<div class="notice block">已启用真实动作，<b>虚拟设备批准入口已关闭</b>。高危确认请用手机确认端（npm run start:lan）；本机演示可设 <span class="mono">SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM=1</span> 后重启。</div>'}
       ${serialMode ? '<div class="notice block">已接真板（串口）：挑战会显示在设备 OLED 上，<b>请在板端按键确认</b>——短按 = 批准，长按 ≥0.6s = 取消；页面上的批准/取消按钮只负责发起挑战。</div>' : ''}
       <section class="card">
@@ -1457,7 +1520,7 @@
           <div class="tabs">${['', 'frozen', 'confirmed', 'executing', 'executed', 'rejected', 'failed'].map((s) => `<button class="tab ${filter === s ? 'active' : ''}" data-op-filter="${esc(s)}">${s ? esc(statusText[s] || s) : '全部'}${counts[s] ? ` (${counts[s]})` : ''}</button>`).join('')}</div>
           <span class="sub">${ops.items.length} 条</span>
         </div>
-        <div class="stack mt12">${ops.items.length ? ops.items.map(operationCard).join('') : '<div class="empty">当前筛选下没有操作</div>'}</div>
+        <div class="stack mt12">${ops.items.length ? ops.items.map(operationCard).join('') : `<div class="empty">${filter ? '当前筛选下没有操作，可以切换到全部。' : '暂无审批记录。任务中的待确认动作会列在这里。'}</div>`}</div>
       </section>
       ${detailHtml}
       <div id="approvals-result"></div>`;
@@ -1561,7 +1624,7 @@
     const frozen = await API.get('/api/operations?state=frozen');
     const active = data.pending[0] || null;
     const selectedId = c.store.operationId || (frozen.items[0] && frozen.items[0].operationId) || '';
-    root.innerHTML = `${page('设备', 'WS63 虚拟确认器：真实 SFC1 帧 / HMAC；批准/取消/超时/篡改/重放')}
+    root.innerHTML = `${page('设备', '查看 WS63 连接方式和确认挑战，核对设备返回的决定与回执。')}
       ${c.store.autoMode === 'auto-full' ? '<div class="notice block">当前为全自动演示模式：高危动作已被自动批准，没有待确认挑战。切回“人在环”才能演示设备确认。</div>' : ''}
       ${c.store.autoMode === 'auto-safe' ? '<div class="notice info">低风险自动：仅白名单内部级外发自动确认；外发/删除/打印/设备仍会出现在这里。</div>' : ''}
       ${data.device ? `<div class="notice info">设备 ${esc(data.device.id)} · ${esc(data.device.label)} · 协议 ${esc(data.device.protocol)} · ${esc(data.device.transport)} · ${esc(data.device.note)}</div>` : ''}
@@ -1762,7 +1825,7 @@
     const actionSet = new Set();
     for (const role of roles) for (const action of Object.keys(policy[role] || {})) actionSet.add(action);
     const actions = [...actionSet];
-    root.innerHTML = `${page('治理审计', '风险复核 / 双链校验 / 策略矩阵 / 能力表 / 报告 · 租户=登录用户名（非组织多租户）')}
+    root.innerHTML = `${page('治理审计', '复核风险、检查策略与审计链。租户范围按登录用户名划分。')}
       <div class="grid-2">
         <section class="card">
           <div class="card-head"><h2>风险</h2>${risk.frozen ? badge('frozen') : badge('pass')}</div>
@@ -2039,7 +2102,7 @@
     const requested = routeRunId();
     const options = runs.map((r) => `<option value="${esc(r.runId)}" ${r.runId === requested ? 'selected' : ''}>${esc(r.runId)} · ${esc(String(r.command || '').slice(0, 36))}</option>`).join('');
     root.innerHTML = `
-      ${page('任务回放', '要求 → 计划/批准 → 闸与风险 → 实际调用 → 回执；含审计链与冻结记录校验')}
+      ${page('任务回放', '按任务核对原始要求、计划、审批、实际调用与执行回执。')}
       <div class="card">
         <div class="row">
           <select id="replay-run" class="input">${options || '<option value="">暂无已完成任务</option>'}</select>
@@ -2054,7 +2117,10 @@
     let loadVersion = 0;
     async function load(runId) {
       const version = ++loadVersion;
-      if (!runId) { out.innerHTML = '<div class="notice info">先运行一次命令，再回来回放。</div>'; return; }
+      if (!runId) {
+        out.innerHTML = '<div class="empty"><strong>暂无可回放任务</strong><div class="mt8"><a class="btn ghost small" href="#/dashboard">去工作台开始任务</a></div></div>';
+        return;
+      }
       out.innerHTML = '<div class="sub-text">载入中…</div>';
       try {
         const r = await API.get(`/api/runs/${encodeURIComponent(runId)}/replay`);
@@ -2118,7 +2184,12 @@
     } else if (runs[0]) void load(runs[0].runId);
   }
 
+  function office(root) {
+    root.innerHTML = page('三维办公场景', '查看办公楼层布局，观察虚拟人物在各区域之间走动。');
+    window.OfficeScene.mount(root);
+  }
+
   window.Views = {
-    dashboard, demo, command, minutes, mail, calendar, contacts, files, approvals, device, governance, replay,
+    dashboard, demo, command, minutes, mail, calendar, contacts, files, approvals, device, governance, replay, office,
   };
 })();

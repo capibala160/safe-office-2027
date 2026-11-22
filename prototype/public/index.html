@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>安全智慧办公 · 办公套件控制台</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/office-scene.css">
 </head>
 <body>
   <div class="app">
@@ -13,7 +14,7 @@
         <span class="brand-mark">安</span>
         <div class="brand-text">
           <strong>安全智慧办公</strong>
-          <small>办公套件控制台 · v0.56.3</small>
+          <small>办公套件控制台 · v0.57.0</small>
         </div>
       </div>
       <nav id="nav" class="nav" aria-label="主导航"></nav>
@@ -57,7 +58,7 @@
 
       <div class="content">
         <main id="view" class="view" aria-live="polite"></main>
-        <aside class="rail">
+        <aside class="rail" aria-label="安全概览">
           <section class="rail-card" id="rail-risk"></section>
           <section class="rail-card" id="rail-chain"></section>
           <section class="rail-card" id="rail-events"></section>
@@ -99,6 +100,7 @@
 
   <script src="/api.js"></script>
   <script src="/ui.js"></script>
+  <script src="/office-scene.js"></script>
   <script src="/views.js"></script>
   <script src="/app.js"></script>
 </body>
