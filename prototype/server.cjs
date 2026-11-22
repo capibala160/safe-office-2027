@@ -1207,13 +1207,29 @@ async function startServer({
   // 不配则保持 IO13 LED 演示。
   const relayPinRaw = String(process.env.SAFE_OFFICE_ACTUATOR_RELAY_PIN || '').trim();
   const actuatorRelayPin = relayPinRaw ? Number(relayPinRaw) : null;
+  // 双板拓扑（docs/74）：确认用 B 的钥匙，执行用 A 的钥匙。默认沿用 nearfieldKey，
+  // 配了 SAFE_OFFICE_ACTUATOR_DEVICE 才单独解析执行端钥匙；解析失败不回退到确认钥匙。
+  const actuatorDeviceLabel = String(process.env.SAFE_OFFICE_ACTUATOR_DEVICE || '').trim();
+  let actuatorKey = nearfieldKey;
+  let actuatorKeyOk = true;
+  if (actuatorDeviceLabel) {
+    try {
+      actuatorKey = resolveDeviceKey({ label: actuatorDeviceLabel, production }).key;
+    } catch (errRaw) { const err = /** @type {any} */ (errRaw);
+      actuatorKeyOk = false;
+      console.warn(`⚠ 执行端「${actuatorDeviceLabel}」钥匙不可用：${err.message}；设备执行不启用`);
+    }
+  }
   let actuator = null;
   try {
-    if (actuatorPort && nearfieldKey) {
-      actuator = createSerialActuator({ portPath: actuatorPort, key: nearfieldKey, relayPin: actuatorRelayPin });
+    if (actuatorPort && actuatorKey && actuatorKeyOk) {
+      actuator = createSerialActuator({ portPath: actuatorPort, key: actuatorKey, relayPin: actuatorRelayPin });
     }
   } catch (errRaw) { const err = /** @type {any} */ (errRaw);
     console.warn(`⚠ 设备执行未启用：${err.message}`);
+  }
+  if (actuator) {
+    console.log(`  执行端：${actuatorDeviceLabel || deviceLabel} @ ${actuatorPort}${actuatorRelayPin === 12 ? ' / IO12 继电器' : ''}`);
   }
   let instance = service;
   if (!instance) {
