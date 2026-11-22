@@ -312,6 +312,7 @@ function createConsoleServer({
   service = new ConsoleService(),
   publicDir = path.join(__dirname, 'public'),
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
+  commandLimitPerHour = Number(process.env.SAFE_OFFICE_COMMAND_LIMIT_PER_HOUR) || 0,
   auth = null,
   allowVirtualConfirm = true,
   nearfieldSerial = false,
@@ -328,6 +329,8 @@ function createConsoleServer({
   const loginRateLimited = (/** @type {any} */ key) => rateLimited(loginAttempts, key, 5, 60 * 1000);
   const passwordAttempts = new Map();
   const twoFactorAttempts = new Map();
+  // 任务配额（v0.58）：真实模型上公网后按登录账号限流，防止公开演示被刷模型费用
+  const commandAttempts = new Map();
   const mapAuthError = (/** @type {any} */ err) => {
     if (err.code === 'USER_NOT_FOUND') return new ConsoleError('NOT_FOUND', err.message, 404);
     if (err.code === 'USER_EXISTS') return new ConsoleError('CONFLICT', err.message, 409);
@@ -378,6 +381,13 @@ function createConsoleServer({
     list.push(now);
     map.set(key, list);
     return list.length > max;
+  }
+
+  // 任务配额：启用登录时按用户名计数；未启用登录时按来源 IP
+  function commandRateLimited(/** @type {any} */ req) {
+    if (!(commandLimitPerHour > 0)) return false;
+    const key = req.user ? `user:${req.user.username}` : `ip:${clientIp(req)}`;
+    return rateLimited(commandAttempts, key, commandLimitPerHour, 60 * 60 * 1000);
   }
 
   function safeEqual(/** @type {any} */ a, /** @type {any} */ b) {
@@ -614,6 +624,9 @@ function createConsoleServer({
         return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, nearfieldSerial, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getState(userContext(req)) });
       }
       if (pathname === '/api/commands' && method === 'POST') {
+        if (commandRateLimited(req)) {
+          throw new ConsoleError('RATE_LIMITED', `任务次数已达上限：每账号每小时最多 ${commandLimitPerHour} 次`, 429);
+        }
         const body = await readJson(req, commandBodyLimit);
         applyUserToCommand(req, body);
         return sendJson(res, 200, await service.runCommand(body));
@@ -623,6 +636,9 @@ function createConsoleServer({
       }
       // 异步任务：起跑即返回 runId；轮询进度 / 取消
       if (pathname === '/api/commands/async' && method === 'POST') {
+        if (commandRateLimited(req)) {
+          throw new ConsoleError('RATE_LIMITED', `任务次数已达上限：每账号每小时最多 ${commandLimitPerHour} 次`, 429);
+        }
         const body = await readJson(req, commandBodyLimit);
         applyUserToCommand(req, body);
         return sendJson(res, 202, { ok: true, ...service.startCommand(body) });
@@ -1138,6 +1154,7 @@ async function startServer({
   documentsStore = null,
   blobStore = null,
   commandBodyLimit = DEFAULT_COMMAND_BODY_LIMIT,
+  commandLimitPerHour = Number(process.env.SAFE_OFFICE_COMMAND_LIMIT_PER_HOUR) || 0,
   storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
   auditFile = process.env.SAFE_OFFICE_AUDIT_FILE || null,
   mcpConfigFile = process.env.SAFE_OFFICE_MCP_FILE || null,
@@ -1288,7 +1305,7 @@ async function startServer({
       : (deviceTable[0] ? deviceTable[0].label : deviceLabel),
   };
   const server = createConsoleServer({
-    service: instance, publicDir, commandBodyLimit, auth, allowVirtualConfirm,
+    service: instance, publicDir, commandBodyLimit, commandLimitPerHour, auth, allowVirtualConfirm,
     nearfieldSerial: Boolean(nearfieldPort), inboxReader,
     devices: deviceTable, deviceState,
   });

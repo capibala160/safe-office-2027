@@ -122,7 +122,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.57.0');
+  assert.equal(data.version, '0.58.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -1136,4 +1136,30 @@ test('任务回放 HTTP：JSON 与 text/plain 导出', async (t) => {
   const body = await text.text();
   assert.match(body, /任务回放/);
   assert.match(body, /证据完整性/);
+});
+
+test('任务配额：按账号每小时限流，超限 429', async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'emp', role: '员工', salt, hash }] });
+  const started = await startServer({ port: 0, auth, commandLimitPerHour: 1 });
+  t.after(() => started.close());
+  const cookie = `sfc_session=${auth.login('emp', 'password123').token}`;
+  const run = () => fetch(`${started.url}/api/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({
+      command: '把周例会纪要整理一下，发到部门内网邮箱 team@corp.internal',
+      tools: ['readDoc', 'summarize', 'sendInternalEmail'],
+      documentIds: ['M2'],
+    }),
+  });
+
+  const first = await run();
+  assert.equal(first.status, 200);
+  const second = await run();
+  assert.equal(second.status, 429);
+  const data = await second.json();
+  assert.equal(data.ok, false);
+  assert.equal(data.error.code, 'RATE_LIMITED');
+  assert.match(data.error.message, /每小时最多 1 次/);
 });
