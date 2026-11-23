@@ -29,6 +29,8 @@ const EXCLUDE_NAMES = new Set([
 function keep(src) {
   const base = path.basename(src);
   if (EXCLUDE_NAMES.has(base)) return false;
+  // config.env 的任何备份/变体（.bak-*、.local 等）同样含密钥，绝不入包
+  if (base === 'config.env' || base.startsWith('config.env.')) return false;
   if (base.endsWith('.log') && base !== 'README.md') return false;
   return true;
 }
