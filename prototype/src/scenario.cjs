@@ -91,8 +91,8 @@ const IMAGES = {
 
 // 通讯录（通讯录读取=敏感能力：单条查询 + 默认脱敏，导出能力不存在）
 const CONTACTS = {
-  '张伟': { name: '张伟', title: '部门负责人', phone: '13800138000', email: 'zhang@corp-demo.com' },
-  '李娜': { name: '李娜', title: '行政专员', phone: '13900139000', email: 'li@corp-demo.com' },
+  '张伟': { name: '张伟', title: '部门负责人', department: '项目部', phone: '13800138000', email: 'zhang@corp-demo.com' },
+  '李娜': { name: '李娜', title: '行政专员', department: '行政部', phone: '13900139000', email: 'li@corp-demo.com' },
 };
 
 // 录音样本（录音转写=外部内容通道：转写文本一律按不可信输入过闸1）

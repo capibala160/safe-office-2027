@@ -47,7 +47,7 @@ const { createBoardHumanConfirm } = require('./board-human-confirm.cjs');
 const { verifyOperation, PROTOCOL_ACTIONS, sha256Hex, sealOperation } = require('./operation.cjs');
 const { buildReport } = require('./report.cjs');
 
-const VERSION = '0.58.1';
+const VERSION = '0.59.0';
 const DEFERRED_ACTIONS = new Set([
   'sendInternalEmail', 'sendExternalEmail', 'deleteDoc', 'printDoc', 'deviceControl',
 ]);
@@ -89,6 +89,15 @@ function uniqueStrings(/** @type {any} */ list) {
 function runSeqOf(/** @type {any} */ id) {
   const m = /^RUN-(\d+)$/.exec(String(id || ''));
   return m ? Number(m[1]) : 0;
+}
+
+const RUN_TREND_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+/** @param {number} timestamp */
+function runDay(timestamp) {
+  return new Date(timestamp + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 function hashAuditEntries(/** @type {any} */ entries) {
@@ -396,6 +405,8 @@ class ConsoleService {
     this.seq = 0;
     this.agentSeq = 0;
     this.runs = [];
+    /** @type {Map<string, Map<string | null, number>>} */
+    this.runDailyCounts = new Map();
     this.liveRuns = new Map();
     // 屏幕共享会话（内存）：浏览器 getDisplayMedia 采集，服务端只记审计
     this._screenShares = new Map();
@@ -844,6 +855,11 @@ class ConsoleService {
           if (Array.isArray(saved.business.calendarSeed)) this.business.calendarSeed = saved.business.calendarSeed;
         }
         if (Array.isArray(saved.runs)) this.runs = saved.runs.slice(0, 50);
+        if (Array.isArray(saved.runDailyCounts)) {
+          for (const [day, counts] of saved.runDailyCounts) this.runDailyCounts.set(day, new Map(counts));
+        } else {
+          for (const run of this.runs) this._countRun(run);
+        }
         for (const archive of saved.minutesArchives || []) {
           if (!archive.archived || !archive.id?.startsWith('archive_')) continue;
           if (!archive.sourceIds?.every((/** @type {string} */ id) => {
@@ -893,6 +909,7 @@ class ConsoleService {
           deviceStates: this.business.deviceStates,
         },
         runs: this.runs.slice(0, 50),
+        runDailyCounts: [...this.runDailyCounts].map(([day, counts]) => [day, [...counts]]),
         minutesArchives: Object.values(this.runtime.knowledge).filter((document) => document.archived),
         autoMode: this.autoMode,
       });
@@ -1535,8 +1552,35 @@ class ConsoleService {
       location,
       name,
       model: (llm && llm.model) || null,
+      // 对话能力如实上报：Mock 没有 chat，前端据此禁用输入而不是伪造回复
+      chat: typeof llm?.chat === 'function',
       mode: location === 'cloud' ? `${name}（真实模型）` : `${name}（演示）`,
     };
+  }
+
+  /** @param {unknown} input */
+  async chat(input) {
+    if (!Array.isArray(input) || input.length < 1 || input.length > 15 || input.length % 2 !== 1) {
+      throw new ConsoleError('BAD_REQUEST', '对话需要以用户消息开始和结束，最多包含 15 条消息。');
+    }
+    const messages = input.map((message, index) => {
+      const role = index % 2 === 0 ? 'user' : 'assistant';
+      if (message?.role !== role || typeof message.content !== 'string' || message.content.length > 4000 || !message.content.trim()) {
+        throw new ConsoleError('BAD_REQUEST', '对话消息顺序有误，或内容为空、超过 4000 字。');
+      }
+      return { role, content: message.content.trim() };
+    });
+    const llm = this.planner.llm;
+    if (typeof llm?.chat !== 'function') {
+      throw new ConsoleError('CHAT_UNAVAILABLE', '助手需要真实模型：请在 config.env 配置 SAFE_OFFICE_LLM_ENDPOINT 与 SAFE_OFFICE_LLM_KEY 后重启。', 503);
+    }
+    try {
+      const reply = (await llm.chat(messages)).trim();
+      if (!reply) throw new Error('Empty chat reply');
+      return { reply: reply.slice(0, 4000) };
+    } catch {
+      throw new ConsoleError('CHAT_FAILED', '模型暂时无法回复，请稍后重试。', 502);
+    }
   }
 
   _nowSec() { return Math.floor(this.now() / 1000); }
@@ -1991,7 +2035,7 @@ class ConsoleService {
 
   listContacts() {
     return Object.values(CONTACTS).map((c) => ({
-      name: c.name, title: c.title, phone: redact(c.phone), email: redact(c.email),
+      name: c.name, title: c.title, department: c.department, phone: redact(c.phone), email: redact(c.email),
       note: '默认脱敏；单条查询请走命令台并留痕',
     }));
   }
@@ -2140,6 +2184,35 @@ class ConsoleService {
    */
   listRuns({ actor = null, role = null } = {}) {
     return this.runs.filter((run) => this._runVisible(run, actor, role));
+  }
+
+  /** @param {{at: string, operator: string | null}} run */
+  _countRun({ at, operator }) {
+    const timestamp = Date.parse(at);
+    if (!Number.isFinite(timestamp)) return;
+    const first = runDay(this.now() - (RUN_TREND_DAYS - 1) * DAY_MS);
+    for (const day of this.runDailyCounts.keys()) {
+      if (day < first) this.runDailyCounts.delete(day);
+    }
+    const day = runDay(timestamp);
+    if (day < first) return;
+    const counts = this.runDailyCounts.get(day) || new Map();
+    const owner = operator || null;
+    counts.set(owner, (counts.get(owner) || 0) + 1);
+    this.runDailyCounts.set(day, counts);
+  }
+
+  /** @param {any} [options] */
+  listRunTrend({ actor = null, role = null } = {}) {
+    const now = this.now();
+    return Array.from({ length: RUN_TREND_DAYS }, (_, index) => {
+      const date = runDay(now - (RUN_TREND_DAYS - 1 - index) * DAY_MS);
+      let count = 0;
+      for (const [operator, total] of this.runDailyCounts.get(date) || []) {
+        if (this._runVisible({ operator }, actor, role)) count += total;
+      }
+      return { date, count };
+    });
   }
 
   /**
@@ -2641,6 +2714,7 @@ class ConsoleService {
     };
     this.runs.unshift(run);
     if (this.runs.length > 50) this.runs.pop();
+    this._countRun(run);
     this._persistConsoleState();
     return { ok: true, ...run };
     });
@@ -4555,6 +4629,7 @@ class ConsoleService {
     this.seq = 0;
     this.agentSeq = 0;
     this.runs = [];
+    this.runDailyCounts.clear();
     this.liveRuns = new Map();
     this._screenShares = new Map();
     this.audios = new Map();

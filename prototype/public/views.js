@@ -536,6 +536,45 @@
   }
 
   // ---------- 工作台（任务入口） ----------
+  function dayLabel(date) {
+    const [, month, day] = date.split('-');
+    return `${Number(month)}/${Number(day)}`;
+  }
+
+  function dailyChart(days, label) {
+    const peak = Math.max(1, ...days.map(({ count }) => count));
+    return `<div class="trend-chart" role="img" aria-label="${esc(`${label}：${days.map((day) => `${day.label} ${day.count} 项`).join('，')}`)}">
+      ${days.map((day) => `<div class="trend-column${day.today ? ' is-today' : ''}">
+        <span class="trend-value">${day.count}</span>
+        <div class="trend-track">${day.count ? `<span class="trend-fill" data-height="${day.count / peak * 100}"></span>` : ''}</div>
+        <span class="trend-label">${esc(day.label)}</span>
+      </div>`).join('')}
+    </div>`;
+  }
+
+  function sizeDailyChart(root) {
+    root.querySelectorAll('.trend-fill').forEach((fill) => { fill.style.height = `${fill.dataset.height}%`; });
+  }
+
+  function renderDashboardChat(root, chat, chatReady) {
+    const log = root.querySelector('#dash-chat-log');
+    if (!log) return;
+    const messages = chat.pending ? [...chat.messages, { role: 'user', content: chat.pending }] : chat.messages;
+    log.hidden = !messages.length;
+    log.innerHTML = messages.map(({ role, content }) => `<div class="chat-message ${role === 'user' ? 'chat-user' : ''}">
+      <strong>${role === 'user' ? '你' : '办公助手'}</strong><div>${esc(content)}</div>
+    </div>`).join('');
+    log.scrollTop = log.scrollHeight;
+    const status = root.querySelector('#dash-chat-status');
+    status.textContent = chat.pending ? '正在回复…' : chat.error;
+    status.classList.toggle('chat-error', Boolean(chat.error));
+    root.querySelector('#dash-send').disabled = Boolean(chat.pending) || !chatReady;
+    root.querySelector('#dash-chat-clear').hidden = !messages.length && !chat.error;
+    root.querySelector('#dash-chat-clear').disabled = Boolean(chat.pending);
+    // 刚拿到一版稿时，直接给“提要求”的快捷入口；没有真实模型时不显示
+    root.querySelector('#dash-chat-quick').hidden = !chatReady || Boolean(chat.pending) || messages.at(-1)?.role !== 'assistant';
+  }
+
   async function dashboard(root, c) {
     const state = c.store.state || await c.refreshState();
     const risk = state.risk || {};
@@ -544,35 +583,37 @@
       API.get('/api/commands').catch(() => null),
     ]);
     const pending = opsRes?.items || [];
-    const allRuns = runsRes?.items || [];
-    const runs = allRuns.slice(0, 5);
-    const dayKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const trendDays = Array.from({ length: 7 }, (_, index) => {
-      const date = new Date(today);
-      date.setDate(today.getDate() - 6 + index);
-      return { key: dayKey(date), label: `${date.getMonth() + 1}/${date.getDate()}`, count: 0 };
-    });
-    const trendByDay = new Map(trendDays.map((day) => [day.key, day]));
-    for (const run of allRuns) {
-      const at = new Date(run.at);
-      const day = Number.isFinite(at.getTime()) ? trendByDay.get(dayKey(at)) : null;
-      if (day) day.count += 1;
-    }
-    const peakDay = Math.max(1, ...trendDays.map((day) => day.count));
+    const runs = (runsRes?.items || []).slice(0, 5);
+    const trendDays = (runsRes?.dailyCounts || []).map(({ date, count }) => ({ label: dayLabel(date), count }));
+    const trendTotal = trendDays.reduce((sum, day) => sum + day.count, 0);
     const draft = c.store.pendingCommand || '';
     const authUser = (c.store.bootstrap && c.store.bootstrap.authUser) || null;
     const role = authUser ? authUser.role : null;
     const canDecide = !role || ['设备助手', '管理员'].includes(role);
+    const model = state.model || {};
+    // 老服务端没有 chat 字段时按可用处理；助手只走真实模型，Mock 不伪造回复
+    const chatReady = model.chat !== false;
+    const chatHint = chatReady
+      ? `发送只生成文字，不执行任务；生成后可继续说「太长了，缩短点」。${model.location === 'cloud' ? `由 ${esc(model.model || '云端模型')} 生成，内容会发送给云模型，请勿粘贴敏感信息。` : ''}`
+      : '未配置真实模型，助手暂不可用；在 config.env 配置 SAFE_OFFICE_LLM_ENDPOINT 与 SAFE_OFFICE_LLM_KEY 后重启。';
     root.innerHTML = `
       ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<a href="#/governance">去人工复核</a></div>` : ''}
       <section class="card hero" aria-labelledby="dash-title">
         <div class="hero-compose">
-          <h1 id="dash-title"><label for="dash-command">今天要完成什么？</label></h1>
-          <textarea class="textarea hero-input" id="dash-command" placeholder="例如：整理周例会纪要并内部归档">${esc(draft)}</textarea>
+          <h1 id="dash-title"><label for="dash-command">今天要做什么？</label></h1>
+          <div id="dash-chat-log" class="chat-log" role="log" aria-label="对话记录" tabindex="0" hidden></div>
+          <textarea class="textarea hero-input" id="dash-command" aria-describedby="dash-chat-hint" placeholder="问个问题、粘贴文字整理，或描述要执行的任务">${esc(draft)}</textarea>
+          <p class="chat-hint" id="dash-chat-hint">${chatHint}</p>
+          <div id="dash-chat-status" class="chat-status" role="status"></div>
+          <div class="chat-quick" id="dash-chat-quick" hidden>
+            <button class="chat-chip" type="button" data-chat-quick="再短一点">再短一点</button>
+            <button class="chat-chip" type="button" data-chat-quick="分条列出">分条列出</button>
+            <button class="chat-chip" type="button" data-chat-quick="更正式一些">更正式一些</button>
+          </div>
           <div class="hero-actions">
-            <button class="btn" id="dash-start" type="button">开始任务 <span aria-hidden="true">→</span></button>
+            <button class="btn" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送</button>
+            <button class="btn ghost" id="dash-start" type="button">开始任务 <span aria-hidden="true">→</span></button>
+            <button class="btn ghost" id="dash-chat-clear" type="button" hidden>清空对话</button>
             <a class="btn ghost" href="#/demo">演示场景</a>
           </div>
         </div>
@@ -596,10 +637,8 @@
       </section>
       <div class="dashboard-insights">
         <section class="card dashboard-trend" aria-labelledby="dashboard-trend-title">
-          <div class="card-head"><h2 id="dashboard-trend-title">近 7 天任务</h2><span class="sub">${trendDays.reduce((sum, day) => sum + day.count, 0)} 项</span></div>
-          ${runsRes ? `<div class="trend-chart" role="img" aria-label="近 7 天每日任务数量：${trendDays.map((day) => `${day.label} ${day.count} 项`).join('，')}">
-            ${trendDays.map((day) => `<div class="trend-column"><span class="trend-value">${day.count}</span><div class="trend-track"><span class="trend-fill" data-height="${day.count ? Math.max(8, day.count / peakDay * 100) : 3}"></span></div><span class="trend-label">${esc(day.label)}</span></div>`).join('')}
-          </div>` : '<div class="empty">任务记录暂时不可用</div>'}
+          <div class="card-head"><h2 id="dashboard-trend-title">近 7 天任务</h2>${trendDays.length ? `<span class="sub">${trendTotal} 项 · 北京时间</span>` : ''}</div>
+          ${trendDays.length ? dailyChart(trendDays, '近 7 天每日任务数量') : '<div class="empty">任务统计暂时不可用</div>'}
         </section>
         <section class="dashboard-scene" aria-labelledby="dashboard-scene-title">
           <div class="dashboard-scene-head"><div><h2 id="dashboard-scene-title">办公现场</h2><p class="sub-text">实时预览办公区域</p></div><a href="#/office">查看完整场景</a></div>
@@ -634,8 +673,7 @@
       </div>`;
 
     window.OfficeScene?.mount(root.querySelector('#dashboard-office-preview'));
-    // CSP 禁止内联 style 属性，柱高用 CSSOM 设置
-    root.querySelectorAll('.trend-fill').forEach((fill) => { fill.style.height = `${fill.dataset.height}%`; });
+    sizeDailyChart(root);
     const quickText = {
       纪要: '整理周例会纪要并内部归档',
       外发: '把周例会纪要发给外部参会方 partner@partner-example.com',
@@ -644,6 +682,67 @@
     };
     const quickSamples = { 外发: 'external-confirm', 设备: 'device' };
     const input = root.querySelector('#dash-command');
+    const chat = c.store.chat;
+    const updateChat = () => {
+      if (c.store.chat === chat && c.store.route === 'dashboard') renderDashboardChat(root, chat, chatReady);
+    };
+    updateChat();
+    // override 用于“快捷提要求”按钮：发固定要求，不动输入框里正在写的任务描述
+    async function sendChat(override) {
+      if (chat.pending) return;
+      if (!chatReady) {
+        chat.error = '未配置真实模型，助手暂不可用。';
+        updateChat();
+        return;
+      }
+      const typed = override === undefined;
+      const content = String(typed ? input.value : override).trim();
+      if (!content || content.length > 4000) {
+        chat.error = content ? '单条消息不能超过 4000 字。' : '先输入要发送的消息。';
+        updateChat();
+        input.focus();
+        return;
+      }
+      const message = { role: 'user', content };
+      chat.pending = content;
+      chat.error = '';
+      if (typed) {
+        input.value = '';
+        delete input.dataset.sampleId;
+        c.store.pendingCommand = null;
+        c.store.pendingSample = null;
+      }
+      updateChat();
+      try {
+        const result = await API.post('/api/chat', { messages: [...chat.messages.slice(-14), message] });
+        chat.messages = [...chat.messages, message, { role: 'assistant', content: result.reply }].slice(-40);
+      } catch (err) {
+        chat.error = c.errorText(err);
+        const activeInput = c.store.route === 'dashboard' && root.querySelector('#dash-command');
+        if (typed && c.store.chat === chat && activeInput && !activeInput.value) {
+          activeInput.value = content;
+          c.store.pendingCommand = content;
+        }
+      } finally {
+        chat.pending = null;
+        updateChat();
+      }
+    }
+    root.querySelector('#dash-send').addEventListener('click', () => { void sendChat(); });
+    root.querySelectorAll('[data-chat-quick]').forEach((btn) => {
+      btn.addEventListener('click', () => { void sendChat(btn.dataset.chatQuick); });
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      void sendChat();
+    });
+    root.querySelector('#dash-chat-clear').addEventListener('click', () => {
+      chat.messages = [];
+      chat.error = '';
+      updateChat();
+      input.focus();
+    });
     root.querySelectorAll('[data-quick]').forEach((btn) => {
       btn.addEventListener('click', () => {
         input.value = quickText[btn.dataset.quick] || '';
@@ -1240,12 +1339,34 @@
   // ---------- 日历 ----------
   async function calendar(root, c) {
     const items = (await API.get('/api/calendar')).items;
+    const today = new Date();
+    const weekStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (today.getDay() + 6) % 7);
+    const weekDays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'].map((label, index) => {
+      const date = new Date(weekStart);
+      date.setDate(weekStart.getDate() + index);
+      return { date: date.toDateString(), label, shortDate: `${date.getMonth() + 1}/${date.getDate()}`, today: date.toDateString() === today.toDateString(), count: 0 };
+    });
+    const weekByDate = new Map(weekDays.map((day) => [day.date, day]));
+    for (const item of items) {
+      if (typeof item.at !== 'string' || item.status === 'failed') continue;
+      const at = item.at.trim().replace(' ', 'T');
+      const date = new Date(at.length === 10 ? `${at}T00:00:00` : at);
+      const day = weekByDate.get(date.toDateString());
+      if (day) day.count += 1;
+    }
+    const weekTotal = weekDays.reduce((sum, day) => sum + day.count, 0);
     const labels = { written: '已生成 .ics', caldav: '已写入 CalDAV', simulated: '模拟', failed: '写入失败' };
     root.innerHTML = `${page('日历', '查看会议预约及其写入结果。', '<button class="btn" id="cal-run">安排来访日程</button><button class="btn ghost" id="cal-refresh">刷新日程</button>')}
+      <section class="card calendar-week">
+        <div class="card-head"><h2>本周安排</h2><span class="sub">${weekDays[0].shortDate}–${weekDays.at(-1).shortDate} · ${weekTotal} 项</span></div>
+        ${dailyChart(weekDays, '本周每日安排')}
+        ${weekTotal ? '' : '<p class="sub calendar-week-empty">本周暂无安排</p>'}
+      </section>
       <section class="card">
         <div class="card-head"><h2>日程</h2><span class="sub">${items.length} 条</span></div>
         <div class="stack">${items.map((e) => `<div class="task-row"><div><strong>${esc(e.title)}</strong><div class="sub-text">${esc(e.at?.endsWith('Z') ? dateTime(e.at) : e.at)}${e.file ? ` · ${esc(e.file)}` : ''}</div></div><span class="badge ${e.real ? 'pass' : e.status === 'failed' ? 'block' : 'info'}">${esc(e.source === 'seed' ? '示例' : labels[e.status] || '记录')}</span></div>`).join('') || '<div class="empty">暂无预约。可以从安排来访日程开始。</div>'}</div>
       </section>`;
+    sizeDailyChart(root);
     root.querySelector('#cal-refresh').addEventListener('click', () => c.rerender());
     root.querySelector('#cal-run').addEventListener('click', () => {
       c.store.pendingSample = { calendarTemplate: true, tools: ['scheduleMeeting'], documentIds: [] };
@@ -1257,22 +1378,40 @@
   async function contacts(root, c) {
     const items = (await API.get('/api/contacts')).items;
     const roleCount = new Set(items.map((person) => person.title).filter(Boolean)).size;
+    const departments = new Map();
+    for (const person of items) {
+      const department = person.department || '未标注部门';
+      departments.set(department, (departments.get(department) || 0) + 1);
+    }
+    const departmentRows = [...departments].sort(([, count], [, otherCount]) => otherCount - count);
     root.innerHTML = `${page('通讯录', '按姓名或关键字查询单个联系人，结果默认脱敏。')}
       <div class="card collection-panel">
         <div class="collection-list">
           <div class="card-head"><h2>联系人</h2><span class="sub">${items.length} 人</span></div>
           <div class="collection-items">${items.map((p) => `<section class="card">
-        <div class="spread"><h3>${esc(p.name)}</h3><span class="badge info">${esc(p.title)}</span></div>
+        <div class="contact-heading">
+          <span class="contact-avatar" aria-hidden="true">${esc(Array.from(p.name)[0] || '?')}</span>
+          <div><h3>${esc(p.name)}</h3><div class="sub-text">${esc([p.department, p.title].filter(Boolean).join(' · '))}</div></div>
+        </div>
         <div class="sub-text">手机：${esc(p.phone)}</div>
         <div class="sub-text">邮箱：${esc(p.email)}</div>
         <div class="btn-row mt12"><button class="btn small" data-contact="${esc(p.name)}">单条查询</button></div>
           </section>`).join('') || '<div class="empty">暂无联系人。</div>'}</div>
           <div class="notice info mt12">查询记录会写入审计，仅支持单条查询。</div>
         </div>
-        <section class="card collection-detail">
-          <div class="card-head"><h2>查询结果</h2></div>
-          <div id="contacts-result"><div class="empty">点击联系人卡片上的「单条查询」，在这里查看结果。</div></div>
-        </section>
+        <div class="stack collection-detail-stack">
+          <section class="card collection-detail">
+            <div class="card-head"><h2>查询结果</h2></div>
+            <div id="contacts-result"><div class="empty">点击联系人卡片上的「单条查询」，在这里查看结果。</div></div>
+          </section>
+          <section class="card">
+            <div class="card-head"><h2>部门人数</h2><span class="sub">${departments.size} 组</span></div>
+            <div class="stack">${departmentRows.map(([name, count]) => `<div class="department-row">
+              <div class="spread"><strong>${esc(name)}</strong><span class="sub">${count} 人</span></div>
+              <meter min="0" max="${items.length}" value="${count}" aria-label="${esc(`${name}：${count} 人，共 ${items.length} 人`)}"></meter>
+            </div>`).join('') || '<div class="empty">暂无部门人数</div>'}</div>
+          </section>
+        </div>
       </div>
       <section class="stats contact-stats" aria-label="通讯录概览">
         <article class="stat"><span>联系人</span><strong>${items.length}</strong><small>可单条查询</small></article>

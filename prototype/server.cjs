@@ -331,6 +331,7 @@ function createConsoleServer({
   const twoFactorAttempts = new Map();
   // 任务配额（v0.58）：真实模型上公网后按登录账号限流，防止公开演示被刷模型费用
   const commandAttempts = new Map();
+  const chatAttempts = new Map();
   const mapAuthError = (/** @type {any} */ err) => {
     if (err.code === 'USER_NOT_FOUND') return new ConsoleError('NOT_FOUND', err.message, 404);
     if (err.code === 'USER_EXISTS') return new ConsoleError('CONFLICT', err.message, 409);
@@ -623,6 +624,15 @@ function createConsoleServer({
       if (pathname === '/api/state' && method === 'GET') {
         return sendJson(res, 200, { ok: true, virtualConfirm: allowVirtualConfirm, nearfieldSerial, authUser: req.user ? { username: req.user.username, role: req.user.role } : null, ...service.getState(userContext(req)) });
       }
+      if (pathname === '/api/chat' && method === 'POST') {
+        const key = req.user ? `user:${req.user.username}` : `ip:${clientIp(req)}`;
+        const limit = commandLimitPerHour > 0 ? commandLimitPerHour : 60;
+        if (rateLimited(chatAttempts, key, limit, 60 * 60 * 1000)) {
+          throw new ConsoleError('RATE_LIMITED', `对话次数已达上限：每小时最多 ${limit} 次`, 429);
+        }
+        const body = await readJson(req, 384 * 1024);
+        return sendJson(res, 200, { ok: true, ...await service.chat(body?.messages) });
+      }
       if (pathname === '/api/commands' && method === 'POST') {
         if (commandRateLimited(req)) {
           throw new ConsoleError('RATE_LIMITED', `任务次数已达上限：每账号每小时最多 ${commandLimitPerHour} 次`, 429);
@@ -632,7 +642,8 @@ function createConsoleServer({
         return sendJson(res, 200, await service.runCommand(body));
       }
       if (pathname === '/api/commands' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, items: service.listRuns(userContext(req)).slice(0, 50) });
+        const context = userContext(req);
+        return sendJson(res, 200, { ok: true, items: service.listRuns(context).slice(0, 50), dailyCounts: service.listRunTrend(context) });
       }
       // 异步任务：起跑即返回 runId；轮询进度 / 取消
       if (pathname === '/api/commands/async' && method === 'POST') {

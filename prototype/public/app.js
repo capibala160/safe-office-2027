@@ -51,6 +51,7 @@
     authUser: null,
     pendingSample: null,
     pendingCommand: null,
+    chat: { messages: [], pending: null, error: '' },
     opFilter: '',
     operationId: null,
     challengeId: null,
@@ -202,6 +203,9 @@
     const state = store.state;
     const modeSelect = document.getElementById('auto-mode');
     if (modeSelect) modeSelect.value = store.autoMode;
+    // 真实模型部署时，顶栏不再显示“本地 Mock / 云端（演示）”这个演示开关
+    const modelSelect = document.getElementById('model-select');
+    if (modelSelect) modelSelect.closest('label').hidden = Boolean(state && state.model && state.model.location === 'cloud');
     const banner = document.getElementById('mode-banner');
     if (banner) {
       if (store.autoMode === 'auto-full') {
@@ -303,6 +307,7 @@
     if (!window.confirm('重置演示会清空审计、操作和风险，确定吗？')) return;
     try {
       await API.post('/api/reset', {});
+      store.chat = { messages: [], pending: null, error: '' };
       await ctx.refreshBootstrap();
       toast('演示已重置', 'ok');
       ctx.navigate('dashboard');

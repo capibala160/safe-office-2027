@@ -93,6 +93,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .top-status { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; }
 .top-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .field-inline { display: flex; align-items: center; gap: 6px; color: var(--sub); font-size: 12.5px; }
+.field-inline[hidden] { display: none; }
 .field-inline select {
   border: 1px solid var(--line); border-radius: 8px;
   padding: 5px 8px; background: #fff; color: var(--ink);
@@ -134,6 +135,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .collection-items h3 { margin: 0 0 4px; }
 .collection-detail { background: #f4f7fb; }
 .collection-detail :is(.empty, .notice) { margin-block: 0; }
+.collection-detail-stack { min-width: 0; align-content: start; }
+.contact-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.contact-avatar { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: 50%; background: #e4edff; color: #244f9f; font-size: 17px; font-weight: 650; }
+.department-row { min-width: 0; }
+.department-row meter { display: block; width: 100%; height: 10px; margin-top: 4px; accent-color: #288b73; }
 .rail { display: grid; grid-template-columns: minmax(0, 1fr); align-self: start; align-items: start; gap: 12px; min-width: 0; }
 .rail-card {
   background: var(--card); border: 1px solid var(--line);
@@ -352,6 +358,20 @@ a.sample { display: block; text-decoration: none; color: inherit; }
 .hero-compose { flex: 3 1 285px; min-width: 0; }
 .hero h1 { margin: 0; font-size: clamp(22px, 2.6vw, 30px); line-height: 1.25; }
 .hero-input { display: block; min-height: 88px; margin-top: 14px; font-family: inherit; font-size: 14px; line-height: 1.65; }
+.chat-log { max-height: 290px; overflow: auto; display: grid; gap: 8px; padding: 10px; margin-top: 12px; border: 1px solid #536986; border-radius: 10px; background: #142642; }
+.chat-log[hidden], .hero-actions [hidden] { display: none; }
+.chat-message { justify-self: start; max-width: 92%; padding: 8px 12px; border-radius: 8px; background: #253c5d; color: #f2f7ff; overflow-wrap: anywhere; }
+.chat-message.chat-user { justify-self: end; background: #365a8d; }
+.chat-message strong { display: block; margin-bottom: 3px; font-size: 12px; }
+.chat-message div { white-space: pre-wrap; }
+.chat-hint, .chat-status { margin: 6px 0 0; font-size: 12px; color: #d7e5fa; }
+.chat-status:empty { display: none; }
+.chat-status.chat-error { color: #ffd0cb; }
+.chat-quick { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.chat-quick[hidden] { display: none; }
+.chat-chip { padding: 6px 12px; border: 1px solid #7389a6; border-radius: 999px; background: transparent; color: #f2f7ff; font-size: 12px; cursor: pointer; }
+.chat-chip:hover { border-color: #f2f7ff; }
+.chat-chip:focus-visible { outline: 2px solid #9ec1ff; outline-offset: 2px; }
 .hero-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .hero-actions .btn { min-height: 44px; }
 .hero-actions .btn.ghost { background: transparent; color: #f2f7ff; border-color: #7389a6; }
@@ -390,6 +410,11 @@ a.sample { display: block; text-decoration: none; color: inherit; }
 .trend-value, .trend-label { color: var(--sub); font-size: 11px; white-space: nowrap; }
 .trend-track { display: flex; align-items: flex-end; width: 100%; max-width: 34px; height: 100%; overflow: hidden; border-radius: 5px 5px 2px 2px; background: #edf2f6; }
 .trend-fill { display: block; width: 100%; min-height: 3px; border-radius: 5px 5px 2px 2px; background: #288b73; }
+.calendar-week .card-head { flex-wrap: wrap; }
+.calendar-week .trend-chart { height: 120px; }
+.trend-column.is-today .trend-label { color: #244f9f; font-weight: 700; }
+.trend-column.is-today .trend-track { background: #e4edff; }
+.calendar-week-empty { margin: 6px 0 0; text-align: center; }
 .dashboard-scene { min-width: 0; }
 .dashboard-scene-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
 .dashboard-scene-head h2 { margin: 0; font-size: 15px; }

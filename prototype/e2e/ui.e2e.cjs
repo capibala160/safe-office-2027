@@ -983,3 +983,61 @@ test('UI：任务回放页展示批准/回执与审计完整性', { timeout: 600
   assert.match(text, /审计链通过/, `回放内容：${text.slice(0, 300)}`);
   assert.match(text, /闸与风险事件/);
 });
+
+test('UI 工作台对话：真实模型按「缩短」要求直接改写上一版', { timeout: 45000 }, async (t) => {
+  const { createServer } = require('node:http');
+  let calls = 0;
+  const upstream = createServer((req, res) => {
+    req.resume();
+    calls += 1;
+    const reply = calls === 1
+      ? '会议纪要\n\n1. 周五提交初稿。\n2. 下周一评审。\n3. 王工负责接口联调。'
+      : '会议纪要：周五提交初稿；下周一评审。';
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: reply } }] }));
+  });
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  const saved = {};
+  for (const name of ['SAFE_OFFICE_LLM_ENDPOINT', 'SAFE_OFFICE_LLM_KEY', 'SAFE_OFFICE_LLM_MODEL']) saved[name] = process.env[name];
+  process.env.SAFE_OFFICE_LLM_ENDPOINT = `http://127.0.0.1:${upstream.address().port}/v1`;
+  process.env.SAFE_OFFICE_LLM_KEY = 'test-key';
+  process.env.SAFE_OFFICE_LLM_MODEL = 'test-model';
+  t.after(() => {
+    upstream.close();
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await page.goto(started.url);
+  await page.waitForSelector('#dash-command');
+  await page.locator('#top-status').getByText(/test-model/).waitFor();
+
+  await page.fill('#dash-command', '整理会议纪要：周五提交初稿；下周一评审；王工负责接口联调');
+  await page.click('#dash-send');
+  const log = page.locator('#dash-chat-log');
+  await log.getByText('3. 王工负责接口联调。').waitFor();
+  assert.equal(await page.locator('#dash-chat-quick').isVisible(), true, '拿到草稿后应出现修改快捷入口');
+
+  await page.getByRole('button', { name: '再短一点' }).click();
+  await log.getByText('会议纪要：周五提交初稿；下周一评审。', { exact: true }).waitFor();
+  assert.equal(calls, 2);
+  assert.equal(started.service.listRuns().length, 0, '对话只生成文字，不创建任务');
+});
+
+test('UI 工作台对话：未配置真实模型时禁用发送并说明原因', { timeout: 45000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await page.goto(started.url);
+  await page.waitForSelector('#dash-command');
+  await page.locator('#top-status').getByText(/MockLLM/).waitFor();
+  assert.equal(await page.locator('#dash-send').isDisabled(), true, '没有真实模型时不能发送');
+  await page.locator('#dash-chat-hint').getByText(/未配置真实模型/).waitFor();
+  assert.equal(await page.locator('#dash-chat-quick').isVisible(), false);
+});

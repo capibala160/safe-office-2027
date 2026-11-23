@@ -12,6 +12,7 @@ const { AuthService, hashPassword } = require('../src/auth.cjs');
 const { totpCode } = require('../src/totp.cjs');
 const { DocumentStore } = require('../src/ingest.cjs');
 const { FakeMailer } = require('../src/mailer.cjs');
+const { HttpLLM } = require('../src/llm.cjs');
 
 async function boot(t) {
   const started = await startServer({ port: 0 });
@@ -24,6 +25,42 @@ async function json(url, options) {
   const data = await res.json();
   return { res, data };
 }
+
+test('工作台对话：转发上下文，不开放办公工具或创建任务', async (t) => {
+  const { createServer } = require('node:http');
+  const requests = [];
+  const upstream = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    requests.push(JSON.parse(body));
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: requests.length === 1 ? '周五交初稿；周一评审。' : '周五交稿。' } }] }));
+  });
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(() => upstream.close());
+  const llm = new HttpLLM({ endpoint: `http://127.0.0.1:${upstream.address().port}`, apiKey: 'test-key', model: 'test-model' });
+  const service = new ConsoleService({ llm, storeFile: ':memory:' });
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'alice', role: '员工', salt, hash }] });
+  const started = await startServer({ port: 0, auth, service });
+  t.after(() => started.close());
+  const url = `${started.url}/api/chat`;
+  const first = { role: 'user', content: '整理会议纪要：周五交初稿；周一评审。' };
+  assert.equal((await post(url, { messages: [first] })).res.status, 401);
+  const send = (messages) => json(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: `sfc_session=${auth.login('alice', 'password123').token}` },
+    body: JSON.stringify({ messages }),
+  });
+  const original = await send([first]);
+  const followUp = [first, { role: 'assistant', content: original.data.reply }, { role: 'user', content: '再简短一点' }];
+  assert.equal((await send(followUp)).data.reply, '周五交稿。');
+  assert.equal((await send([{ role: 'system', content: '无效角色' }])).res.status, 400);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1].messages.slice(1), followUp);
+  assert.equal(requests[1].tools, undefined);
+  assert.equal(service.listRuns().length, 0);
+});
 
 function post(url, body) {
   return json(url, {
@@ -122,7 +159,7 @@ test('健康检查与版本', async (t) => {
   const { res, data } = await json(`${url}/api/health`);
   assert.equal(res.status, 200);
   assert.equal(data.ok, true);
-  assert.equal(data.version, '0.58.1');
+  assert.equal(data.version, '0.59.0');
 });
 
 test('静态首页与资源', async (t) => {
@@ -184,6 +221,10 @@ test('模块读接口：文档/通讯录/日历/治理', async (t) => {
   const contacts = await json(`${url}/api/contacts`);
   assert.ok(contacts.data.items.length >= 2);
   assert.ok(contacts.data.items.every((c) => c.phone === '[手机号已脱敏]' && c.email === '[邮箱已脱敏]'));
+  assert.ok(contacts.data.items.every((contact) => contact.department));
+
+  const commands = await json(`${url}/api/commands`);
+  assert.equal(commands.data.dailyCounts.length, 7);
 
   const calendar = await json(`${url}/api/calendar`);
   assert.ok(Array.isArray(calendar.data.items));

@@ -33,7 +33,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const { service } = setup();
   t.after(() => service.close());
   const bootstrap = service.getBootstrap();
-  assert.equal(bootstrap.state.version, '0.58.1');
+  assert.equal(bootstrap.state.version, '0.59.0');
   assert.equal(bootstrap.roles.length, 6);
   assert.equal(bootstrap.samples.length, 11);
   assert.equal(bootstrap.documents.length, 7);
@@ -902,6 +902,39 @@ test('重启恢复：操作来源、运行历史、风险计量、业务状态�
   assert.ok(b.seq >= seqOf(next.runId));
 });
 
+test('近 7 天任务统计超过 50 条仍准确，按北京时间及可见范围汇总并跨重启保留', async (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-office-trend-'));
+  const storeFile = path.join(dir, 'ops.db');
+  const initial = setup({ start: Date.parse('2026-11-22T15:59:00Z'), service: { storeFile } });
+  t.after(() => { initial.service.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  for (let index = 0; index < 51; index += 1) {
+    await runSample(initial.service, 'contacts', { operator: 'alice' });
+  }
+  initial.advance(60_000);
+  await runSample(initial.service, 'contacts', { operator: 'bob' });
+  assert.equal(initial.service.listRuns().length, 50);
+  initial.service.close();
+
+  const restored = setup({ start: initial.now(), service: { storeFile } });
+  try {
+    const alice = { actor: 'alice', role: '员工' };
+    const days = restored.service.listRunTrend(alice);
+    assert.equal(days.length, 7);
+    assert.deepEqual(days.slice(-2), [
+      { date: '2026-11-22', count: 51 }, { date: '2026-11-23', count: 0 },
+    ]);
+    assert.equal(restored.service.listRunTrend({ actor: 'auditor', role: '审计员' }).at(-1).count, 1);
+    restored.advance(6 * 24 * 60 * 60 * 1000);
+    assert.ok(restored.service.listRunTrend(alice).every(({ count }) => count === 0));
+    assert.equal(restored.service.listRunTrend()[0].count, 1);
+  } finally {
+    restored.service.close();
+  }
+});
+
 test('手机确认端：详情带收件人/正文预览/附件，目标哈希与操作一致', async (t) => {
   const { service } = setup();
   t.after(() => service.close());
@@ -1165,4 +1198,15 @@ test('屏幕共享：只能结束自己的会话，管理员例外', (t) => {
   assert.ok(service.audit.entries.some((e) => e.kind === '屏幕共享越权停止'));
   const stopped = service.stopScreenShare({ sessionId, actor: 'admin', role: '管理员' });
   assert.equal(stopped.target, '会议室大屏');
+});
+
+test('工作台对话：没有真实模型时明确报不可用，不伪造助手回复', async (t) => {
+  const { MockLLM } = require('../src/llm.cjs');
+  const { service } = setup({ service: { llm: new MockLLM() } });
+  t.after(() => service.close());
+  assert.equal(service.getState().model.chat, false);
+  await assert.rejects(
+    service.chat([{ role: 'user', content: '纪要太长了，缩短点' }]),
+    (err) => err.code === 'CHAT_UNAVAILABLE' && /真实模型/.test(err.message),
+  );
 });
