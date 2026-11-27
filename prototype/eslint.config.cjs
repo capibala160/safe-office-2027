@@ -44,4 +44,10 @@ module.exports = [
       globals: { ...globals.browser, ...globals.node, SFC1: 'readonly' },
     },
   },
+  {
+    files: ['scripts/record-board-flow.cjs', 'scripts/record-cards.cjs', 'scripts/record-replay.cjs'],
+    languageOptions: {
+      globals: { document: 'readonly' },
+    },
+  },
 ];
