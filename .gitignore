@@ -25,5 +25,10 @@ ws63/firmware/out/
 # 黑客松材料（WaytoAGI / 锦创杯 方案与 workbench）留在本地，不进产品仓
 hackathon/
 
+# 一次性录制脚本（本地工具，含本机路径，不入库）
+prototype/scripts/record-*.cjs
+# 本地截图/录制产物
+prototype/output/
+
 # 发布包
 dist/
