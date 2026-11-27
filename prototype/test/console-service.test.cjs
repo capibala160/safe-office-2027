@@ -35,7 +35,7 @@ test('初始化：角色/工具/文档/策略/审计链', (t) => {
   const bootstrap = service.getBootstrap();
   assert.equal(bootstrap.state.version, '0.59.0');
   assert.equal(bootstrap.roles.length, 6);
-  assert.equal(bootstrap.samples.length, 11);
+  assert.equal(bootstrap.samples.length, 12);
   assert.equal(bootstrap.documents.length, 7);
   assert.equal(service.policy.decide('员工', 'sendExternalEmail'), 'confirm');
   assert.equal(service.audit.entries.length, 0);
