@@ -63,6 +63,7 @@ class BoardLog {
     this.bytes = 0;
     this.lines = 0;
     this.init = null; // 'exec' | 'confirm'
+    this.initCount = 0;
     this.alive = 0;
     this.lost = 0;
     this.lastAliveAfterLoss = false;
@@ -93,6 +94,7 @@ class BoardLog {
 
     if (/SFC1 LINK: init role=(exec|confirm) ret=0/.test(line)) {
       this.init = line.includes('role=exec') ? 'exec' : 'confirm';
+      this.initCount += 1;
     }
     if (line.includes('SFC1 LINK: ALIVE peer=')) {
       this.alive += 1;
@@ -111,25 +113,26 @@ async function main() {
   const portB = arg('b', '');
   const seconds = Number(arg('seconds', String(DEFAULT_SECONDS)));
   const expectReconnect = process.argv.includes('--expect-reconnect');
+  const soak = process.argv.includes('--soak');
 
   if (!portA || !portB) {
-    console.error('用法: node scripts/sle-link-verify.cjs --a COM11 --b COM12 [--seconds 30] [--expect-reconnect]');
+    console.error('用法: node scripts/sle-link-verify.cjs --a COM11 --b COM12 [--seconds 30] [--expect-reconnect | --soak --seconds 3660]');
     process.exit(1);
   }
-  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 600) {
-    console.error('--seconds 必须是 1–600 的秒数');
+  const minSeconds = soak ? 3601 : 1;
+  const maxSeconds = soak ? 86400 : 600;
+  if (!Number.isInteger(seconds) || seconds < minSeconds || seconds > maxSeconds || (soak && expectReconnect)) {
+    console.error(`--seconds 必须是 ${minSeconds}–${maxSeconds} 的整数，--soak 与 --expect-reconnect 互斥`);
     process.exit(1);
   }
 
   const boards = { a: new BoardLog('A'), b: new BoardLog('B') };
-  let ports;
+  const ports = { a: null, b: null };
   try {
-    const [a, b] = await Promise.all([
-      openSerialPort({ path: portA, baudRate: 115200 }),
-      openSerialPort({ path: portB, baudRate: 115200 }),
-    ]);
-    ports = { a, b };
+    ports.a = await openSerialPort({ path: portA, baudRate: 115200 });
+    ports.b = await openSerialPort({ path: portB, baudRate: 115200 });
   } catch (error) {
+    await Promise.all([closePort(ports.a), closePort(ports.b)]);
     console.error(`打开串口失败：${error.message}`);
     console.error('提示：serialport 是可选依赖；先 npm install serialport，并确认 COM 号（scripts/serial-probe.cjs --list）');
     process.exit(1);
@@ -148,6 +151,12 @@ async function main() {
   await Promise.all([closePort(ports.a), closePort(ports.b)]);
 
   const failures = [];
+  if (soak) {
+    for (const board of Object.values(boards)) {
+      if (board.lost > 0) failures.push(`${board.label} 观察到 ${board.lost} 次 peer lost`);
+      if (board.initCount > 1) failures.push(`${board.label} 观察到重复初始化`);
+    }
+  }
   if (boards.a.bytes === 0) failures.push('A 串口 0 字节');
   if (boards.b.bytes === 0) failures.push('B 串口 0 字节');
   if (boards.a.init === null) failures.push('A 未打印 init role=... ret=0');
@@ -169,7 +178,7 @@ async function main() {
     const board = boards[key];
     console.log(
       `  ${key.toUpperCase()}: role=${board.init ?? '?'} bytes=${board.bytes} lines=${board.lines} ` +
-        `alive=${board.alive} lost=${board.lost}`
+        `init=${board.initCount} alive=${board.alive} lost=${board.lost}`
     );
   }
 

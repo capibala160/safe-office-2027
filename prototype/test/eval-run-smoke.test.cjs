@@ -17,6 +17,8 @@ test('eval/run.cjs：Mock 开发集能跑完并产出 JSON', { timeout: 60000 },
     assert.match(out, /完整网关/);
     const data = JSON.parse(fs.readFileSync(path.join(dir, 'eval-results.json'), 'utf8'));
     assert.equal(data.meta.fingerprint.length, 64);
+    assert.equal(data.meta.softwareVersion, require('../package.json').version);
+    assert.match(data.meta.promptSha256, /^[a-f0-9]{64}$/);
     assert.ok(data.runs.length >= 14);
     const normalRuns = data.runs.filter((run) => run.kind === 'normal');
     const calls = data.matrix.full.all.latency.normalModelCalls;

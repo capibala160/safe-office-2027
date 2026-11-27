@@ -111,6 +111,22 @@ test('集成：机密/内部附件冻结被拒，普通附件照常冻结', asyn
   );
 });
 
+test('集成：同时提交普通附件与含内部资料片段的文本附件时拒绝整批冻结', async (t) => {
+  const { service, blobStore } = setup(t);
+  const item = sample(service, 'external-confirm');
+  const fragment = DOCS.M2.body.replace(/\s+/g, ' ').slice(0, 80);
+  await assert.rejects(service.runCommand({
+    ...item,
+    attachments: [
+      { filename: 'agenda.txt', mime: 'text/plain', contentBase64: b64('周一上午项目对齐') },
+      { filename: 'notes.txt', mime: 'text/plain', contentBase64: b64(`会议补充说明\n${fragment}\n完`) },
+    ],
+  }), /内部级材料/);
+  assert.equal(service.store.listOperations().length, 0);
+  assert.equal(blobStore.db.prepare('SELECT COUNT(*) AS n FROM blobs').get().n, 0);
+  assert.equal(service.mailer.calls.length, 0);
+});
+
 test('发送前复核：冻结后才读入同内容文档 → 拒绝执行', async (t) => {
   const { service } = setup(t);
   const item = sample(service, 'external-confirm');

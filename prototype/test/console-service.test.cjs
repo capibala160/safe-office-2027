@@ -1210,3 +1210,23 @@ test('工作台对话：没有真实模型时明确报不可用，不伪造助�
     (err) => err.code === 'CHAT_UNAVAILABLE' && /真实模型/.test(err.message),
   );
 });
+
+test('工作台对话：两次独立请求携带改稿历史，全程不创建办公任务', async (t) => {
+  const messagesSeen = [];
+  const { service } = setup({ service: { llm: {
+    async chat(messages) {
+      messagesSeen.push(messages);
+      return messages.length === 1 ? '周五上午十点开会，请准备值班表。' : '周五十点开会，备好值班表。';
+    },
+  } } });
+  t.after(() => service.close());
+  const request = { role: 'user', content: '写一份周五十点开会的通知，提醒准备值班表。' };
+  const first = await service.chat([request]);
+  const history = [request, { role: 'assistant', content: first.reply }, { role: 'user', content: '缩短一点，保留开会时间。' }];
+  const second = await service.chat(history);
+  assert.deepEqual(messagesSeen, [[request], history]);
+  assert.match(second.reply, /周五十点/);
+  assert.equal(service.listRuns().length, 0);
+  assert.equal(service.store.listOperations().length, 0);
+  assert.equal(service.mailer.calls.length, 0);
+});

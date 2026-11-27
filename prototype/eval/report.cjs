@@ -250,6 +250,7 @@ function buildEvalReport({ runs, matrix, meta, ablationRuns = null }) {
   <h1>安全智慧办公 · Agent 安全运行机制评测报告</h1>
   <div class="sub">同一模型 × 同一语料 × 三档防护 · 由 harness 自动生成（${esc(meta.generatedAt)}）</div>
   <div class="meta">
+    <span>软件版本 ${esc(meta.softwareVersion || '未记录')}</span>
     <span>语料版本 ${esc(meta.corpusVersion)}</span>
     <span>模型：${esc(meta.modelName)}</span>
     <span>数据集：${esc({ all: '全部', dev: '开发集', validation: '验证集' }[meta.split] || meta.split || '全部')}</span>
@@ -431,6 +432,8 @@ function printConsole({ matrix, runs, meta, ablationRuns = null }) {
 function buildMeta({ llmKind, modelName, repeats, corpusVersion, cases, split = 'all' }) {
   return {
     generatedAt: new Date().toISOString(),
+    softwareVersion: require('../package.json').version,
+    promptSha256: require('./fingerprint.cjs').promptFingerprint(),
     corpusVersion,
     llmKind,
     modelName,

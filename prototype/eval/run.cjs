@@ -113,7 +113,8 @@ const HELP = `
     llmKind: kind, modelName, repeats: opts.repeat, corpusVersion: CORPUS_VERSION, cases, split: opts.split,
   });
   const datasetKey = opts.kind === 'all' ? opts.split : `${opts.split}:${opts.kind}`;
-  const fingerprintSplit = opts.caseIds ? `${datasetKey}:${opts.caseIds.join(',')}` : datasetKey;
+  const selection = opts.caseIds ? `${datasetKey}:${opts.caseIds.join(',')}` : datasetKey;
+  const fingerprintSplit = `${meta.softwareVersion}:${selection}`;
   meta.caseKind = opts.kind;
   if (opts.caseIds) meta.caseIds = opts.caseIds;
   // 尾延迟预算进指纹与报告：默认档不进指纹，旧实验仍可续跑；开档后指纹必变
