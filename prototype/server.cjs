@@ -1181,8 +1181,12 @@ async function startServer({
   // 真板确认端（docs/11 下一步）：设置 SAFE_OFFICE_NEARFIELD_PORT=COM11 时，
   // 挑战帧走串口发给板子，决定来自物理按键；不设置则继续走虚拟设备。
   const nearfieldPort = String(process.env.SAFE_OFFICE_NEARFIELD_PORT || '').trim() || null;
+  const challengeTtlSec = Number(process.env.SAFE_OFFICE_CHALLENGE_TTL_SEC || '') || 30;
   const nearfieldTransportFactory = nearfieldPort
-    ? createSerialNearfieldFactory({ portPath: nearfieldPort })
+    ? createSerialNearfieldFactory({
+      portPath: nearfieldPort,
+      logger: (line) => console.log(`[nearfield] ${line}`),
+    })
     : null;
   // 闸4 也走真板确认（docs/59）：默认关；开启后高危步骤必须板端按键，失败不回退模拟
   const gate4Nearfield = Boolean(nearfieldPort)
@@ -1251,6 +1255,7 @@ async function startServer({
         deviceId: 'phone-A',
         deviceLabel: '手机确认端（演示）',
         pairingCode,
+        ttlSec: challengeTtlSec,
         documentsStore,
         blobStore,
         storeFile,
@@ -1270,6 +1275,7 @@ async function startServer({
         mailer: mailer || new FakeMailer(),
         nearfieldTransportFactory,
         gate4Nearfield,
+        ttlSec: challengeTtlSec,
         // 设备身份：设备表命中时用表里的权威 8 字节 id；否则按 SAFE_OFFICE_DEVICE 派生
         ...(resolvedDevice && resolvedDevice.record
           ? {
@@ -1515,15 +1521,17 @@ if (require.main === module) {
         ? `  真实资料：${imported} 份（${documentsDb}）`
         : '  真实资料：0 份（导入：npm run import -- <文件> --level 内部）');
     }
+    const serialPort = String(process.env.SAFE_OFFICE_NEARFIELD_PORT || '').trim();
+    const serialDevice = String(process.env.SAFE_OFFICE_DEVICE || 'ws63-B').trim();
     if (code) {
       console.log('  手机确认端已启用：局域网只开放确认页与 /api/phone/*');
       console.log(`    配对码：${code}`);
       for (const item of phoneUrls) console.log(`    手机打开：${item.url}  (${item.name})`);
       if (phoneUrls.length === 0) console.log('    （未找到局域网 IPv4，请检查网络）');
     } else if (auth) {
-      console.log('  本机演示：登录已启用；业务动作模拟；确认端为虚拟设备');
+      console.log(`  本机演示：登录已启用；业务动作模拟；确认端为${serialPort ? ` WS63 真板 ${serialDevice} @ ${serialPort}` : '虚拟设备'}`);
     } else {
-      console.log('  仅本机演示：无登录；业务动作模拟；确认端为虚拟设备');
+      console.log(`  仅本机演示：无登录；业务动作模拟；确认端为${serialPort ? ` WS63 真板 ${serialDevice} @ ${serialPort}` : '虚拟设备'}`);
     }
     console.log('  业务动作全部模拟；SFC1 为对称密钥，不构成"证明本人在场"');
     console.log('  Ctrl+C 停止');

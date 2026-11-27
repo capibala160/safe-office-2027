@@ -332,7 +332,14 @@
     if (op.confirmationId === 'auto-safe') return '<span class="badge warn">低风险自动批准</span>';
     if (op.confirmationId === 'policy-auto') return '<span class="badge info">策略自动确认</span>';
     if (op.confirmationId === 'policy-auto-reply') return '<span class="badge info">自动回信策略（绕过 WS63）</span>';
+    if (op.state === 'rejected') return '<span class="badge info">未确认（已拒绝）</span>';
+    if (String(op.confirmationId || '').startsWith('ws63-')) {
+      return '<span class="badge info">WS63 真板已确认</span>';
+    }
     if (op.requiresNearfield) {
+      if (op.confirmationTransport === 'ws63-serial') {
+        return '<span class="badge warn">需 WS63 真板确认</span>';
+      }
       if (op.confirmationTransport === 'virtual-loopback') {
         return '<span class="badge warn">需近场确认（虚拟设备）</span>';
       }
@@ -791,7 +798,7 @@
           <div class="stack">
             <a class="sample" href="#/minutes"><strong>1 · 整理会议纪要</strong><small>读取 → 摘要 → 正式稿</small></a>
             <a class="sample" href="#/mail"><strong>2 · 内网发送</strong><small>策略自动确认 → FakeMailer</small></a>
-            <a class="sample" href="#/approvals"><strong>3 · 外发确认</strong><small>冻结操作 → WS63 虚拟设备 → 发送</small></a>
+            <a class="sample" href="#/approvals"><strong>3 · 外发确认</strong><small>冻结操作 → WS63 确认 → 发送</small></a>
             <a class="sample" href="#/device"><strong>4 · 设备控制</strong><small>门锁 → 物理通道 → 设备确认</small></a>
             <a class="sample" href="#/command"><strong>5 · 攻击样例</strong><small>注入 / 私人邮箱 / 批量删除 / 绕过审批</small></a>
             <a class="sample" href="#/governance"><strong>6 · 治理回溯</strong><small>审计链 / 风险 / 报告</small></a>

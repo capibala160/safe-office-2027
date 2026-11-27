@@ -3141,7 +3141,9 @@ class ConsoleService {
         ? !!meta.requiresNearfield
         : this.toolRegistry.isHighRisk(operation.action),
       // 近场确认端真实形态：虚拟 / 手机 / 未来的 WS63 串口；前端据此标「模拟/非硬件」
-      confirmationTransport: this.pairingCode ? 'phone-lan' : 'virtual-loopback',
+      confirmationTransport: this.nearfieldTransportFactory
+        ? 'ws63-serial'
+        : this.pairingCode ? 'phone-lan' : 'virtual-loopback',
       confirmationDevice: this.deviceLabel,
       confirmationMode: ['policy-auto', 'auto-safe', 'auto-full', 'policy-auto-reply'].includes(operation.confirmationId)
         ? operation.confirmationId
@@ -3345,7 +3347,8 @@ class ConsoleService {
       result: challenge.result,
       device: {
         id: this.deviceId, label: this.deviceLabel, online: true,
-        transport: 'virtual-loopback', note: '虚拟设备（非硬件）',
+        transport: this.nearfieldTransportFactory ? 'ws63-serial' : 'virtual-loopback',
+        note: this.nearfieldTransportFactory ? 'WS63 真板（串口）' : '虚拟设备（非硬件）',
       },
       operation: op ? {
         subject: op.subject, recipient: op.recipient, level: op.level,
@@ -3729,8 +3732,8 @@ class ConsoleService {
     return {
       device: {
         id: this.deviceId, label: this.deviceLabel, online: true,
-        transport: this.pairingCode ? 'phone-lan' : 'virtual-loopback', protocol: 'SFC1',
-        note: this.pairingCode ? '手机确认端（局域网，非硬件）' : '虚拟设备（非硬件）',
+        transport: this.nearfieldTransportFactory ? 'ws63-serial' : this.pairingCode ? 'phone-lan' : 'virtual-loopback', protocol: 'SFC1',
+        note: this.nearfieldTransportFactory ? 'WS63 真板（串口）' : this.pairingCode ? '手机确认端（局域网，非硬件）' : '虚拟设备（非硬件）',
       },
       pairing: this.pairingCode ? { code: this.pairingCode, note: '确认端配对码（局域网内可见）' } : null,
       actuator: this.actuator ? {
