@@ -2294,7 +2294,7 @@
           : '';
         out.innerHTML = `
           <div class="spread">
-            <div><h3>${esc(r.runId)}</h3><div class="sub-text">${esc(r.command)}</div></div>
+            <div><h3>${esc(r.runId)}</h3><div class="sub-text">${esc(r.command)}</div><div class="sub-text mt8">发起人：${esc(r.operator || '—')}</div></div>
             <div><span class="badge ${auditOk ? 'executed' : 'failed'}">审计链${auditOk ? '通过' : '未通过'}</span></div>
           </div>
           <h4 class="mt12">批准与回执</h4>${approvals}
