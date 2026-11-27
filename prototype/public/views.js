@@ -598,6 +598,8 @@
     const role = authUser ? authUser.role : null;
     const canDecide = !role || ['设备助手', '管理员'].includes(role);
     const model = state.model || {};
+    let guideHidden = false;
+    try { guideHidden = localStorage.getItem('safe-office.guide-hidden') === '1'; } catch { /* 隐私模式 */ }
     // 老服务端没有 chat 字段时按可用处理；助手只走真实模型，Mock 不伪造回复
     const chatReady = model.chat !== false;
     const chatHint = chatReady
@@ -622,6 +624,7 @@
             <button class="btn ghost" id="dash-start" type="button">开始任务 <span aria-hidden="true">→</span></button>
             <button class="btn ghost" id="dash-chat-clear" type="button" hidden>清空对话</button>
             <a class="btn ghost" href="#/demo">演示场景</a>
+            <button class="btn ghost" id="dash-guide-show" type="button" ${guideHidden ? '' : 'hidden'}>演示向导</button>
           </div>
         </div>
         <div class="hero-flow">
@@ -632,6 +635,18 @@
             <li><strong>查看结果</strong><span>在任务回放中核对记录和回执</span></li>
           </ol>
         </div>
+      </section>
+      <section class="card demo-guide" id="dash-guide" ${guideHidden ? 'hidden' : ''} aria-labelledby="dash-guide-title">
+        <div class="card-head demo-guide-head">
+          <h2 id="dash-guide-title">第一次用？三步走完演示</h2>
+          <button class="btn ghost small" id="dash-guide-hide" type="button">收起向导</button>
+        </div>
+        <div class="demo-guide-grid">
+          <div class="demo-guide-step"><span class="num">01</span><strong>选一个模板</strong><span>从「整理会议纪要」开始，系统会读取、摘要并归档。</span><a class="btn small" href="#/command">去命令台</a></div>
+          <div class="demo-guide-step"><span class="num">02</span><strong>核对并确认</strong><span>外发、打印、设备动作会冻结，在审批页核对待确认操作。</span><a class="btn ghost small" href="#/approvals">打开审批</a></div>
+          <div class="demo-guide-step"><span class="num">03</span><strong>看任务回放</strong><span>回放里能看到发起人、确认端、执行回执和审计链。</span><a class="btn ghost small" href="#/replay">打开回放</a></div>
+        </div>
+        <div class="sub-text mt8">需要重来时，管理员可在治理页「重置演示」；普通账号继续用新任务覆盖演示流程即可。</div>
       </section>
       <section class="dashboard-templates" aria-labelledby="dashboard-templates-title">
         <h2 id="dashboard-templates-title">快捷模板</h2>
@@ -662,6 +677,7 @@
             </article>`).join('') : `<div class="dashboard-empty">
               <strong>${opsRes ? '暂无待确认操作' : '待办暂不可用'}</strong>
               <span>${opsRes ? '需要确认的动作会列在这里，可先核对操作目标和详情。' : '可前往审批页重新查询。'}</span>
+              ${opsRes ? '<a class="btn ghost small" href="#/command">发起一个任务</a>' : '<a class="btn ghost small" href="#/approvals">去审批页</a>'}
             </div>`}
           </div>
         </section>
@@ -674,11 +690,28 @@
             </div>`).join('') : `<div class="dashboard-empty">
               <strong>${runsRes ? '还没有任务记录' : '任务记录暂不可用'}</strong>
               <span>${runsRes ? '可用快捷模板运行第一个任务，之后从这里打开回放。' : '连接恢复后，刷新页面即可重新查询。'}</span>
+              <a class="btn ghost small" href="#/command">去命令台</a>
             </div>`}
           </div>
         </section>
       </div>`;
 
+    const guide = root.querySelector('#dash-guide');
+    const guideShow = root.querySelector('#dash-guide-show');
+    const guideHide = root.querySelector('#dash-guide-hide');
+    const setGuideHidden = (hidden) => {
+      if (guide) guide.hidden = hidden;
+      if (guideShow) guideShow.hidden = !hidden;
+      try {
+        if (hidden) localStorage.setItem('safe-office.guide-hidden', '1');
+        else localStorage.removeItem('safe-office.guide-hidden');
+      } catch { /* 隐私模式 */ }
+    };
+    guideHide?.addEventListener('click', () => setGuideHidden(true));
+    guideShow?.addEventListener('click', () => {
+      setGuideHidden(false);
+      guide?.scrollIntoView({ block: 'nearest' });
+    });
     window.OfficeScene?.mount(root.querySelector('#dashboard-office-preview'));
     sizeDailyChart(root);
     const quickText = {

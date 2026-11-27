@@ -201,6 +201,13 @@
 
   function renderChrome() {
     const state = store.state;
+    const resetBtn = document.getElementById('btn-reset');
+    if (resetBtn) {
+      const role = (state && state.authUser && state.authUser.role)
+        || (store.bootstrap && store.bootstrap.authUser && store.bootstrap.authUser.role)
+        || null;
+      resetBtn.hidden = Boolean(role) && role !== '管理员';
+    }
     const modeSelect = document.getElementById('auto-mode');
     if (modeSelect) modeSelect.value = store.autoMode;
     // 真实模型部署时，顶栏不再显示“本地 Mock / 云端（演示）”这个演示开关
