@@ -3431,9 +3431,8 @@ class ConsoleService {
     try {
       if (this.nearfieldTransportFactory) {
         // 真板路径：帧发给板端，决定来自物理按键（decision 参数只参与四眼原则校验）
-        if (!this._nearfieldTransport) {
-          this._nearfieldTransport = await this.nearfieldTransportFactory();
-        }
+        // 每次都向工厂取：端口关闭后工厂会懒重连，不能复用已关闭的缓存 transport。
+        this._nearfieldTransport = await this.nearfieldTransportFactory();
         reply = await this._nearfieldTransport.send(challenge.frame);
       } else {
         const device = new VirtualDevice({
@@ -3446,6 +3445,8 @@ class ConsoleService {
         reply = await transport.send(challenge.frame);
       }
     } catch (errRaw) { const err = /** @type {any} */ (errRaw);
+      // 丢弃缓存，下一次确认由工厂重新打开串口
+      this._nearfieldTransport = null;
       this.confirmer.cancel(challenge.pending);
       challenge.state = 'expired';
       this._pushHistory(challenge, { code: 'TRANSPORT', outcome: 'error' });

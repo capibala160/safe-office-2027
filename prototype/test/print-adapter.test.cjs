@@ -217,6 +217,39 @@ test('排版打印：打印机无效 → failed/rejected，PDF 仍保留', async
   assert.ok(result.file && fs.existsSync(result.file));
 });
 
+test('排版打印：PDF PrintTo 无关联 → 回退 Out-Printer 文本打印', async (t) => {
+  const dir = tmpDir(t);
+  const calls = [];
+  let psCalls = 0;
+  const exec = (cmd, args, options, cb) => {
+    calls.push({ cmd, args, options });
+    if (cmd === 'powershell.exe') {
+      psCalls += 1;
+      if (psCalls === 1) {
+        cb(new Error('submit failed'), '', 'No application is associated with the specified file for this operation');
+      } else {
+        cb(null, 'ok', '');
+      }
+      return;
+    }
+    const arg = args.find((a) => a.startsWith('--print-to-pdf='));
+    const file = arg.slice('--print-to-pdf='.length);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '%PDF-1.4 fake');
+    cb(null, '', '');
+  };
+  const result = await printDocument({
+    text: '正文', title: '周报', printer: 'P1', pdfDir: dir,
+    edgePath: 'msedge-fake', exec,
+  });
+  assert.equal(result.mode, 'printed');
+  assert.equal(result.fallback, 'text');
+  assert.equal(psCalls, 2);
+  const textCall = calls.filter((c) => c.cmd === 'powershell.exe')[1];
+  assert.ok(textCall.options.env.SAFE_PRINT_FILE);
+  assert.equal(textCall.options.env.SAFE_PRINT_NAME, 'P1');
+});
+
 test('排版打印：找不到 Edge → 明确失败', async (t) => {
   const dir = tmpDir(t);
   const exec = fakePrintExec();

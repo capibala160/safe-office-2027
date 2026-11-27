@@ -305,9 +305,22 @@ async function printDocument({
   if (!printer) return { mode: 'pdf', printer: null, file: rendered.file };
   const submitted = await submitPdf({ file: rendered.file, printer, exec, timeoutMs });
   if (!submitted.ok) {
+    // PDF PrintTo 失败（常见：Windows 没有 PDF 打印关联）时，回退到纯文本 Out-Printer。
+    // 打印机名无效等情况下文本回退同样会失败，最终仍如实返回失败。
+    const fallback = await printText({
+      text: `${title ? `${title}\n\n` : ''}${text}`,
+      printer, timeoutMs, exec,
+    });
+    if (fallback.mode === 'printed') {
+      return {
+        mode: 'printed', printer, file: rendered.file,
+        fallback: 'text', pdfError: submitted.error,
+      };
+    }
     return {
       mode: 'failed', printer, file: rendered.file,
-      error: submitted.error, rejected: submitted.rejected,
+      error: `PDF 打印失败（${submitted.error}）；文本回退失败：${fallback.error || ''}`.slice(0, 500),
+      rejected: Boolean(submitted.rejected || fallback.rejected),
     };
   }
   return { mode: 'printed', printer, file: rendered.file };
