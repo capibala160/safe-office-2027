@@ -172,6 +172,8 @@ function hashAuditEntries(/** @type {any} */ entries) {
  * @property {any} [bouncePoller]
  * @property {any} [inboxReader]
  * @property {any} [autoReplyPolicy]
+ * @property {string | null} [mailApprover]
+ * @property {((username: string) => { role: string, disabled: boolean } | null) | null} [mailUserInfo]
  * @property {string | null} [pairingCode]
  * @property {LlmLike | null} [llm]
  * @property {string} [storeFile]
@@ -287,6 +289,8 @@ class ConsoleService {
     bouncePoller = null,
     inboxReader = null,
     autoReplyPolicy = null,
+    mailApprover = null,
+    mailUserInfo = null,
     pairingCode = null,
     llm = null,
     storeFile = process.env.SAFE_OFFICE_STORE_FILE || ':memory:',
@@ -318,6 +322,8 @@ class ConsoleService {
     actuator = null,
   } = {}) {
     this.now = now;
+    this.mailApprover = mailApprover;
+    this.mailUserInfo = mailUserInfo;
     this._auditActorStorage = new AsyncLocalStorage();
     this.pairingCode = pairingCode ? String(pairingCode) : null;
     this.lastPhoneResult = null;
@@ -434,11 +440,11 @@ class ConsoleService {
     }
     // v0.46：自动回信（默认关闭；配置不全只记录错误，不阻塞启动）
     this.inboxReader = inboxReader;
-    this.autoReplyPolicy = autoReplyPolicy;
+    this.autoReplyPolicy = mailApprover ? null : autoReplyPolicy;
     this.autoReplyError = null;
     this._autoReplyTimer = null;
     this.autoReplyState = { lastAt: null, lastResult: null, lastError: null };
-    if (!this.autoReplyPolicy) {
+    if (!this.autoReplyPolicy && !mailApprover) {
       try {
         const cfg = parseAutoReplyConfig(process.env);
         this.autoReplyPolicy = cfg.enabled ? cfg : null;
@@ -1614,6 +1620,7 @@ class ConsoleService {
    * @param {any} operation
    */
   _autoDecision(action, operation) {
+    if (this.mailApprover && operation.protocolAction === 1) return null;
     if (this.autoMode === 'auto-full') return 'auto-full';
     if (this.autoMode !== 'auto-safe') return null;
     if (action === 'sendInternalEmail') return 'auto-safe';
@@ -2524,6 +2531,7 @@ class ConsoleService {
    * @param {any} outboxId
    */
   async _sendChecked(operation, outboxId) {
+    this._assertMailNotPaused(operation);
     this._assertAttachmentsIntact(operation);
     return this.fulfillment.send(outboxId);
   }
@@ -2662,7 +2670,7 @@ class ConsoleService {
         } catch (errRaw) { const err = /** @type {any} */ (errRaw);
           lines.push(`  〔自动模式〕⛔ ${descriptor.action} 自动批准失败：${err.message}`);
         }
-      } else if (descriptor.action === 'sendInternalEmail') {
+      } else if (descriptor.action === 'sendInternalEmail' && !this.mailApprover) {
         try {
           const confirmed = this.fulfillment.confirm(operation.operationId, {
             confirmedHash: operation.operationHash,
@@ -2675,7 +2683,8 @@ class ConsoleService {
           lines.push(`  〔闭环〕⛔ ${descriptor.action} 自动确认失败：${err.message}`);
         }
       } else {
-        lines.push(`  〔闭环〕${descriptor.action} ${operation.operationId.slice(0, 8)}… 已冻结，待 WS63 确认（${operation.operationHash.slice(0, 12)}…）`);
+        const review = this.mailApprover && operation.protocolAction === 1 ? '指定审批人审核' : 'WS63 确认';
+        lines.push(`  〔闭环〕${descriptor.action} ${operation.operationId.slice(0, 8)}… 已冻结，待${review}（${operation.operationHash.slice(0, 12)}…）`);
       }
       operations.push(this._operationView(this.store.getOperation(operation.operationId)));
     }
@@ -2986,6 +2995,9 @@ class ConsoleService {
    */
   editOperationBody(id, { body, editor = '用户', note = '', actor = null, role = null } = {}) {
     const current = this._assertOperationVisible(id, actor, role);
+    if (this.mailApprover && current.protocolAction === 1 && (!actor || actor !== current.createdBy)) {
+      throw new ConsoleError('FORBIDDEN', '企业邮件只能由发起人编辑', 403);
+    }
     if (current.state !== 'frozen') {
       throw new ConsoleError('CONFLICT', `操作状态为 ${current.state}，不能再编辑（已确认/已执行的记录只能新建）`, 409);
     }
@@ -3130,6 +3142,7 @@ class ConsoleService {
       protocolAction: operation.protocolAction,
       protocolLabel: PROTOCOL_ACTIONS[operation.protocolAction] || '未知',
       createdBy: operation.createdBy || '',
+      ...(this.mailApprover && operation.protocolAction === 1 ? { mailApprover: this.mailApprover } : {}),
       tool: operation.tool,
       recipient: operation.recipient,
       subject: operation.subject,
@@ -3210,6 +3223,7 @@ class ConsoleService {
    */
   async sendOperation(id, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
+    this._assertLegacyMailPathAllowed(operation);
     const outbox = this.store.getOutboxByOperation(id);
     if (!outbox) throw new ConsoleError('CONFLICT', '操作还没有 outbox；请先完成确认', 409);
     const sent = await this._sendChecked(operation, outbox.outboxId);
@@ -3218,6 +3232,78 @@ class ConsoleService {
       send: sent,
       operation: this._operationView(this.store.getOperation(id)),
     };
+  }
+
+  /** @param {any} operation */
+  _assertLegacyMailPathAllowed(operation) {
+    if (this.mailApprover && operation.protocolAction === 1) {
+      throw new ConsoleError('FORBIDDEN', '企业邮件必须由指定审批人在操作详情中审核并发送', 403);
+    }
+  }
+
+  enterpriseMailPause() {
+    return this.mailApprover ? this.store.loadState('enterprise-mail-pause') : null;
+  }
+
+  /** @param {any} operation */
+  _assertMailNotPaused(operation) {
+    if (operation.protocolAction === 1 && this.enterpriseMailPause()?.paused) {
+      throw new ConsoleError('CONFLICT', '企业邮件已紧急停发，待恢复后重新核对草稿', 409);
+    }
+  }
+
+  /** @param {any} options */
+  setEnterpriseMailPause({ actor, role, paused, reason }) {
+    if (!this.mailApprover) throw new ConsoleError('NOT_FOUND', '未启用企业邮件', 404);
+    if (!actor || role !== '管理员') throw new ConsoleError('FORBIDDEN', '只有管理员能控制企业邮件停发', 403);
+    if (typeof paused !== 'boolean' || typeof reason !== 'string' || !reason.trim() || reason.length > 500) {
+      throw new ConsoleError('BAD_REQUEST', '须提供停发状态和不超过 500 字符的原因', 400);
+    }
+    const status = { paused, reason: reason.trim(), actor, at: new Date(this.now()).toISOString() };
+    if (!paused) this.auditAction(actor, '企业邮件恢复发送', status);
+    this.store.saveState('enterprise-mail-pause', status);
+    if (paused) this.auditAction(actor, '企业邮件紧急停发', status);
+    return status;
+  }
+
+  /** @param {string} id @param {{ actor?: string | null, role?: string | null, operationHash?: unknown }} [options] */
+  async approveEnterpriseMail(id, { actor = null, role = null, operationHash } = {}) {
+    if (!this.mailApprover) throw new ConsoleError('NOT_FOUND', '未启用企业邮件审批', 404);
+    if (!actor || actor !== this.mailApprover || role !== '管理员') {
+      throw new ConsoleError('FORBIDDEN', '只有指定审批人可审核企业邮件', 403);
+    }
+    const reviewer = this.mailUserInfo?.(actor);
+    if (!reviewer || reviewer.disabled || reviewer.role !== '管理员') {
+      throw new ConsoleError('FORBIDDEN', '审批账号已停用或不再具备审批权限', 403);
+    }
+    const operation = this._assertOperationVisible(id, actor, role);
+    if (operation.protocolAction !== 1) throw new ConsoleError('CONFLICT', '该操作不是邮件', 409);
+    this._assertMailNotPaused(operation);
+    this._assertNotSelfApproval(operation, actor);
+    const author = operation.createdBy ? this.mailUserInfo?.(operation.createdBy) : null;
+    if (!author || author.disabled || !['员工', '管理员'].includes(author.role)) {
+      throw new ConsoleError('FORBIDDEN', '邮件发起账号已停用或没有发件权限', 403);
+    }
+    if (operation.state !== 'frozen' || Date.parse(operation.expiresAt) <= this.now()
+      || operationHash !== operation.operationHash || !verifyOperation(operation).ok) {
+      throw new ConsoleError('CONFLICT', '草稿已变更、过期或已处理，请刷新后重新核对', 409);
+    }
+    for (const sourceId of operation.sourceDocIds) {
+      const source = getDocumentById(sourceId);
+      if (!source || this.business.deletedDocIds.has(sourceId) || !this._docRowVisible(source, operation.createdBy, author.role)) {
+        throw new ConsoleError('FORBIDDEN', '发起人已无法访问邮件来源资料，拒绝发送', 403);
+      }
+    }
+    this._assertAttachmentsIntact(operation);
+    const confirmationId = crypto.randomUUID();
+    this.auditAction(actor, '企业邮件审批', {
+      operationId: id, operationHash, confirmationId, approver: actor, createdBy: operation.createdBy,
+    });
+    const confirmed = this.fulfillment.confirm(id, {
+      confirmedHash: operationHash, confirmationId, deviceId: 'enterprise-review',
+    });
+    const send = await this._sendChecked(operation, confirmed.outbox.outboxId);
+    return { ok: true, send, operation: this._operationView(this.store.getOperation(id)) };
   }
 
   /**
@@ -3281,6 +3367,7 @@ class ConsoleService {
    */
   beginChallenge(operationId, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(operationId, actor, role);
+    this._assertLegacyMailPathAllowed(operation);
     if (operation.state !== 'frozen') throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能确认`, 409);
     const nowSec = this._nowSec();
     for (const c of this.challenges.values()) {
@@ -3491,6 +3578,7 @@ class ConsoleService {
   async _completeChallenge(challenge, reply) {
     const operation = this.store.getOperation(challenge.operationId);
     if (!operation) throw new ConsoleError('NOT_FOUND', '操作不存在', 404);
+    this._assertLegacyMailPathAllowed(operation);
     if (operation.state !== 'frozen') {
       throw new ConsoleError('CONFLICT', `操作状态 ${operation.state} 不能确认`, 409);
     }
@@ -4150,6 +4238,20 @@ class ConsoleService {
     if (!outbox || !operation || !this._operationVisible(operation, actor, role)) {
       throw new ConsoleError('NOT_FOUND', `发件记录不存在：${outboxId}`, 404);
     }
+    const enterpriseMail = this.mailApprover && operation.protocolAction === 1;
+    if (enterpriseMail) {
+      if (!actor || !['管理员', '审计员'].includes(role)) {
+        throw new ConsoleError('FORBIDDEN', '企业邮件只能由管理员或审计员人工核对', 403);
+      }
+      if (!['sent', 'failed'].includes(state) || typeof note !== 'string' || !note.trim() || note.length > 1000
+        || (state === 'sent' && (typeof messageId !== 'string' || !messageId.trim() || messageId.length > 254 || /^manual-/i.test(messageId.trim())))) {
+        throw new ConsoleError('BAD_REQUEST', '须填写核对结论与证据；确认已发送时须提供真实邮件追踪编号', 400);
+      }
+      if (outbox.state !== 'unknown') throw new ConsoleError('CONFLICT', '只有结果未知的邮件可人工核对', 409);
+      note = note.trim();
+      messageId = state === 'sent' ? messageId.trim() : null;
+      this.auditAction(actor, '企业邮件人工核对', { outboxId, operationId: operation.operationId, state, messageId, note, actor });
+    }
     try {
       const updated = this.fulfillment.reconcile(outboxId, { state, messageId, note });
       const operation = this.store.getOperation(outbox.operationId);
@@ -4632,6 +4734,7 @@ class ConsoleService {
 
   // ---------- 重置 / 关闭 ----------
   reset() {
+    if (this.mailApprover) throw new ConsoleError('FORBIDDEN', '企业模式禁止重置工作区', 403);
     this.generation += 1;  // 工作区换版：在途运行的结果一律作废
     this.close();
     // close() 关掉了自带的附件库；重置后要重新建一个空的

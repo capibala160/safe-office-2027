@@ -224,8 +224,23 @@ class MailerPool {
   }
 }
 
-function createMailerPoolFromEnv(env = process.env) {
+function createMailerPoolFromEnv(env = process.env, { required = false } = {}) {
   const parsed = parseAccountsFromEnv(env);
+  if (required) {
+    if (!parsed) throw new Error('企业模式必须配置 SMTP');
+    for (const account of parsed.accounts) {
+      if (!account.host?.trim() || !account.user?.trim() || !account.pass?.trim()
+        || !Number.isInteger(account.port) || Number(account.port) < 1 || Number(account.port) > 65535
+        || !account.allowTo?.length) {
+        throw new Error('企业模式的每个 SMTP 账号必须配置主机、端口、凭据和收件人白名单');
+      }
+      for (const address of [account.from, ...account.allowTo]) {
+        if (!/^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(address) || address.length > 254) {
+          throw new Error('企业模式的 SMTP 发件地址和收件人白名单必须使用有效邮箱地址');
+        }
+      }
+    }
+  }
   if (!parsed) return null;
   return new MailerPool(parsed);
 }

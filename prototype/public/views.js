@@ -197,6 +197,12 @@
 
   // 返回 true 表示已在当前页打开抽屉；false 表示已转到设备页或给出提示
   async function openConfirm(operationId, c) {
+    const review = await API.get(`/api/operations/${encodeURIComponent(operationId)}`).catch(() => null);
+    if (review?.operation.mailApprover) {
+      c.store.operationId = operationId;
+      c.navigate('approvals');
+      return false;
+    }
     const b = c.store.bootstrap || {};
     const virtualConfirm = !(b.virtualConfirm === false);
     const serialMode = !!b.nearfieldSerial;
@@ -226,7 +232,7 @@
       const res = await API.post(`/api/operations/${id}/challenge`);
       challenge = res.challenge;
     }
-    const detail = await API.get(`/api/operations/${id}`).catch(() => null);
+    const detail = review;
     c.store.operationId = operationId;
     c.store.challengeId = challenge.challengeId;
     mountConfirmDrawer(challenge, detail, c);
@@ -328,6 +334,7 @@
   }
 
   function confirmationLabel(op) {
+    if (op.mailApprover) return '企业独立审批';
     if (op.confirmationId === 'auto-full') return '<span class="badge block">全自动批准（未按键）</span>';
     if (op.confirmationId === 'auto-safe') return '<span class="badge warn">低风险自动批准</span>';
     if (op.confirmationId === 'policy-auto') return '<span class="badge info">策略自动确认</span>';
@@ -360,9 +367,9 @@
         ? `<a href="/api/operations/${encodeURIComponent(op.operationId)}/attachments/${esc(a.sha256)}" download="${esc(a.name)}">${esc(a.name)}</a>`
         : esc(a.name))).join('、')}</div>` : ''}
       <div class="op-actions">
-        ${op.state === 'frozen' ? `<button class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}">发起 WS63 确认</button><button class="btn ghost small" data-op-action="reject" data-id="${esc(op.operationId)}">拒绝</button>` : ''}
-        ${op.state === 'confirmed' ? `<button class="btn small" data-op-action="send" data-id="${esc(op.operationId)}">发送/执行</button>` : ''}
-        ${op.outbox && op.outbox.state === 'unknown' ? `<button class="btn small" data-op-action="reconcile" data-outbox="${esc(op.outbox.outboxId)}">人工核对为已发送</button>` : ''}
+        ${op.state === 'frozen' && !op.mailApprover ? `<button class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}">发起 WS63 确认</button><button class="btn ghost small" data-op-action="reject" data-id="${esc(op.operationId)}">拒绝</button>` : ''}
+        ${op.state === 'confirmed' && !op.mailApprover ? `<button class="btn small" data-op-action="send" data-id="${esc(op.operationId)}">发送/执行</button>` : ''}
+        ${op.outbox && op.outbox.state === 'unknown' ? `<button class="btn small" data-op-action="reconcile" data-enterprise="${Boolean(op.mailApprover)}" data-outbox="${esc(op.outbox.outboxId)}">${op.mailApprover ? '记录人工核对' : '人工核对为已发送'}</button>` : ''}
         ${EXPORTABLE.has(op.state) ? `<button class="btn ghost small" data-op-action="copy" data-id="${esc(op.operationId)}">复制正文</button><button class="btn ghost small" data-op-action="download" data-id="${esc(op.operationId)}">下载 .txt</button>` : ''}
         <button class="btn ghost small" data-op-action="verify" data-id="${esc(op.operationId)}">只读篡改校验</button>
         <button class="btn ghost small" data-op-action="detail" data-id="${esc(op.operationId)}">详情</button>
@@ -408,8 +415,18 @@
             await c.refreshState();
             c.rerender();
           } else if (action === 'reconcile') {
-            await API.post(`/api/outbox/${encodeURIComponent(outboxId)}/reconcile`, { state: 'sent', messageId: `manual-${Date.now()}` });
-            toast('已人工核对为已发送', 'ok');
+            const payload = { state: 'sent', messageId: `manual-${Date.now()}` };
+            if (btn.dataset.enterprise === 'true') {
+              const state = window.prompt('输入核对结论：sent（已发送）或 failed（确认未发送）。仍不确定请取消。');
+              if (!['sent', 'failed'].includes(state)) return;
+              const note = window.prompt('填写邮件系统里的核对依据（例如查询记录或事件编号）');
+              if (!note?.trim()) return;
+              const messageId = state === 'sent' ? window.prompt('填写真实邮件追踪编号') : null;
+              if (state === 'sent' && !messageId?.trim()) return;
+              Object.assign(payload, { state, note, messageId });
+            }
+            await API.post(`/api/outbox/${encodeURIComponent(outboxId)}/reconcile`, payload);
+            toast('已记录人工核对结果', 'ok');
             await c.refreshState();
             c.rerender();
           } else if (action === 'copy' || action === 'download') {
@@ -1624,8 +1641,9 @@
   }
 
   // ---------- 审批与确认 ----------
-  function renderOperationDetail(detail, revisions = null, canEdit = false) {
+  function renderOperationDetail(detail, revisions = null, canEdit = false, username = null) {
     const op = detail.operation;
+    const canApprove = op.mailApprover && username === op.mailApprover && username !== op.createdBy && op.state === 'frozen' && !op.expired;
     const versionBlock = revisions && revisions.revisions && revisions.revisions.length
       ? `<div class="mt12"><div class="sub-text">版本历史（当前 v${esc(revisions.current.revision)}）</div>
           ${revisions.revisions.slice().reverse().map((r) => `<details class="rev"><summary>v${esc(r.revision)} · ${esc(dateTime(r.createdAt))} · ${esc(r.editor)} · ${esc(short(r.operationHash, 10))}</summary>${renderDiff(r.body, revisions.current.body)}</details>`).join('')}
@@ -1639,7 +1657,7 @@
       : `<div class="mt12"><div class="sub-text">正文预览</div><pre class="lines">${esc(op.body || '（空）')}</pre></div>`;
     return `<section class="card" id="operation-detail" tabindex="-1">
       <div class="card-head"><h2>操作详情</h2><span class="sub mono">${esc(op.operationId)}</span></div>
-      <div class="btn-row">${op.runId ? `<a class="btn ghost small" href="${replayHref(op.runId)}">查看本任务回放</a>` : ''}${op.state === 'frozen' && !op.expired ? `<button type="button" class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}">发起确认</button>` : ''}</div>
+      <div class="btn-row">${op.runId ? `<a class="btn ghost small" href="${replayHref(op.runId)}">查看本任务回放</a>` : ''}${!op.mailApprover && op.state === 'frozen' && !op.expired ? `<button type="button" class="btn small" data-op-action="challenge" data-id="${esc(op.operationId)}">发起确认</button>` : ''}</div>
       <div class="grid-2">
         <div>
           <div class="sub-text">动作：${esc(op.protocolLabel)} / ${esc(op.action)}</div>
@@ -1656,6 +1674,7 @@
         </div>
       </div>
       ${bodyBlock}
+      ${op.mailApprover ? `<section class="mt12"><h3>企业邮件审核</h3><p>指定审批人：${esc(op.mailApprover)}</p>${renderApprovalFields(op)}${canApprove ? '<label><input type="checkbox" id="mail-review-ack"> 我已核对收件人、正文及附件版本</label><button type="button" class="btn" id="mail-review-submit" disabled>批准并发送</button>' : ''}</section>` : ''}
       ${canEdit && ['frozen', 'executed'].includes(op.state) && op.action === 'sendExternalEmail' ? `<details class="advanced mt12"><summary>${op.state === 'frozen' ? '修改收件人与附件' : '以此为参考新建外发任务'}</summary>
         <p>${op.state === 'frozen' ? '继续后会撤销当前草稿，待确认挑战随即失效。' : '原任务已执行，原回执保留。继续后会创建另一条外发任务，须单独确认。'}</p>
         <div id="op-replace-preview" aria-live="polite"></div>
@@ -1684,7 +1703,9 @@
         ]);
         selectedOperation = detail.operation;
         const role = c.store.bootstrap?.authUser?.role || c.store.role;
-        detailHtml = renderOperationDetail(detail, revisions, ['员工', '管理员'].includes(role));
+        const username = c.store.bootstrap?.authUser?.username;
+        detailHtml = renderOperationDetail(detail, revisions, ['员工', '管理员'].includes(role)
+          && (!selectedOperation.mailApprover || username === selectedOperation.createdBy), username);
       } catch (err) {
         detailHtml = `<div class="notice block">${esc(c.errorText(err))}</div>`;
       }
@@ -1705,6 +1726,24 @@
       <div id="approvals-result"></div>`;
     bindOpActions(root, c);
     root.querySelector('#operation-detail')?.focus();
+    const reviewAck = root.querySelector('#mail-review-ack');
+    const reviewSubmit = root.querySelector('#mail-review-submit');
+    reviewAck?.addEventListener('change', () => { reviewSubmit.disabled = !reviewAck.checked; });
+    reviewSubmit?.addEventListener('click', async () => {
+      reviewSubmit.disabled = true;
+      reviewAck.disabled = true;
+      try {
+        const res = await API.post(`/api/operations/${encodeURIComponent(selectedOperation.operationId)}/approve-mail`, {
+          operationHash: selectedOperation.operationHash,
+        });
+        toast(`发送状态：${statusText[res.send.state] || res.send.state}`, res.send.state === 'sent' ? 'ok' : 'info');
+        await c.refreshState();
+        c.rerender();
+      } catch (err) {
+        toast(c.errorText(err), 'error');
+        c.rerender();
+      }
+    });
     const replaceInput = root.querySelector('#op-replace-to');
     if (replaceInput) {
       const preview = root.querySelector('#op-replace-preview');
@@ -1998,6 +2037,8 @@
     const canReport = !authUser || ['管理员', '审计员'].includes(roleName);
     const audit = canReport ? await API.get('/api/audit?limit=50').catch(() => null) : null;
     const users = canAdmin ? await API.get('/api/users').catch(() => null) : null;
+    const mailPause = roleName === '管理员' ? await API.get('/api/governance/mail-pause').catch(() => null) : null;
+    const mailPaused = mailPause?.status?.paused === true;
     const risk = gov.risk;
     const policy = gov.policy || {};
     const roles = Object.keys(policy);
@@ -2005,6 +2046,11 @@
     for (const role of roles) for (const action of Object.keys(policy[role] || {})) actionSet.add(action);
     const actions = [...actionSet];
     root.innerHTML = `${page('治理审计', '复核风险、检查策略与审计链。租户范围按登录用户名划分。')}
+      ${mailPause?.enabled ? `<section class="card"><div class="card-head"><h2>企业邮件停发</h2><span role="status">${mailPaused ? '已暂停' : '允许发送'}</span></div>
+        <p>暂停仅拦截新的投递，不撤回已交给邮件服务器的邮件。恢复不会自动发送待审邮件。</p>
+        ${mailPause.status ? `<p class="sub-text">最近操作：${esc(mailPause.status.actor)} · ${esc(dateTime(mailPause.status.at))} · ${esc(mailPause.status.reason)}</p>` : ''}
+        <form id="gov-mail-pause" class="btn-row"><label for="gov-mail-pause-reason">操作原因</label><input class="input" id="gov-mail-pause-reason" required maxlength="500"><button class="btn ${mailPaused ? '' : 'danger'}" type="submit">${mailPaused ? '恢复发送' : '紧急停发'}</button></form>
+        <p id="gov-mail-pause-result" role="status"></p></section>` : ''}
       <div class="grid-2">
         <section class="card">
           <div class="card-head"><h2>风险</h2>${risk.frozen ? badge('frozen') : badge('pass')}</div>
@@ -2087,6 +2133,27 @@
         c.rerender();
       } catch (err) { toast(c.errorText(err), 'error'); }
     };
+    root.querySelector('#gov-mail-pause')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = form.querySelector('button');
+      const result = root.querySelector('#gov-mail-pause-result');
+      const reason = form.querySelector('input').value.trim();
+      if (!reason) {
+        result.textContent = '请填写操作原因。';
+        return;
+      }
+      if (mailPaused && !window.confirm('确认恢复企业邮件发送？待审邮件不会自动发送。')) return;
+      button.disabled = true;
+      try {
+        await API.post('/api/governance/mail-pause', { paused: !mailPaused, reason });
+        toast(mailPaused ? '已恢复发送' : '已紧急停发', 'ok');
+        c.rerender();
+      } catch (err) {
+        result.textContent = c.errorText(err);
+        button.disabled = false;
+      }
+    });
     root.querySelector('#gov-clear')?.addEventListener('click', () => review('clear'));
     root.querySelector('#gov-escalate')?.addEventListener('click', () => review('escalate'));
     root.querySelector('#gov-tamper')?.addEventListener('click', async () => {

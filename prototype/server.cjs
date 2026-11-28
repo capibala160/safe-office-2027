@@ -899,6 +899,14 @@ function createConsoleServer({
       if (opSend && method === 'POST') {
         return sendJson(res, 200, await service.sendOperation(decodeURIComponent(opSend[1]), userContext(req)));
       }
+      const mailApproval = pathname.match(/^\/api\/operations\/([^/]+)\/approve-mail$/);
+      if (mailApproval && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '审核企业邮件');
+        const body = await readJson(req);
+        return sendJson(res, 200, await service.approveEnterpriseMail(decodeURIComponent(mailApproval[1]), {
+          ...userContext(req), operationHash: body.operationHash,
+        }));
+      }
       if (pathname === '/api/rollback' && method === 'POST') {
         requireRole(req, ROLE_ADMIN, '回滚');
         const body = await readJson(req);
@@ -1013,11 +1021,13 @@ function createConsoleServer({
       const expireMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/expire$/);
       if (expireMatch) requireRole(req, ROLE_DEVICE, '模拟确认超时');
       if (expireMatch && method === 'POST') {
+        if (!allowVirtualConfirm) throw new ConsoleError('CONFLICT', '虚拟设备入口已关闭', 409);
         return sendJson(res, 200, service.expireChallenge(decodeURIComponent(expireMatch[1])));
       }
       const tamperMatch = pathname.match(/^\/api\/device\/challenges\/([^/]+)\/tamper$/);
       if (tamperMatch) requireRole(req, ROLE_DEVICE, '篡改确认帧');
       if (tamperMatch && method === 'POST') {
+        if (!allowVirtualConfirm) throw new ConsoleError('CONFLICT', '虚拟设备入口已关闭', 409);
         return sendJson(res, 200, await service.tamperChallenge(decodeURIComponent(tamperMatch[1])));
       }
       if (pathname === '/api/device/replay' && method === 'POST') {
@@ -1030,6 +1040,14 @@ function createConsoleServer({
       if (pathname === '/api/governance' && method === 'GET') {
         requireRole(req, ROLE_STAFF, '读取治理数据');
         return sendJson(res, 200, { ok: true, ...service.getGovernance(userContext(req)) });
+      }
+      if (pathname === '/api/governance/mail-pause') {
+        requireRole(req, ROLE_ADMIN, '管理企业邮件停发');
+        if (method === 'GET') return sendJson(res, 200, { ok: true, enabled: Boolean(service.mailApprover), status: service.enterpriseMailPause() });
+        if (method === 'POST') {
+          const body = await readJson(req);
+          return sendJson(res, 200, { ok: true, status: service.setEnterpriseMailPause({ ...body, ...userContext(req) }) });
+        }
       }
       if (pathname === '/api/mcp/discover' && method === 'POST') {
         requireRole(req, ROLE_ADMIN, '发现 MCP 工具');
@@ -1173,6 +1191,7 @@ async function startServer({
   auth = null,
   allowVirtualConfirm = true,
   inboxReader = null,
+  mailApprover = null,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -1265,6 +1284,8 @@ async function startServer({
         asr: asrClient,
         actuator,
         mailer: mailer || new FakeMailer(),
+        mailApprover,
+        mailUserInfo: auth ? (username) => auth.userInfo(username) : null,
       });
     } else {
       instance = new ConsoleService({
@@ -1273,6 +1294,8 @@ async function startServer({
         asr: asrClient,
         actuator,
         mailer: mailer || new FakeMailer(),
+        mailApprover,
+        mailUserInfo: auth ? (username) => auth.userInfo(username) : null,
         nearfieldTransportFactory,
         gate4Nearfield,
         ttlSec: challengeTtlSec,
@@ -1410,14 +1433,25 @@ if (require.main === module) {
     console.error(`✗ 用户表加载失败（${usersFile}）：${err.message}`);
     process.exit(1);
   }
+  const enterpriseMode = process.env.SAFE_OFFICE_MODE === 'enterprise';
+  const mailApprover = enterpriseMode ? (process.env.SAFE_OFFICE_MAIL_APPROVER || '').trim() : null;
+  const reviewer = mailApprover ? auth?.userInfo(mailApprover) : null;
+  if (enterpriseMode && (!reviewer || reviewer.disabled || reviewer.role !== '管理员')) {
+    console.error(`✗ 企业模式要求 SAFE_OFFICE_MAIL_APPROVER 指向启用的管理员：${usersFile}`);
+    process.exit(1);
+  }
   if (process.env.SAFE_OFFICE_AUTH === 'required' && !auth) {
     console.error(`✗ SAFE_OFFICE_AUTH=required 但没有用户：${usersFile}（用 add-user.cjs 添加）`);
     process.exit(1);
   }
   let smtpMailer = null;
   try {
-    smtpMailer = createMailerPoolFromEnv();
+    smtpMailer = createMailerPoolFromEnv(process.env, { required: enterpriseMode });
   } catch (errRaw) { const err = /** @type {any} */ (errRaw);
+    if (enterpriseMode) {
+      console.error('✗ 企业模式 SMTP 配置不完整或无效，拒绝启动；请检查 SMTP 账号与收件人白名单');
+      process.exit(1);
+    }
     console.warn(`⚠ SMTP 配置不完整：${err.message}；本次使用模拟发送`);
   }
   let inboxReader = null;
@@ -1427,9 +1461,8 @@ if (require.main === module) {
     console.warn(`⚠ IMAP 收件箱配置不完整：${err.message}；收件箱同步不可用`);
   }
   // 启用真实动作（SMTP / 真实打印机）时默认关闭虚拟设备批准入口
-  const allowVirtualConfirm = String(process.env.SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM || '').toLowerCase() === '1'
-    ? true
-    : !(smtpMailer || process.env.SAFE_OFFICE_PRINTER);
+  const allowVirtualConfirm = !enterpriseMode && (process.env.SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM === '1'
+    || !(smtpMailer || process.env.SAFE_OFFICE_PRINTER));
   let documentsStore = null;
   try {
     documentsStore = new DocumentStore(documentsDb);
@@ -1462,8 +1495,10 @@ if (require.main === module) {
     auth,
     allowVirtualConfirm,
     inboxReader,
+    mailApprover,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
+    if (enterpriseMode) console.log('  运行模式：企业试点');
     console.log(`  ${url}`);
     const model = service.getState().model;
     console.log(`  模型：${model.mode}${model.model ? ` / ${model.model}` : ''}`);
@@ -1482,7 +1517,7 @@ if (require.main === module) {
     if (!allowVirtualConfirm) {
       console.log('  虚拟批准：已关闭（检测到真实动作）');
       console.log('    高危确认请用手机确认端（npm run start:lan）');
-      console.log('    本机演示可显式打开：SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM=1 npm start');
+      if (!enterpriseMode) console.log('    本机演示可显式打开：SAFE_OFFICE_ALLOW_VIRTUAL_CONFIRM=1 npm start');
     }
     if (configInfo.loaded > 0) console.log(`  配置：config.env（${configInfo.loaded} 项）`);
     else if (!model.model) console.log('  提示：没有 config.env；想用真实模型，复制 config.env.example 再填');

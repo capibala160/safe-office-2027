@@ -34,6 +34,40 @@ async function dropFirstTaskPoll(page) {
   });
 }
 
+test('UI：企业邮件停发、刷新与恢复', { timeout: 30000 }, async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const auth = new AuthService({ users: [{ username: 'reviewer', role: '管理员', salt, hash }] });
+  const started = await startServer({ port: 0, auth, mailApprover: 'reviewer', allowVirtualConfirm: false });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await page.goto(started.url);
+  await page.fill('#username', 'reviewer');
+  await page.fill('#password', 'password123');
+  await page.click('#submit');
+  await page.waitForSelector('#current-user:not([hidden])');
+  await page.goto(`${started.url}/#/governance`);
+  const reason = page.locator('#gov-mail-pause-reason');
+  const pause = page.getByRole('button', { name: '紧急停发', exact: true });
+  const resume = page.getByRole('button', { name: '恢复发送', exact: true });
+  await reason.fill('停发演练 E2E');
+  await pause.click();
+  await resume.waitFor();
+  await page.reload();
+  await resume.waitFor();
+  assert.match(await page.locator('body').innerText(), /停发演练 E2E/);
+  assert.equal(started.service.enterpriseMailPause().paused, true);
+  await reason.fill('恢复演练 E2E');
+  page.once('dialog', (dialog) => dialog.dismiss());
+  await resume.click();
+  assert.equal(started.service.enterpriseMailPause().paused, true);
+  page.once('dialog', (dialog) => dialog.accept());
+  await resume.click();
+  await pause.waitFor();
+  assert.equal(started.service.enterpriseMailPause().paused, false);
+  assert.equal(started.service.mailer.calls.length, 0);
+});
+
 test('UI：登录 → 运行样例 → 审批页 → 上传 → 改密重登 → 退出', { timeout: 90000 }, async (t) => {
   const mk = (username, role) => {
     const { salt, hash } = hashPassword('password123');

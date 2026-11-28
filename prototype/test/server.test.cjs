@@ -26,6 +26,51 @@ async function json(url, options) {
   return { res, data };
 }
 
+test('企业邮件：仅指定审批人可发送当前版本，旧入口和重复批准不会投递', async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const users = [['author', '员工'], ['reviewer', '管理员'], ['other', '管理员']];
+  const auth = new AuthService({ users: users.map(([username, role]) => ({ username, role, salt, hash })) });
+  const mailer = new FakeMailer();
+  const started = await startServer({ port: 0, auth, mailer, mailApprover: 'reviewer', allowVirtualConfirm: false });
+  t.after(() => started.close());
+  const { service, url } = started;
+  const tokens = Object.fromEntries(users.map(([username]) => [username, auth.login(username, 'password123').token]));
+  const request = (username, route, body) => json(`${url}${route}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: `sfc_session=${tokens[username]}` },
+    body: JSON.stringify(body),
+  });
+  const sample = service.getDemoSamples().find((entry) => entry.id === 'external-confirm');
+  service.setAutoMode('auto-full');
+  const draft = async (operator, role) => (await service.runCommand({ ...sample, operator, role })).operations[0];
+  const own = await draft('reviewer', '员工');
+  const operation = await draft('author', '员工');
+  assert.equal(operation.state, 'frozen');
+  const route = `/api/operations/${operation.operationId}`;
+  const oldVersion = { operationHash: operation.operationHash };
+  assert.equal((await request('reviewer', `/api/operations/${own.operationId}/approve-mail`, { operationHash: own.operationHash })).res.status, 403);
+  assert.equal((await request('author', `${route}/approve-mail`, oldVersion)).res.status, 403);
+  assert.equal((await request('other', `${route}/approve-mail`, oldVersion)).res.status, 403);
+  assert.equal((await request('reviewer', `${route}/challenge`, {})).res.status, 403);
+  assert.equal((await request('reviewer', `${route}/send`, {})).res.status, 403);
+  const updated = service.editOperationBody(operation.operationId, { body: '审核后的测试正文', actor: 'author', role: '员工' });
+  assert.equal((await request('reviewer', `${route}/approve-mail`, oldVersion)).res.status, 409);
+  assert.equal(service.mailer.calls.length, 0);
+  const current = { operationHash: updated.operation.operationHash };
+  const pauseRoute = '/api/governance/mail-pause';
+  assert.equal((await request('author', pauseRoute, { paused: true, reason: '演练' })).res.status, 403);
+  assert.equal((await request('reviewer', pauseRoute, { paused: true, reason: '演练' })).res.status, 200);
+  assert.equal((await request('reviewer', `${route}/approve-mail`, current)).res.status, 409);
+  assert.equal(service.mailer.calls.length, 0);
+  assert.equal(service.store.getOperation(operation.operationId).state, 'frozen');
+  assert.equal((await request('reviewer', pauseRoute, { paused: false, reason: '演练结束' })).res.status, 200);
+  assert.equal(service.mailer.calls.length, 0);
+  const approved = await request('reviewer', `${route}/approve-mail`, current);
+  assert.equal(approved.res.status, 200, JSON.stringify(approved.data));
+  assert.equal(approved.data.send.state, 'sent');
+  assert.equal((await request('reviewer', `${route}/approve-mail`, current)).res.status, 409);
+  assert.equal(service.mailer.calls.length, 1);
+});
+
 test('工作台对话：转发上下文，不开放办公工具或创建任务', async (t) => {
   const { createServer } = require('node:http');
   const requests = [];
@@ -608,6 +653,12 @@ test('虚拟批准入口：allowVirtualConfirm=false 时设备助手也拿 409',
     body: JSON.stringify({ decision: 'approve' }),
   });
   assert.equal(res.status, 409);
+  for (const route of ['challenges/whatever/expire', 'challenges/whatever/tamper', 'replay']) {
+    const response = await fetch(`${started.url}/api/device/${route}`, {
+      method: 'POST', headers: { Cookie: `sfc_session=${token}` },
+    });
+    assert.equal(response.status, 409, route);
+  }
   const boot = await fetch(`${started.url}/api/bootstrap`, { headers: { Cookie: `sfc_session=${token}` } });
   assert.equal(boot.status, 200);
   assert.equal((await boot.json()).virtualConfirm, false, '前端应能感知虚拟批准已关闭');

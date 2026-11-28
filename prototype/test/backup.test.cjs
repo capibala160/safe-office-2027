@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createBackup, verifyBackup, restoreBackup } = require('../src/backup.cjs');
+const { ConsoleService } = require('../src/console-service.cjs');
 
 function tempDir(t, name) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `safe-office-${name}-`));
@@ -28,6 +29,46 @@ function seedData(dir) {
   fs.writeFileSync(path.join(dir, 'initial-users.txt'), 'alice:password', 'utf8');
   fs.writeFileSync(path.join(dir, 'notes.txt'), 'not in scope', 'utf8');
 }
+
+test('企业邮件：从备份启动隔离实例，保留停发、待审批草稿和审计', async (t) => {
+  const source = tempDir(t, 'pilot-source');
+  const target = tempDir(t, 'pilot-restore');
+  const backup = path.join(tempDir(t, 'pilot-backup'), 'snapshot');
+  const reviewer = { actor: 'reviewer', role: '管理员' };
+  const open = (dir) => new ConsoleService({
+    storeFile: path.join(dir, 'operations.db'), auditFile: path.join(dir, 'audit.jsonl'),
+    mailApprover: reviewer.actor,
+    mailUserInfo: (username) => ({ role: username === reviewer.actor ? reviewer.role : '员工', disabled: false }),
+  });
+  let operation;
+  let pause;
+  const original = open(source);
+  try {
+    const sample = original.getDemoSamples().find((entry) => entry.id === 'external-confirm');
+    const run = await original.runCommand({ ...sample, operator: 'author' });
+    operation = run.operations[0];
+    assert.equal(operation.state, 'frozen');
+    pause = original.setEnterpriseMailPause({ ...reviewer, paused: true, reason: '隔离恢复演练' });
+  } finally {
+    original.close();
+  }
+  createBackup({ dataDir: source, outDir: backup });
+  assert.equal(verifyBackup(backup).ok, true);
+  assert.equal(restoreBackup({ backupDir: backup, dataDir: target }).ok, true);
+  const restored = open(target);
+  try {
+    assert.deepEqual(restored.enterpriseMailPause(), pause);
+    const draft = restored.store.getOperation(operation.operationId);
+    assert.equal(draft.state, 'frozen');
+    assert.equal(draft.operationHash, operation.operationHash);
+    assert.equal(restored.getGovernance(reviewer).audit.verified, true);
+    assert.ok(restored.audit.entries.some((entry) => entry.kind === '企业邮件紧急停发'));
+    await assert.rejects(restored.approveEnterpriseMail(draft.operationId, { ...reviewer, operationHash: draft.operationHash }), /紧急停发/);
+    assert.equal(restored.mailer.calls.length, 0);
+  } finally {
+    restored.close();
+  }
+});
 
 test('备份：收录数据文件，排除明文初始密码与 demo（默认）', (t) => {
   const data = tempDir(t, 'data');
