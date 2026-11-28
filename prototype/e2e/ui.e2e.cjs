@@ -1063,6 +1063,39 @@ test('UI 工作台对话：真实模型按「缩短」要求直接改写上一�
   assert.equal(started.service.listRuns().length, 0, '对话只生成文字，不创建任务');
 });
 
+test('UI 工作台：⋯ 菜单可清空对话并回到空态', { timeout: 45000 }, async (t) => {
+  const started = await startServer({ port: 0 });
+  t.after(() => started.close());
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  // 无真实模型时把 chat 标记为可用，并拦截回复，仅验证前端交互
+  for (const pattern of ['**/api/state', '**/api/bootstrap']) {
+    await page.route(pattern, async (route) => {
+      const res = await route.fetch();
+      const j = await res.json();
+      if (j.model) j.model = { ...j.model, chat: true };
+      if (j.state?.model) j.state.model = { ...j.state.model, chat: true };
+      await route.fulfill({ response: res, json: j });
+    });
+  }
+  await page.route('**/api/chat', (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, reply: '示例回复' }),
+  }));
+  await page.goto(started.url);
+  await page.waitForSelector('#dash-command');
+  const empty = page.locator('#dash-chat-empty');
+  const log = page.locator('#dash-chat-log');
+  assert.equal(await empty.isVisible(), true, '空态应显示引导文案');
+  await page.fill('#dash-command', '你好');
+  await page.click('#dash-send');
+  await log.getByText('示例回复').waitFor();
+  assert.equal(await empty.isVisible(), false, '有对话后引导文案应隐藏');
+  await page.click('#dash-chat-menu summary');
+  await page.locator('#dash-chat-clear').click();
+  assert.equal(await log.isVisible(), false, '清空后对话区应隐藏');
+  assert.equal(await empty.isVisible(), true, '清空后应回到空态');
+});
+
 test('UI 工作台对话：未配置真实模型时禁用发送并说明原因', { timeout: 45000 }, async (t) => {
   const started = await startServer({ port: 0 });
   t.after(() => started.close());

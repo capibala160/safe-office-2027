@@ -1,7 +1,21 @@
 :root { --ink:#1a2028; --sub:#5b6b7c; --line:#e3e8ee; --bg:#f6f8fa; --card:#fff; --info:#345d9d; --bad:#c0392b; }
 * { box-sizing: border-box; }
-body { margin:0; min-height:100vh; display:grid; place-items:center; padding:16px; background:linear-gradient(140deg, #142642 0%, #213c63 48%, #e7edf6 48%, var(--bg) 100%); color:var(--ink);
+body { margin:0; min-height:100vh; display:grid; place-items:center; padding:16px; isolation:isolate; background:radial-gradient(ellipse at 75% 20%, #253f68, #111e35 60%, #0b1426); color:var(--ink);
        font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+.meteor-sky { position:fixed; inset:0; overflow:hidden; pointer-events:none; z-index:-1; }
+.meteor-sky span { position:absolute; top:var(--top); left:var(--left); width:clamp(64px, 12vw, 144px); height:2px; border-radius:999px; opacity:0; transform-origin:right center; background:linear-gradient(90deg, transparent, #81b5f6 78%, #eef7ff); animation:meteor-pass var(--period) linear var(--delay) infinite; }
+.meteor-sky span:nth-child(1) { --top:8%; --left:8%; --period:11s; --delay:.2s; }
+.meteor-sky span:nth-child(2) { --top:1%; --left:61%; --period:15s; --delay:2.6s; }
+.meteor-sky span:nth-child(3) { --top:48%; --left:2%; --period:17s; --delay:5s; }
+.meteor-sky span:nth-child(4) { --top:37%; --left:68%; --period:13s; --delay:7s; }
+@keyframes meteor-pass {
+  0% { opacity:0; transform:translate(-8vw, -5vh) rotate(31deg); }
+  4% { opacity:.8; }
+  16%, 100% { opacity:0; transform:translate(25vw, 30vh) rotate(31deg); }
+}
+@media (prefers-reduced-motion:reduce) {
+  .meteor-sky { display:none; }
+}
 .card { width:min(420px, 100%); background:var(--card); border:1px solid var(--line); border-radius:14px; padding:clamp(16px, 5vw, 28px);
         box-shadow:0 16px 38px rgba(12, 30, 55, .22); }
 .brand { display:flex; align-items:center; gap:12px; margin-bottom:18px; padding-bottom:14px; border-bottom:1px solid var(--line); }

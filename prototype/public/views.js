@@ -585,11 +585,18 @@
     if (!log) return;
     const messages = chat.pending ? [...chat.messages, { role: 'user', content: chat.pending }] : chat.messages;
     log.hidden = !messages.length;
-    log.innerHTML = messages.map(({ role, content }) => {
+    root.querySelector('#dash-chat-empty').hidden = Boolean(messages.length);
+    log.innerHTML = messages.map(({ role, content }, index) => {
       const isUser = role === 'user';
+      const showQuick = !isUser && chatReady && !chat.pending && index === messages.length - 1;
       return `<div class="chat-message${isUser ? ' chat-user' : ''}">
         <span class="chat-avatar" aria-hidden="true">${isUser ? '你' : '助'}</span>
-        <div class="chat-bubble"><span class="sr-only">${isUser ? '你' : '办公助手'}：</span><div class="chat-content">${esc(content)}</div></div>
+        <div class="chat-message-body">
+          <div class="chat-bubble"><span class="sr-only">${isUser ? '你' : '办公助手'}：</span><div class="chat-content">${esc(content)}</div></div>
+          ${showQuick ? `<div class="chat-quick" id="dash-chat-quick" role="group" aria-label="快捷改稿">
+            ${['再短一点', '分条列出', '更正式一些'].map((label) => `<button class="chat-chip" type="button" data-chat-quick="${label}">${label}</button>`).join('')}
+          </div>` : ''}
+        </div>
       </div>`;
     }).join('');
     log.scrollTop = log.scrollHeight;
@@ -597,10 +604,7 @@
     status.textContent = chat.pending ? '正在回复…' : chat.error;
     status.classList.toggle('chat-error', Boolean(chat.error));
     root.querySelector('#dash-send').disabled = Boolean(chat.pending) || !chatReady;
-    root.querySelector('#dash-chat-clear').hidden = !messages.length && !chat.error;
-    root.querySelector('#dash-chat-clear').disabled = Boolean(chat.pending);
-    // 刚拿到一版稿时，直接给“提要求”的快捷入口；没有真实模型时不显示
-    root.querySelector('#dash-chat-quick').hidden = !chatReady || Boolean(chat.pending) || messages.at(-1)?.role !== 'assistant';
+    root.querySelector('#dash-chat-clear').disabled = Boolean(chat.pending) || (!messages.length && !chat.error);
   }
 
   async function dashboard(root, c) {
@@ -622,31 +626,30 @@
     // 老服务端没有 chat 字段时按可用处理；助手只走真实模型，Mock 不伪造回复
     const chatReady = model.chat !== false;
     const chatHint = chatReady
-      ? `对话只生成文字，不执行操作。${model.location === 'cloud' ? `对话会发送给 ${esc(model.model || '云端模型')}，请勿输入敏感信息。` : ''}`
+      ? (model.location === 'cloud' ? `对话会发送给 ${esc(model.model || '云端模型')}，请勿输入敏感信息。` : '')
       : '未配置真实模型，仍可开始任务。';
     root.innerHTML = `
       ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<a href="#/governance">去人工复核</a></div>` : ''}
       <section class="card hero" aria-labelledby="dash-title">
         <div class="hero-compose">
           <header class="workbench-heading">
-            <h1 id="dash-title"><label for="dash-command">今天要做什么？</label></h1>
-            <button class="btn ghost small" id="dash-chat-clear" type="button" hidden>清空对话</button>
+            <div class="workbench-identity"><span class="chat-avatar" aria-hidden="true">助</span><h1 id="dash-title">办公助手</h1></div>
+            <details class="workbench-menu" id="dash-chat-menu">
+              <summary aria-label="对话选项">⋯</summary>
+              <div class="workbench-menu-panel"><button class="btn ghost small" id="dash-chat-clear" type="button" disabled>清空对话</button></div>
+            </details>
           </header>
+          <p class="chat-empty" id="dash-chat-empty">今天要做什么？可以问我问题，或在下方描述任务。</p>
           <div id="dash-chat-log" class="chat-log" role="log" aria-label="对话记录" tabindex="0" hidden></div>
           <div id="dash-chat-status" class="chat-status" role="status"></div>
-          <div class="chat-quick" id="dash-chat-quick" hidden>
-            <button class="chat-chip" type="button" data-chat-quick="再短一点">再短一点</button>
-            <button class="chat-chip" type="button" data-chat-quick="分条列出">分条列出</button>
-            <button class="chat-chip" type="button" data-chat-quick="更正式一些">更正式一些</button>
-          </div>
           <div class="workbench-composer">
-            <textarea class="hero-input" id="dash-command" aria-describedby="dash-chat-hint" placeholder="输入问题，或描述你想完成的任务">${esc(draft)}</textarea>
+            <textarea class="hero-input" id="dash-command" aria-label="输入消息或任务" ${chatHint ? 'aria-describedby="dash-chat-hint"' : ''} placeholder="说点什么…">${esc(draft)}</textarea>
             <div class="hero-actions">
               <button class="btn${chatReady ? ' ghost' : ''}" id="dash-start" type="button">开始任务</button>
-              <button class="btn${chatReady ? '' : ' ghost'}" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送给助手</button>
+              <button class="btn${chatReady ? '' : ' ghost'}" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送</button>
             </div>
           </div>
-          <p class="chat-hint" id="dash-chat-hint">${chatHint}</p>
+          ${chatHint ? `<p class="chat-hint" id="dash-chat-hint">${chatHint}</p>` : ''}
         </div>
       </section>
       <section class="dashboard-templates" aria-labelledby="dashboard-templates-title">
@@ -756,15 +759,30 @@
       }
     }
     root.querySelector('#dash-send').addEventListener('click', () => { void sendChat(); });
-    root.querySelectorAll('[data-chat-quick]').forEach((btn) => {
-      btn.addEventListener('click', () => { void sendChat(btn.dataset.chatQuick); });
+    root.querySelector('#dash-chat-log').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-chat-quick]');
+      if (button) {
+        input.focus();
+        void sendChat(button.dataset.chatQuick);
+      }
     });
     input.addEventListener('keydown', (event) => {
       if (!chatReady || event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       void sendChat();
     });
+    const chatMenu = root.querySelector('#dash-chat-menu');
+    chatMenu.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && chatMenu.open) {
+        chatMenu.open = false;
+        chatMenu.querySelector('summary').focus();
+      }
+    });
+    chatMenu.addEventListener('focusout', (event) => {
+      if (!chatMenu.contains(event.relatedTarget)) chatMenu.open = false;
+    });
     root.querySelector('#dash-chat-clear').addEventListener('click', () => {
+      chatMenu.open = false;
       chat.messages = [];
       chat.error = '';
       updateChat();
