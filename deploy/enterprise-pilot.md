@@ -7,16 +7,44 @@
 | 领域 | 已有能力 | 开放真实外发前必须验证 |
 | --- | --- | --- |
 | 账号与资料 | 本地账号、角色、TOTP、账号停用、文档共享与委托收窄。 | 验证企业身份源与离职撤权；如暂用本地账号，明确 MFA、撤权流程及责任人。用两个普通账号验证资料、任务、附件和发件记录不越权。 |
-| 审批 | 确认绑定操作版本；现有 `ROLE_APPROVE` 同时包含员工与管理员，不等同于独立审批。 | 服务端拒绝自批、未指派审批和绕过审批直接执行。修改收件人或附件、撤销资料权限后，旧批准不能产生外发。 |
+| 审批 | 确认绑定操作版本；指定审批人；已读回执；或签/会签；转交；SLA 催办与超时升级（v0.61）。现有 `ROLE_APPROVE` 同时包含员工与管理员，不等同于独立审批。 | 服务端拒绝自批、未指派审批和绕过审批直接执行。修改收件人或附件、撤销资料权限后，旧批准不能产生外发。会签未完成时不得投递；转交后原审批人失效。 |
 | 发件与核对 | 本地 SMTP 回环覆盖审批前不投递、批准后收到 MIME 附件；重启后在途发送转为未知，可人工核对。 | 企业模式必须阻止缺失或无效 SMTP 配置下的外发，不能静默回退模拟；禁止虚拟批准。在受控邮箱验证接受、拒绝和结果未知。未知不自动重发，核对记录操作者、证据与结论。 |
 | 部署与恢复 | HTTPS/Docker 部署说明、健康检查、备份校验和文件恢复。 | 停写后备份，在隔离目录恢复并启动，验证账号、资料、附件、待审任务及审计链。不得在线使用 `restore --force`，它会跳过端口探测。单独托管配置和密钥，约定可接受的恢复时间与数据丢失范围。 |
 | 运维与数据 | 任务回放和审计导出。 | 明确数据保留、日志脱敏和紧急停发责任。停发演练须证明不再产生新投递，且仍能查历史回执和审计。 |
 
 ## 实施顺序
 
-1. **隔离影子试点**：仅用合成数据和本地 SMTP。设置 `SAFE_OFFICE_MODE=enterprise`，将 `SAFE_OFFICE_MAIL_APPROVER` 指向独立的启用管理员账号，并配置 SMTP 收件人白名单。员工起草后，指定审批人在「审批与确认」中核对冻结版本并批准发送。审批人不能批准自己发起的邮件；企业模式关闭邮件自动确认、自动回信和设备审批路径。启动检查不验证 SMTP 连通性或凭据。
+1. **隔离影子试点**：仅用合成数据和本地 SMTP。设置 `SAFE_OFFICE_MODE=enterprise`，用 `SAFE_OFFICE_MAIL_APPROVERS`（逗号分隔）指定独立审批人，或沿用 `SAFE_OFFICE_MAIL_APPROVER`；配置 SMTP 收件人白名单。员工起草后，审批人在「审批与确认」中核对冻结版本并批准。审批人不能批准自己发起的邮件；企业模式关闭邮件自动确认、自动回信和设备审批路径。启动检查不验证 SMTP 连通性或凭据。
 2. **目标环境验收**：接企业测试账号、测试资料源和受控邮箱。分别用发起人、另一位员工、审批人和审计员操作，记录任务、审批人、附件版本、投递结果及审计位置；完成停发与恢复演练。
 3. **限量真实试用**：所有阻断项关闭后，再由企业负责人批准。出现越权、重复投递、无法解释的发送状态或审计缺失，立即暂停新增外发并保留证据。
+
+## 审批流（v0.61）
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `SAFE_OFFICE_MAIL_APPROVERS` | 空（回退 `SAFE_OFFICE_MAIL_APPROVER`） | 逗号分隔的审批人，必须都是启用的管理员 |
+| `SAFE_OFFICE_MAIL_APPROVAL_MODE` | `any` | `any` 或签（任一批准即发送）；`all` 会签（全部批准后发送，至少两人） |
+| `SAFE_OFFICE_MAIL_ESCALATION_APPROVER` | 空 | 超过 SLA 后自动加入的审批人（必须是启用的管理员） |
+| `SAFE_OFFICE_MAIL_APPROVAL_SLA_MIN` | 30 | 审批 SLA（分钟）；过半催办、超时升级；后台每分钟检查 |
+| `SAFE_OFFICE_OPERATION_TTL_MIN` | 企业模式 1440，其他 5 | 冻结操作有效期；企业模式保证长于 SLA |
+
+行为：
+
+- 审批人打开详情即记「已读」（写审计，重复打开不重复记）；
+- 审批卡展示等待时长、SLA、审批人状态与模式；详情包含来源任务、发起人、资料/附件数量和任务回放链接；
+- 会签未全部批准时不投递，只写「企业邮件会签批准」审计；
+- 待审批人可将本人那一票转交给其他启用管理员（不能转给发起人）；转交后原审批人失去批准权；
+- 停发与升级互不影响：停发期间仍可审批，但不会产生投递。
+
+## 借鉴企业 IM 的路线图
+
+已落地：已读回执、或签/会签、转交、SLA 催办与超时升级、审批卡引用原任务。
+
+下一阶段（尚未实现，不在当前交付承诺内）：
+
+- **离职撤权自动化**：企业身份源停用账号后，自动转交其待审批票并阻止旧批准（当前在每次审批时校验账号是否停用）。
+- **安全轻应用目录**：把 MCP 工具注册包装成「轻应用」，每个工具标注所需权限、经过的闸门与审计点。
+- **代理期与转交链报表**：代理时限、转交链导出与审计对账。
 
 ## 本地回归基线
 
@@ -29,7 +57,7 @@
 在 `prototype` 下运行：
 
 ```text
-node --test test/auth.test.cjs test/server.test.cjs test/share.test.cjs test/delegation-narrowing.test.cjs test/smtp-mailer.test.cjs test/smtp-loopback.test.cjs test/persistence.test.cjs test/backup.test.cjs test/task-replay.test.cjs test/supersede-receipt.test.cjs
+node --test test/auth.test.cjs test/server.test.cjs test/share.test.cjs test/delegation-narrowing.test.cjs test/smtp-mailer.test.cjs test/smtp-loopback.test.cjs test/persistence.test.cjs test/backup.test.cjs test/task-replay.test.cjs test/supersede-receipt.test.cjs test/enterprise-approval.test.cjs
 ```
 
-本轮 98 项通过，0 失败或跳过。结果不等同于企业身份、真实邮箱投递或生产恢复验收。
+本轮 108 项通过，0 失败或跳过。结果不等同于企业身份、真实邮箱投递或生产恢复验收。

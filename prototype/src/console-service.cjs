@@ -173,6 +173,10 @@ function hashAuditEntries(/** @type {any} */ entries) {
  * @property {any} [inboxReader]
  * @property {any} [autoReplyPolicy]
  * @property {string | null} [mailApprover]
+ * @property {string[] | null} [mailApprovers]
+ * @property {'any' | 'all'} [mailApprovalMode]
+ * @property {string | null} [mailEscalationApprover]
+ * @property {number} [mailApprovalSlaMs]
  * @property {((username: string) => { role: string, disabled: boolean } | null) | null} [mailUserInfo]
  * @property {string | null} [pairingCode]
  * @property {LlmLike | null} [llm]
@@ -201,6 +205,20 @@ function hashAuditEntries(/** @type {any} */ entries) {
  * @property {AsrLike | null} [asr]
  * @property {string} [audioDir]
  * @property {ActuatorLike | null} [actuator]
+ */
+
+/**
+ * 企业邮件审批记录（持久化到 console_state）。
+ * @typedef {object} MailApprovalRecord
+ * @property {'any' | 'all'} mode
+ * @property {string[]} required
+ * @property {{ actor: string, at: string, operationHash: unknown }[]} approved
+ * @property {{ from: string, to: string, at: string, by: string }[]} transfers
+ * @property {Record<string, string>} readBy
+ * @property {string} createdAt
+ * @property {string | null} remindedAt
+ * @property {boolean} overdueAudited
+ * @property {string | null} escalatedAt
  */
 
 class ConsoleService {
@@ -290,6 +308,10 @@ class ConsoleService {
     inboxReader = null,
     autoReplyPolicy = null,
     mailApprover = null,
+    mailApprovers = null,
+    mailApprovalMode = 'any',
+    mailEscalationApprover = null,
+    mailApprovalSlaMs = 30 * 60 * 1000,
     mailUserInfo = null,
     pairingCode = null,
     llm = null,
@@ -322,7 +344,24 @@ class ConsoleService {
     actuator = null,
   } = {}) {
     this.now = now;
-    this.mailApprover = mailApprover;
+    const approverList = Array.isArray(mailApprovers) && mailApprovers.length
+      ? mailApprovers
+      : (mailApprover ? [mailApprover] : []);
+    this.mailApprovers = [...new Set(approverList.filter(
+      (name) => typeof name === 'string' && name.trim(),
+    ).map((name) => name.trim()))];
+    // mailApprover 保留为主审批人/启用标志，兼容既有调用与测试
+    this.mailApprover = this.mailApprovers[0] || null;
+    /** @type {'any' | 'all'} */
+    this.mailApprovalMode = mailApprovalMode === 'all' ? 'all' : 'any';
+    this.mailEscalationApprover = mailEscalationApprover || null;
+    this.mailApprovalSlaMs = Number.isFinite(mailApprovalSlaMs) && mailApprovalSlaMs > 0
+      ? mailApprovalSlaMs
+      : 30 * 60 * 1000;
+    /** @type {Map<string, MailApprovalRecord> | null} */
+    this._mailApprovals = null;
+    this._mailSweepTimer = setInterval(() => this.sweepEnterpriseMailApprovals(), 60 * 1000);
+    if (typeof this._mailSweepTimer.unref === 'function') this._mailSweepTimer.unref();
     this.mailUserInfo = mailUserInfo;
     this._auditActorStorage = new AsyncLocalStorage();
     this.pairingCode = pairingCode ? String(pairingCode) : null;
@@ -3114,6 +3153,11 @@ class ConsoleService {
    */
   getOperation(id, { actor = null, role = null } = {}) {
     const operation = this._assertOperationVisible(id, actor, role);
+    if (this.mailApprover && operation.protocolAction === 1) {
+      const record = this._mailApprovalRecord(operation);
+      this._refreshMailApproval(operation, record);
+      this._markMailRead(operation, record, actor);
+    }
     const meta = this.operationMeta.get(id) || {};
     const events = this.store.listEvents().filter((/** @type {any} */ e) => e.operationId === id);
     const auditFrom = Number.isInteger(meta.auditFrom) ? meta.auditFrom : Math.max(0, this.audit.entries.length - 50);
@@ -3142,7 +3186,10 @@ class ConsoleService {
       protocolAction: operation.protocolAction,
       protocolLabel: PROTOCOL_ACTIONS[operation.protocolAction] || '未知',
       createdBy: operation.createdBy || '',
-      ...(this.mailApprover && operation.protocolAction === 1 ? { mailApprover: this.mailApprover } : {}),
+      ...(this.mailApprover && operation.protocolAction === 1 ? {
+        mailApprover: this.mailApprover,
+        mailApproval: this._mailApprovalView(operation),
+      } : {}),
       tool: operation.tool,
       recipient: operation.recipient,
       subject: operation.subject,
@@ -3176,6 +3223,7 @@ class ConsoleService {
         : null,
       autoConfirmed: ['auto-safe', 'auto-full'].includes(operation.confirmationId),
       docTitle: meta.docTitle || '',
+      command: meta.command || '',
       stepNumber: meta.stepNumber || null,
       runId: meta.runId || '',
       args: meta.args || null,
@@ -3245,6 +3293,140 @@ class ConsoleService {
     return this.mailApprover ? this.store.loadState('enterprise-mail-pause') : null;
   }
 
+  // ---------- 企业邮件审批（v0.61：已读 / 会签或签 / 转交 / 超时升级） ----------
+  /** @returns {Map<string, MailApprovalRecord>} */
+  _loadMailApprovals() {
+    if (!this._mailApprovals) {
+      const saved = /** @type {Record<string, MailApprovalRecord>} */ (
+        this.store.loadState('enterprise-mail-approvals') || {}
+      );
+      this._mailApprovals = new Map(Object.entries(saved));
+    }
+    return this._mailApprovals;
+  }
+
+  _persistMailApprovals() {
+    if (!this._mailApprovals) return;
+    const entries = [...this._mailApprovals.entries()];
+    // 只保留最近 500 条，避免状态表无限增长
+    for (const [id] of entries.slice(0, Math.max(0, entries.length - 500))) this._mailApprovals.delete(id);
+    this.store.saveState('enterprise-mail-approvals', Object.fromEntries(this._mailApprovals));
+  }
+
+  /** @param {any} operation @returns {MailApprovalRecord} */
+  _mailApprovalRecord(operation) {
+    const map = this._loadMailApprovals();
+    const existing = map.get(operation.operationId);
+    if (existing) return existing;
+    /** @type {MailApprovalRecord} */
+    const record = {
+      mode: this.mailApprovalMode,
+      required: [...this.mailApprovers],
+      approved: [],
+      transfers: [],
+      readBy: {},
+      createdAt: operation.createdAt,
+      remindedAt: null,
+      overdueAudited: false,
+      escalatedAt: null,
+    };
+    map.set(operation.operationId, record);
+    this._persistMailApprovals();
+    return record;
+  }
+
+  /** @param {any} operation @param {MailApprovalRecord} record @param {string} actor */
+  _markMailRead(operation, record, actor) {
+    if (!actor || !record.required.includes(actor) || record.readBy?.[actor]) return;
+    record.readBy = record.readBy || {};
+    record.readBy[actor] = this._iso();
+    this._persistMailApprovals();
+    this.auditAction(actor, '企业邮件审批已读', {
+      operationId: operation.operationId,
+      pendingBy: record.required.filter((name) => !record.approved.some((a) => a.actor === name)),
+    });
+  }
+
+  /** @param {any} operation @param {MailApprovalRecord} record */
+  _refreshMailApproval(operation, record) {
+    if (operation.state !== 'frozen') return false;
+    if (Date.parse(operation.expiresAt) <= this.now()) return false;
+    const elapsed = this.now() - Date.parse(operation.createdAt);
+    const pendingBy = record.required.filter((name) => !record.approved.some((a) => a.actor === name));
+    let changed = false;
+    if (elapsed >= this.mailApprovalSlaMs / 2 && !record.remindedAt) {
+      record.remindedAt = this._iso();
+      this.auditAction('系统', '企业邮件审批催办', {
+        operationId: operation.operationId, pendingBy, waitedMinutes: Math.floor(elapsed / 60000),
+      });
+      changed = true;
+    }
+    if (elapsed >= this.mailApprovalSlaMs && !record.escalatedAt) {
+      if (this.mailEscalationApprover && !record.required.includes(this.mailEscalationApprover)) {
+        record.required.push(this.mailEscalationApprover);
+        record.escalatedAt = this._iso();
+        this.auditAction('系统', '企业邮件审批超时升级', {
+          operationId: operation.operationId, escalationApprover: this.mailEscalationApprover,
+          pendingBy, waitedMinutes: Math.floor(elapsed / 60000),
+        });
+        changed = true;
+      } else if (!this.mailEscalationApprover && !record.overdueAudited) {
+        record.overdueAudited = true;
+        this.auditAction('系统', '企业邮件审批超时', {
+          operationId: operation.operationId, pendingBy, waitedMinutes: Math.floor(elapsed / 60000),
+        });
+        changed = true;
+      }
+    }
+    if (changed) this._persistMailApprovals();
+    return changed;
+  }
+
+  sweepEnterpriseMailApprovals() {
+    if (!this.mailApprover || this.closed) return 0;
+    let changed = 0;
+    for (const operation of this.store.listOperations()) {
+      if (operation.protocolAction !== 1 || operation.state !== 'frozen') continue;
+      const record = this._mailApprovalRecord(operation);
+      if (this._refreshMailApproval(operation, record)) changed += 1;
+    }
+    return changed;
+  }
+
+  /** @param {any} operation */
+  _mailApprovalView(operation) {
+    if (!this.mailApprover || operation.protocolAction !== 1) return null;
+    const record = this._mailApprovalRecord(operation);
+    const approvedBy = record.approved.map((entry) => entry.actor);
+    const pendingBy = record.required.filter((name) => !approvedBy.includes(name));
+    const due = this.now() >= Date.parse(operation.createdAt) + this.mailApprovalSlaMs;
+    const outbox = this.store.getOutboxByOperation(operation.operationId);
+    let status;
+    if (operation.state === 'rejected') status = 'rejected';
+    else if (operation.state === 'executed') {
+      status = outbox?.state === 'unknown' ? 'unknown' : (outbox?.state === 'failed' ? 'failed' : 'sent');
+    } else if (operation.state === 'executing') status = 'sending';
+    else if (Date.parse(operation.expiresAt) <= this.now()) status = 'expired';
+    else if (due && pendingBy.length) status = 'overdue';
+    else if (approvedBy.length) status = 'partial';
+    else if (Object.keys(record.readBy || {}).length) status = 'read';
+    else status = 'pending';
+    return {
+      mode: record.mode,
+      required: record.required,
+      approvedBy,
+      pendingBy,
+      readBy: record.readBy || {},
+      remindedAt: record.remindedAt,
+      escalatedAt: record.escalatedAt,
+      escalationApprover: this.mailEscalationApprover,
+      slaMinutes: Math.round(this.mailApprovalSlaMs / 60000),
+      waitingMinutes: Math.max(0, Math.floor((this.now() - Date.parse(operation.createdAt)) / 60000)),
+      due,
+      status,
+    };
+  }
+
   /** @param {any} operation */
   _assertMailNotPaused(operation) {
     if (operation.protocolAction === 1 && this.enterpriseMailPause()?.paused) {
@@ -3269,7 +3451,7 @@ class ConsoleService {
   /** @param {string} id @param {{ actor?: string | null, role?: string | null, operationHash?: unknown }} [options] */
   async approveEnterpriseMail(id, { actor = null, role = null, operationHash } = {}) {
     if (!this.mailApprover) throw new ConsoleError('NOT_FOUND', '未启用企业邮件审批', 404);
-    if (!actor || actor !== this.mailApprover || role !== '管理员') {
+    if (!actor || role !== '管理员') {
       throw new ConsoleError('FORBIDDEN', '只有指定审批人可审核企业邮件', 403);
     }
     const reviewer = this.mailUserInfo?.(actor);
@@ -3278,6 +3460,11 @@ class ConsoleService {
     }
     const operation = this._assertOperationVisible(id, actor, role);
     if (operation.protocolAction !== 1) throw new ConsoleError('CONFLICT', '该操作不是邮件', 409);
+    const record = this._mailApprovalRecord(operation);
+    this._refreshMailApproval(operation, record);
+    if (!record.required.includes(actor)) {
+      throw new ConsoleError('FORBIDDEN', '只有指定审批人可审核企业邮件', 403);
+    }
     this._assertMailNotPaused(operation);
     this._assertNotSelfApproval(operation, actor);
     const author = operation.createdBy ? this.mailUserInfo?.(operation.createdBy) : null;
@@ -3288,6 +3475,9 @@ class ConsoleService {
       || operationHash !== operation.operationHash || !verifyOperation(operation).ok) {
       throw new ConsoleError('CONFLICT', '草稿已变更、过期或已处理，请刷新后重新核对', 409);
     }
+    if (record.approved.some((entry) => entry.actor === actor)) {
+      throw new ConsoleError('CONFLICT', '你已批准该邮件，等待其他审批人', 409);
+    }
     for (const sourceId of operation.sourceDocIds) {
       const source = getDocumentById(sourceId);
       if (!source || this.business.deletedDocIds.has(sourceId) || !this._docRowVisible(source, operation.createdBy, author.role)) {
@@ -3295,15 +3485,56 @@ class ConsoleService {
       }
     }
     this._assertAttachmentsIntact(operation);
+    this._markMailRead(operation, record, actor);
+    record.approved.push({ actor, at: this._iso(), operationHash });
+    this._persistMailApprovals();
+    const approvalDetail = {
+      operationId: id, operationHash, approver: actor, createdBy: operation.createdBy,
+      mode: record.mode, approvedBy: record.approved.map((entry) => entry.actor), required: record.required,
+    };
+    if (record.mode === 'all' && record.approved.length < record.required.length) {
+      this.auditAction(actor, '企业邮件会签批准', approvalDetail);
+      return { ok: true, pending: true, operation: this._operationView(this.store.getOperation(id)) };
+    }
     const confirmationId = crypto.randomUUID();
-    this.auditAction(actor, '企业邮件审批', {
-      operationId: id, operationHash, confirmationId, approver: actor, createdBy: operation.createdBy,
-    });
+    this.auditAction(actor, '企业邮件审批', { ...approvalDetail, confirmationId });
     const confirmed = this.fulfillment.confirm(id, {
       confirmedHash: operationHash, confirmationId, deviceId: 'enterprise-review',
     });
     const send = await this._sendChecked(operation, confirmed.outbox.outboxId);
     return { ok: true, send, operation: this._operationView(this.store.getOperation(id)) };
+  }
+
+  /** @param {string} id @param {{ actor?: string | null, role?: string | null, to?: unknown, operationHash?: unknown }} [options] */
+  transferEnterpriseMail(id, { actor = null, role = null, to = null, operationHash } = {}) {
+    if (!this.mailApprover) throw new ConsoleError('NOT_FOUND', '未启用企业邮件审批', 404);
+    if (!actor || role !== '管理员') throw new ConsoleError('FORBIDDEN', '只有管理员可转交审批', 403);
+    const operation = this._assertOperationVisible(id, actor, role);
+    if (operation.protocolAction !== 1) throw new ConsoleError('CONFLICT', '该操作不是邮件', 409);
+    const record = this._mailApprovalRecord(operation);
+    this._refreshMailApproval(operation, record);
+    if (operation.state !== 'frozen' || Date.parse(operation.expiresAt) <= this.now()
+      || operationHash !== operation.operationHash) {
+      throw new ConsoleError('CONFLICT', '草稿已变更、过期或已处理，请刷新后重新核对', 409);
+    }
+    const approvedBy = record.approved.map((entry) => entry.actor);
+    if (!record.required.includes(actor) || approvedBy.includes(actor)) {
+      throw new ConsoleError('FORBIDDEN', '只有待审批的审批人可以转交', 403);
+    }
+    const targetName = typeof to === 'string' ? to.trim() : '';
+    if (targetName === operation.createdBy) throw new ConsoleError('FORBIDDEN', '不能转交给邮件发起人', 403);
+    const target = targetName ? this.mailUserInfo?.(targetName) : null;
+    if (!target || target.disabled || target.role !== '管理员') {
+      throw new ConsoleError('BAD_REQUEST', '转交对象必须是启用的管理员账号', 400);
+    }
+    if (record.required.includes(targetName)) throw new ConsoleError('CONFLICT', '该账号已在审批列表中', 409);
+    record.required = record.required.map((name) => (name === actor ? targetName : name));
+    record.transfers.push({ from: actor, to: targetName, at: this._iso(), by: actor });
+    this._persistMailApprovals();
+    this.auditAction(actor, '企业邮件审批转交', {
+      operationId: id, from: actor, to: targetName, operationHash,
+    });
+    return { ok: true, operation: this._operationView(this.store.getOperation(id)) };
   }
 
   /**
@@ -4772,6 +5003,7 @@ class ConsoleService {
   close() {
     if (this.closed) return;
     this.closed = true;
+    clearInterval(this._mailSweepTimer);
     this.stopBouncePolling();
     this.stopAutoReplyPolling();
     this.stopAuditExportTimer();

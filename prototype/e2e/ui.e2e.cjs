@@ -34,6 +34,36 @@ async function dropFirstTaskPoll(page) {
   });
 }
 
+test('UI 企业邮件：已读状态、来源任务与转交审批', { timeout: 45000 }, async (t) => {
+  const { salt, hash } = hashPassword('password123');
+  const users = [['author', '员工'], ['reviewer', '管理员'], ['second', '管理员']];
+  const auth = new AuthService({ users: users.map(([username, role]) => ({ username, role, salt, hash })) });
+  const started = await startServer({ port: 0, auth, mailApprover: 'reviewer', allowVirtualConfirm: false });
+  t.after(() => started.close());
+  const sample = started.service.getDemoSamples().find((entry) => entry.id === 'external-confirm');
+  const run = await started.service.runCommand({ ...sample, operator: 'author' });
+  const operationId = run.operations[0].operationId;
+  const browser = await launch(t);
+  const page = await browser.newPage();
+  await page.goto(started.url);
+  await page.fill('#username', 'reviewer');
+  await page.fill('#password', 'password123');
+  await page.click('#submit');
+  await page.waitForSelector('#current-user:not([hidden])');
+  await page.goto(`${started.url}/#/approvals`);
+  await page.locator(`[data-op-action="detail"][data-id="${operationId}"]`).click();
+  await page.waitForSelector('#operation-detail');
+  const detail = page.locator('#operation-detail');
+  assert.match(await detail.innerText(), /来源任务/);
+  assert.match(await detail.innerText(), /已读待批/, '审批人打开详情后应显示已读');
+  page.once('dialog', (dialog) => dialog.accept('second'));
+  await page.click('#mail-transfer');
+  await page.locator('.mail-approvers').getByText('second').waitFor();
+  const view = started.service.getOperation(operationId, { actor: 'second', role: '管理员' }).operation;
+  assert.deepEqual(view.mailApproval.required, ['second'], '转交后审批人应更新');
+  assert.equal(started.service.mailer.calls.length, 0);
+});
+
 test('UI：企业邮件停发、刷新与恢复', { timeout: 30000 }, async (t) => {
   const { salt, hash } = hashPassword('password123');
   const auth = new AuthService({ users: [{ username: 'reviewer', role: '管理员', salt, hash }] });

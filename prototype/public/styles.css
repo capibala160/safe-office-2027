@@ -593,6 +593,10 @@ details.advanced > summary { cursor: pointer; color: var(--sub); font-size: 12.5
 .receipt-meta { margin: 12px 0 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; }
 .mail-comparison { margin-bottom: 14px; overflow-wrap: anywhere; }
 .mail-comparison h3 { margin: 0 0 10px; font-size: 15px; }
+.mail-approval h3 { margin: 0 0 10px; font-size: 15px; }
+.mail-source { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow-wrap: anywhere; }
+.mail-approvers { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 10px 0; padding: 0; list-style: none; }
+.mail-approvers li { display: flex; align-items: center; gap: 6px; }
 .risk-evidence li { margin-block: 8px; }
 .risk-match { background: #ffdf86; color: #302202; border-radius: 2px; }
 .compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

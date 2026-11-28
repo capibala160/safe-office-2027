@@ -907,6 +907,14 @@ function createConsoleServer({
           ...userContext(req), operationHash: body.operationHash,
         }));
       }
+      const mailTransfer = pathname.match(/^\/api\/operations\/([^/]+)\/transfer-mail$/);
+      if (mailTransfer && method === 'POST') {
+        requireRole(req, ROLE_ADMIN, '转交企业邮件审批');
+        const body = await readJson(req);
+        return sendJson(res, 200, service.transferEnterpriseMail(decodeURIComponent(mailTransfer[1]), {
+          ...userContext(req), to: body.to, operationHash: body.operationHash,
+        }));
+      }
       if (pathname === '/api/rollback' && method === 'POST') {
         requireRole(req, ROLE_ADMIN, '回滚');
         const body = await readJson(req);
@@ -1192,6 +1200,11 @@ async function startServer({
   allowVirtualConfirm = true,
   inboxReader = null,
   mailApprover = null,
+  mailApprovers = null,
+  mailApprovalMode = 'any',
+  mailEscalationApprover = null,
+  mailApprovalSlaMs = 30 * 60 * 1000,
+  operationTtlMs = 5 * 60 * 1000,
 } = {}) {
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
   if (!loopback && !allowLan) {
@@ -1285,6 +1298,11 @@ async function startServer({
         actuator,
         mailer: mailer || new FakeMailer(),
         mailApprover,
+        mailApprovers,
+        mailApprovalMode,
+        mailEscalationApprover,
+        mailApprovalSlaMs,
+        operationTtlMs,
         mailUserInfo: auth ? (username) => auth.userInfo(username) : null,
       });
     } else {
@@ -1295,6 +1313,11 @@ async function startServer({
         actuator,
         mailer: mailer || new FakeMailer(),
         mailApprover,
+        mailApprovers,
+        mailApprovalMode,
+        mailEscalationApprover,
+        mailApprovalSlaMs,
+        operationTtlMs,
         mailUserInfo: auth ? (username) => auth.userInfo(username) : null,
         nearfieldTransportFactory,
         gate4Nearfield,
@@ -1434,10 +1457,34 @@ if (require.main === module) {
     process.exit(1);
   }
   const enterpriseMode = process.env.SAFE_OFFICE_MODE === 'enterprise';
-  const mailApprover = enterpriseMode ? (process.env.SAFE_OFFICE_MAIL_APPROVER || '').trim() : null;
-  const reviewer = mailApprover ? auth?.userInfo(mailApprover) : null;
-  if (enterpriseMode && (!reviewer || reviewer.disabled || reviewer.role !== '管理员')) {
-    console.error(`✗ 企业模式要求 SAFE_OFFICE_MAIL_APPROVER 指向启用的管理员：${usersFile}`);
+  const mailApprovers = enterpriseMode
+    ? [...new Set(String(process.env.SAFE_OFFICE_MAIL_APPROVERS || process.env.SAFE_OFFICE_MAIL_APPROVER || '')
+      .split(',').map((name) => name.trim()).filter(Boolean))]
+    : [];
+  const mailApprover = mailApprovers[0] || null;
+  const mailApprovalMode = process.env.SAFE_OFFICE_MAIL_APPROVAL_MODE === 'all' ? 'all' : 'any';
+  const mailEscalationApprover = enterpriseMode
+    ? (process.env.SAFE_OFFICE_MAIL_ESCALATION_APPROVER || '').trim() || null
+    : null;
+  const mailApprovalSlaMs = Math.max(1, Number(process.env.SAFE_OFFICE_MAIL_APPROVAL_SLA_MIN) || 30) * 60 * 1000;
+  // 企业审批需要留出处理与升级时间：默认 24 小时，并保证长于 SLA
+  const operationTtlMs = (() => {
+    const minutes = Math.max(1, Number(process.env.SAFE_OFFICE_OPERATION_TTL_MIN) || (enterpriseMode ? 24 * 60 : 5));
+    const base = minutes * 60 * 1000;
+    return enterpriseMode && base <= mailApprovalSlaMs ? mailApprovalSlaMs + 60 * 60 * 1000 : base;
+  })();
+  const invalidApprovers = [...mailApprovers, ...(mailEscalationApprover ? [mailEscalationApprover] : [])]
+    .filter((name) => {
+      const user = auth?.userInfo(name);
+      return !user || user.disabled || user.role !== '管理员';
+    });
+  if (enterpriseMode && (!mailApprovers.length || invalidApprovers.length)) {
+    console.error(`✗ 企业模式要求 SAFE_OFFICE_MAIL_APPROVER(S) 与升级审批人指向启用的管理员`
+      + `${invalidApprovers.length ? `（无效：${invalidApprovers.join('、')}）` : ''}：${usersFile}`);
+    process.exit(1);
+  }
+  if (enterpriseMode && mailApprovalMode === 'all' && mailApprovers.length < 2) {
+    console.error('✗ 会签模式（SAFE_OFFICE_MAIL_APPROVAL_MODE=all）至少需要两名审批人');
     process.exit(1);
   }
   if (process.env.SAFE_OFFICE_AUTH === 'required' && !auth) {
@@ -1496,6 +1543,11 @@ if (require.main === module) {
     allowVirtualConfirm,
     inboxReader,
     mailApprover,
+    mailApprovers,
+    mailApprovalMode,
+    mailEscalationApprover,
+    mailApprovalSlaMs,
+    operationTtlMs,
   }).then(({ url, phoneUrls, pairingCode: code, service }) => {
     console.log(`安全智慧办公 · 办公套件控制台 v${VERSION}`);
     if (enterpriseMode) console.log('  运行模式：企业试点');

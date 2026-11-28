@@ -333,8 +333,28 @@
     </section>`;
   }
 
+  function mailApprovalBadge(op) {
+    const approval = op.mailApproval;
+    if (!approval) return '';
+    const labels = {
+      pending: '待审批', read: '已读待批', partial: '会签中', overdue: '超时未处理',
+      sent: '已发送', unknown: '结果未知', failed: '发送失败', rejected: '已拒绝',
+      expired: '已过期', sending: '发送中',
+    };
+    const tone = ['sent'].includes(approval.status) ? 'pass'
+      : ['failed', 'overdue', 'rejected', 'expired'].includes(approval.status) ? 'block'
+        : ['partial', 'read'].includes(approval.status) ? 'warn' : 'info';
+    const progress = approval.mode === 'all' ? ` ${approval.approvedBy.length}/${approval.required.length}` : '';
+    return `<span class="badge ${tone}">${esc(labels[approval.status] || approval.status)}${progress}</span>`;
+  }
+
   function confirmationLabel(op) {
-    if (op.mailApprover) return '企业独立审批';
+    if (op.mailApprover) {
+      const approval = op.mailApproval || {};
+      const mode = approval.mode === 'all' ? '会签' : '独立审批';
+      const waiting = Number.isFinite(approval.waitingMinutes) ? ` · 已等待 ${approval.waitingMinutes} 分钟` : '';
+      return `企业${mode} ${mailApprovalBadge(op)}${waiting}`;
+    }
     if (op.confirmationId === 'auto-full') return '<span class="badge block">全自动批准（未按键）</span>';
     if (op.confirmationId === 'auto-safe') return '<span class="badge warn">低风险自动批准</span>';
     if (op.confirmationId === 'policy-auto') return '<span class="badge info">策略自动确认</span>';
@@ -1631,7 +1651,10 @@
   // ---------- 审批与确认 ----------
   function renderOperationDetail(detail, revisions = null, canEdit = false, username = null) {
     const op = detail.operation;
-    const canApprove = op.mailApprover && username === op.mailApprover && username !== op.createdBy && op.state === 'frozen' && !op.expired;
+    const mail = op.mailApproval || null;
+    const canApprove = Boolean(op.mailApprover && mail && username
+      && (mail.pendingBy || []).includes(username)
+      && username !== op.createdBy && op.state === 'frozen' && !op.expired);
     const versionBlock = revisions && revisions.revisions && revisions.revisions.length
       ? `<div class="mt12"><div class="sub-text">版本历史（当前 v${esc(revisions.current.revision)}）</div>
           ${revisions.revisions.slice().reverse().map((r) => `<details class="rev"><summary>v${esc(r.revision)} · ${esc(dateTime(r.createdAt))} · ${esc(r.editor)} · ${esc(short(r.operationHash, 10))}</summary>${renderDiff(r.body, revisions.current.body)}</details>`).join('')}
@@ -1662,7 +1685,24 @@
         </div>
       </div>
       ${bodyBlock}
-      ${op.mailApprover ? `<section class="mt12"><h3>企业邮件审核</h3><p>指定审批人：${esc(op.mailApprover)}</p>${renderApprovalFields(op)}${canApprove ? '<label><input type="checkbox" id="mail-review-ack"> 我已核对收件人、正文及附件版本</label><button type="button" class="btn" id="mail-review-submit" disabled>批准并发送</button>' : ''}</section>` : ''}
+      ${op.mailApprover ? `<section class="mt12 mail-approval">
+        <h3>企业邮件审核 ${mailApprovalBadge(op)}</h3>
+        <div class="mail-source">
+          <div class="sub-text">来源任务</div>
+          <div>${esc(op.command || '（无命令记录）')}</div>
+          <div class="sub-text mt8">发起人 ${esc(op.createdBy || '—')} · ${esc(dateTime(op.createdAt))} · 资料 ${(op.sourceDocIds || []).length} 份 · 附件 ${(op.attachments || []).length} 个${op.runId ? ` · <a href="${replayHref(op.runId)}">任务回放</a>` : ''}</div>
+        </div>
+        <div class="sub-text mt12">审批模式：${(op.mailApproval?.mode === 'all') ? '会签（全部批准后发送）' : '或签（任一审批人批准即发送）'} · SLA ${esc(op.mailApproval?.slaMinutes ?? 0)} 分钟 · 已等待 ${esc(op.mailApproval?.waitingMinutes ?? 0)} 分钟${op.mailApproval?.escalatedAt ? ` · 已升级给 ${esc(op.mailApproval.escalationApprover || '')}` : ''}</div>
+        <ul class="mail-approvers">${(op.mailApproval?.required || [op.mailApprover]).map((name) => {
+          const approved = (op.mailApproval?.approvedBy || []).includes(name);
+          const readAt = op.mailApproval?.readBy?.[name];
+          return `<li><span class="mono">${esc(name)}</span> ${approved ? '<span class="badge pass">已批准</span>' : readAt ? '<span class="badge info">已读待批</span>' : '<span class="badge warn">待批</span>'}</li>`;
+        }).join('')}</ul>
+        ${renderApprovalFields(op)}
+        ${canApprove ? `<label><input type="checkbox" id="mail-review-ack"> 我已核对收件人、正文及附件版本</label>
+        <div class="btn-row"><button type="button" class="btn" id="mail-review-submit" disabled>${op.mailApproval?.mode === 'all' ? `批准会签（${op.mailApproval.approvedBy.length}/${op.mailApproval.required.length}）` : '批准并发送'}</button><button type="button" class="btn ghost" id="mail-transfer">转交审批</button></div>` : ''}
+        ${op.mailApprover && username && (op.mailApproval?.approvedBy || []).includes(username) && op.state === 'frozen' ? '<div class="sub-text mt8">你已批准该邮件，等待其他审批人。</div>' : ''}
+      </section>` : ''}
       ${canEdit && ['frozen', 'executed'].includes(op.state) && op.action === 'sendExternalEmail' ? `<details class="advanced mt12"><summary>${op.state === 'frozen' ? '修改收件人与附件' : '以此为参考新建外发任务'}</summary>
         <p>${op.state === 'frozen' ? '继续后会撤销当前草稿，待确认挑战随即失效。' : '原任务已执行，原回执保留。继续后会创建另一条外发任务，须单独确认。'}</p>
         <div id="op-replace-preview" aria-live="polite"></div>
@@ -1724,12 +1764,30 @@
         const res = await API.post(`/api/operations/${encodeURIComponent(selectedOperation.operationId)}/approve-mail`, {
           operationHash: selectedOperation.operationHash,
         });
-        toast(`发送状态：${statusText[res.send.state] || res.send.state}`, res.send.state === 'sent' ? 'ok' : 'info');
+        if (res.pending) {
+          const approval = res.operation?.mailApproval;
+          toast(`会签已记录（${approval ? `${approval.approvedBy.length}/${approval.required.length}` : ''}），等待其他审批人`, 'info');
+        } else {
+          toast(`发送状态：${statusText[res.send.state] || res.send.state}`, res.send.state === 'sent' ? 'ok' : 'info');
+        }
         await c.refreshState();
         c.rerender();
       } catch (err) {
         toast(c.errorText(err), 'error');
         c.rerender();
+      }
+    });
+    root.querySelector('#mail-transfer')?.addEventListener('click', async () => {
+      const to = window.prompt('转交给哪位管理员？请输入用户名');
+      if (!to?.trim()) return;
+      try {
+        await API.post(`/api/operations/${encodeURIComponent(selectedOperation.operationId)}/transfer-mail`, {
+          to: to.trim(), operationHash: selectedOperation.operationHash,
+        });
+        toast('已转交审批', 'ok');
+        c.rerender();
+      } catch (err) {
+        toast(c.errorText(err), 'error');
       }
     });
     const replaceInput = root.querySelector('#op-replace-to');
