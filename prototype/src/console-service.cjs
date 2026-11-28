@@ -218,6 +218,7 @@ function hashAuditEntries(/** @type {any} */ entries) {
  * @property {string} createdAt
  * @property {string | null} remindedAt
  * @property {boolean} overdueAudited
+ * @property {boolean} [disabledAudited]
  * @property {string | null} escalatedAt
  */
 
@@ -3352,8 +3353,28 @@ class ConsoleService {
     if (operation.state !== 'frozen') return false;
     if (Date.parse(operation.expiresAt) <= this.now()) return false;
     const elapsed = this.now() - Date.parse(operation.createdAt);
-    const pendingBy = record.required.filter((name) => !record.approved.some((a) => a.actor === name));
     let changed = false;
+    // 离职/停用撤权：待审批人已停用时，把这一票转给升级审批人
+    for (const name of [...record.required]) {
+      if (record.approved.some((entry) => entry.actor === name)) continue;
+      const info = this.mailUserInfo?.(name);
+      if (!info || !info.disabled) continue;
+      const escalation = this.mailEscalationApprover;
+      if (escalation && !record.required.includes(escalation)) {
+        record.required = record.required.map((item) => (item === name ? escalation : item));
+        this.auditAction('系统', '企业邮件审批人停用转交', {
+          operationId: operation.operationId, from: name, to: escalation,
+        });
+        changed = true;
+      } else if (!record.disabledAudited) {
+        record.disabledAudited = true;
+        this.auditAction('系统', '企业邮件审批阻塞：审批人已停用', {
+          operationId: operation.operationId, approver: name,
+        });
+        changed = true;
+      }
+    }
+    const pendingBy = record.required.filter((name) => !record.approved.some((a) => a.actor === name));
     if (elapsed >= this.mailApprovalSlaMs / 2 && !record.remindedAt) {
       record.remindedAt = this._iso();
       this.auditAction('系统', '企业邮件审批催办', {
