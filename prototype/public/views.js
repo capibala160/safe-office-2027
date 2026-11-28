@@ -589,7 +589,7 @@
       const isUser = role === 'user';
       return `<div class="chat-message${isUser ? ' chat-user' : ''}">
         <span class="chat-avatar" aria-hidden="true">${isUser ? '你' : '助'}</span>
-        <div class="chat-bubble"><strong>${isUser ? '你' : '办公助手'}</strong><div class="chat-content">${esc(content)}</div></div>
+        <div class="chat-bubble"><span class="sr-only">${isUser ? '你' : '办公助手'}：</span><div class="chat-content">${esc(content)}</div></div>
       </div>`;
     }).join('');
     log.scrollTop = log.scrollHeight;
@@ -622,8 +622,8 @@
     // 老服务端没有 chat 字段时按可用处理；助手只走真实模型，Mock 不伪造回复
     const chatReady = model.chat !== false;
     const chatHint = chatReady
-      ? `聊天只生成文字；执行操作请点「开始任务」。${model.location === 'cloud' ? `内容会发送给 ${esc(model.model || '云端模型')}，请勿输入敏感信息。` : ''}`
-      : '未配置真实模型，助手暂不可用；在 config.env 配置 SAFE_OFFICE_LLM_ENDPOINT 与 SAFE_OFFICE_LLM_KEY 后重启。';
+      ? `对话只生成文字，不执行操作。${model.location === 'cloud' ? `对话会发送给 ${esc(model.model || '云端模型')}，请勿输入敏感信息。` : ''}`
+      : '未配置真实模型，仍可开始任务。';
     root.innerHTML = `
       ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<a href="#/governance">去人工复核</a></div>` : ''}
       <section class="card hero" aria-labelledby="dash-title">
@@ -633,18 +633,20 @@
             <button class="btn ghost small" id="dash-chat-clear" type="button" hidden>清空对话</button>
           </header>
           <div id="dash-chat-log" class="chat-log" role="log" aria-label="对话记录" tabindex="0" hidden></div>
-          <textarea class="textarea hero-input" id="dash-command" aria-describedby="dash-chat-hint" placeholder="问个问题、粘贴文字整理，或描述要执行的任务">${esc(draft)}</textarea>
-          <p class="chat-hint" id="dash-chat-hint">${chatHint}</p>
           <div id="dash-chat-status" class="chat-status" role="status"></div>
           <div class="chat-quick" id="dash-chat-quick" hidden>
             <button class="chat-chip" type="button" data-chat-quick="再短一点">再短一点</button>
             <button class="chat-chip" type="button" data-chat-quick="分条列出">分条列出</button>
             <button class="chat-chip" type="button" data-chat-quick="更正式一些">更正式一些</button>
           </div>
-          <div class="hero-actions">
-            <button class="btn" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送给助手</button>
-            <button class="btn ghost" id="dash-start" type="button">开始任务 <span aria-hidden="true">→</span></button>
+          <div class="workbench-composer">
+            <textarea class="hero-input" id="dash-command" aria-describedby="dash-chat-hint" placeholder="输入问题，或描述你想完成的任务">${esc(draft)}</textarea>
+            <div class="hero-actions">
+              <button class="btn${chatReady ? ' ghost' : ''}" id="dash-start" type="button">开始任务</button>
+              <button class="btn${chatReady ? '' : ' ghost'}" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送给助手</button>
+            </div>
           </div>
+          <p class="chat-hint" id="dash-chat-hint">${chatHint}</p>
         </div>
       </section>
       <section class="dashboard-templates" aria-labelledby="dashboard-templates-title">
@@ -653,7 +655,7 @@
           <button class="quick" data-quick="纪要" type="button"><span class="quick-icon" aria-hidden="true">▤</span><strong>整理会议纪要</strong><span>汇总周例会要点并归档</span></button>
           <button class="quick" data-quick="外发" type="button"><span class="quick-icon" aria-hidden="true">✉</span><strong>合作材料外发</strong><span>准备草稿并核对收件人</span></button>
           <button class="quick" data-quick="日程" type="button"><span class="quick-icon" aria-hidden="true">▦</span><strong>安排来访日程</strong><span>填写会议主题与时间</span></button>
-          <button class="quick" data-quick="设备" type="button"><span class="quick-icon" aria-hidden="true">◇</span><strong>设备联动演示</strong><span>体验会议室门锁确认流程</span></button>
+          <button class="quick" data-quick="设备" type="button"><span class="quick-icon" aria-hidden="true">◇</span><strong>设备联动演示</strong><span>体验门锁确认与回执</span></button>
         </div>
       </section>
       <div class="two-col dashboard-lists">
