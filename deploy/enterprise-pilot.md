@@ -47,6 +47,22 @@
 - **安全轻应用目录**：把 MCP 工具注册包装成「轻应用」，每个工具标注所需权限、经过的闸门与审计点。
 - **代理期与转交链报表**：代理时限、转交链导出与审计对账。
 
+## 隔离演示实例（2026-11-28）
+
+服务器上单独跑一套企业模式实例，与公网演示站完全隔离：
+
+| 项 | 值 |
+| --- | --- |
+| 地址 | `https://101.132.160.81.nip.io/`（与主站同一张证书，nginx 单独 server 块） |
+| 容器 | `safe-office-enterprise`（`127.0.0.1:7813`）+ `safe-office-smtp-sink`（本地收件端） |
+| 数据 | `./prototype/data-enterprise`（独立用户表/审计/操作库，不碰主站数据） |
+| 审批 | `approver1` + `approver2` 会签；`approver3` 为超时升级与转交目标；`demo` 为发起人 |
+| 邮件 | 只投递到 `smtp-sink:2525`，落盘 `./smtp-sink/mail/*.eml`，**不转发外网** |
+| 配置 | `docker-compose.enterprise.yml` + 同目录 `enterprise.env`（SMTP 账号，600 权限，不入库） |
+| 操作 | `docker compose -f docker-compose.enterprise.yml up -d --build` / `down`；日志 `docker logs safe-office-enterprise`、`safe-office-smtp-sink` |
+
+演示路径：`demo` 登录 → 命令台跑「外发待确认」样例 → 冻结 → `approver1` 打开详情（记已读）→ 批准会签 1/2 → `approver2` 批准 → 发送成功；可在 `approver1` 详情里「转交审批」给 `approver3`，或等待 SLA 触发升级。收件结果在 `smtp-sink/mail` 下查看 `.eml`。账号密码通过安全渠道交付，不写入仓库。
+
 ## 本地回归基线
 
 ### 停发与核对

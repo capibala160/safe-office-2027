@@ -1,0 +1,35 @@
+# 企业试点隔离演示（v0.61）
+# 与公网演示实例完全分离：独立数据卷、独立端口、本地 SMTP 收件端（只落盘不转发）。
+# 启动：docker compose -f docker-compose.enterprise.yml up -d --build
+# 停止：docker compose -f docker-compose.enterprise.yml down
+# 密码与 SMTP 账号放在同目录 enterprise.env（不入库），格式见 deploy/README。
+services:
+  smtp-sink:
+    image: node:24-alpine
+    container_name: safe-office-smtp-sink
+    command: ["node", "/sink/server.cjs"]
+    volumes:
+      - ./smtp-sink:/sink
+    restart: unless-stopped
+
+  console-enterprise:
+    build: .
+    image: safe-office-console-enterprise
+    container_name: safe-office-enterprise
+    env_file: ./enterprise.env
+    environment:
+      SAFE_OFFICE_MODE: enterprise
+      SAFE_OFFICE_AUTH: required
+      SAFE_OFFICE_HOST: 0.0.0.0
+      SAFE_OFFICE_TRUST_PROXY: "1"
+      SAFE_OFFICE_MAIL_APPROVERS: approver1,approver2
+      SAFE_OFFICE_MAIL_APPROVAL_MODE: all
+      SAFE_OFFICE_MAIL_ESCALATION_APPROVER: approver3
+      SAFE_OFFICE_MAIL_APPROVAL_SLA_MIN: "5"
+    ports:
+      - "127.0.0.1:7813:7812"
+    volumes:
+      - ./prototype/data-enterprise:/app/data
+    depends_on:
+      - smtp-sink
+    restart: unless-stopped
