@@ -637,9 +637,11 @@
             <button class="chat-chip" type="button" data-chat-quick="更正式一些">更正式一些</button>
           </div>
           <div class="hero-actions">
-            <button class="btn" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送</button>
+            <button class="btn" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送给助手</button>
             <button class="btn ghost" id="dash-start" type="button">开始任务 <span aria-hidden="true">→</span></button>
             <button class="btn ghost" id="dash-chat-clear" type="button" hidden>清空对话</button>
+          </div>
+          <div class="hero-actions hero-links">
             <a class="btn ghost" href="#/demo">演示场景</a>
             <button class="btn ghost" id="dash-guide-show" type="button" ${guideHidden ? '' : 'hidden'}>演示向导</button>
           </div>
@@ -790,7 +792,7 @@
       btn.addEventListener('click', () => { void sendChat(btn.dataset.chatQuick); });
     });
     input.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+      if (!chatReady || event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       void sendChat();
     });
