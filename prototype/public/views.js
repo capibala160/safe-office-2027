@@ -585,9 +585,13 @@
     if (!log) return;
     const messages = chat.pending ? [...chat.messages, { role: 'user', content: chat.pending }] : chat.messages;
     log.hidden = !messages.length;
-    log.innerHTML = messages.map(({ role, content }) => `<div class="chat-message ${role === 'user' ? 'chat-user' : ''}">
-      <strong>${role === 'user' ? '你' : '办公助手'}</strong><div>${esc(content)}</div>
-    </div>`).join('');
+    log.innerHTML = messages.map(({ role, content }) => {
+      const isUser = role === 'user';
+      return `<div class="chat-message${isUser ? ' chat-user' : ''}">
+        <span class="chat-avatar" aria-hidden="true">${isUser ? '你' : '助'}</span>
+        <div class="chat-bubble"><strong>${isUser ? '你' : '办公助手'}</strong><div class="chat-content">${esc(content)}</div></div>
+      </div>`;
+    }).join('');
     log.scrollTop = log.scrollHeight;
     const status = root.querySelector('#dash-chat-status');
     status.textContent = chat.pending ? '正在回复…' : chat.error;
@@ -615,18 +619,19 @@
     const role = authUser ? authUser.role : null;
     const canDecide = !role || ['设备助手', '管理员'].includes(role);
     const model = state.model || {};
-    let guideHidden = false;
-    try { guideHidden = localStorage.getItem('safe-office.guide-hidden') === '1'; } catch { /* 隐私模式 */ }
     // 老服务端没有 chat 字段时按可用处理；助手只走真实模型，Mock 不伪造回复
     const chatReady = model.chat !== false;
     const chatHint = chatReady
-      ? `发送只生成文字，不执行任务；生成后可继续说「太长了，缩短点」。${model.location === 'cloud' ? `由 ${esc(model.model || '云端模型')} 生成，内容会发送给云模型，请勿粘贴敏感信息。` : ''}`
+      ? `聊天只生成文字；执行操作请点「开始任务」。${model.location === 'cloud' ? `内容会发送给 ${esc(model.model || '云端模型')}，请勿输入敏感信息。` : ''}`
       : '未配置真实模型，助手暂不可用；在 config.env 配置 SAFE_OFFICE_LLM_ENDPOINT 与 SAFE_OFFICE_LLM_KEY 后重启。';
     root.innerHTML = `
       ${risk.frozen ? `<div class="notice block"><strong>风险已冻结</strong>：风险分 ${esc(risk.score)} ≥ 阈值 ${esc(risk.threshold)}，高危动作会在转交前被拦截。<a href="#/governance">去人工复核</a></div>` : ''}
       <section class="card hero" aria-labelledby="dash-title">
         <div class="hero-compose">
-          <h1 id="dash-title"><label for="dash-command">今天要做什么？</label></h1>
+          <header class="workbench-heading">
+            <h1 id="dash-title"><label for="dash-command">今天要做什么？</label></h1>
+            <button class="btn ghost small" id="dash-chat-clear" type="button" hidden>清空对话</button>
+          </header>
           <div id="dash-chat-log" class="chat-log" role="log" aria-label="对话记录" tabindex="0" hidden></div>
           <textarea class="textarea hero-input" id="dash-command" aria-describedby="dash-chat-hint" placeholder="问个问题、粘贴文字整理，或描述要执行的任务">${esc(draft)}</textarea>
           <p class="chat-hint" id="dash-chat-hint">${chatHint}</p>
@@ -639,33 +644,8 @@
           <div class="hero-actions">
             <button class="btn" id="dash-send" type="button" ${chatReady ? '' : 'disabled'}>发送给助手</button>
             <button class="btn ghost" id="dash-start" type="button">开始任务 <span aria-hidden="true">→</span></button>
-            <button class="btn ghost" id="dash-chat-clear" type="button" hidden>清空对话</button>
-          </div>
-          <div class="hero-actions hero-links">
-            <a class="btn ghost" href="#/demo">演示场景</a>
-            <button class="btn ghost" id="dash-guide-show" type="button" ${guideHidden ? '' : 'hidden'}>演示向导</button>
           </div>
         </div>
-        <div class="hero-flow">
-          <h2>任务如何处理</h2>
-          <ol>
-            <li><strong>生成计划</strong><span>根据任务整理资料和执行步骤</span></li>
-            <li><strong>核对高危动作</strong><span>外发、删除、打印和设备操作按当前模式转交确认</span></li>
-            <li><strong>查看结果</strong><span>在任务回放中核对记录和回执</span></li>
-          </ol>
-        </div>
-      </section>
-      <section class="card demo-guide" id="dash-guide" ${guideHidden ? 'hidden' : ''} aria-labelledby="dash-guide-title">
-        <div class="card-head demo-guide-head">
-          <h2 id="dash-guide-title">第一次用？三步走完演示</h2>
-          <button class="btn ghost small" id="dash-guide-hide" type="button">收起向导</button>
-        </div>
-        <div class="demo-guide-grid">
-          <div class="demo-guide-step"><span class="num">01</span><strong>选一个模板</strong><span>从「整理会议纪要」开始，系统会读取、摘要并归档。</span><a class="btn small" href="#/command">去命令台</a></div>
-          <div class="demo-guide-step"><span class="num">02</span><strong>核对并确认</strong><span>外发、打印、设备动作会冻结，在审批页核对待确认操作。</span><a class="btn ghost small" href="#/approvals">打开审批</a></div>
-          <div class="demo-guide-step"><span class="num">03</span><strong>看任务回放</strong><span>回放里能看到发起人、确认端、执行回执和审计链。</span><a class="btn ghost small" href="#/replay">打开回放</a></div>
-        </div>
-        <div class="sub-text mt8">需要重来时，管理员可在治理页「重置演示」；普通账号继续用新任务覆盖演示流程即可。</div>
       </section>
       <section class="dashboard-templates" aria-labelledby="dashboard-templates-title">
         <h2 id="dashboard-templates-title">快捷模板</h2>
@@ -676,16 +656,6 @@
           <button class="quick" data-quick="设备" type="button"><span class="quick-icon" aria-hidden="true">◇</span><strong>设备联动演示</strong><span>体验会议室门锁确认流程</span></button>
         </div>
       </section>
-      <div class="dashboard-insights">
-        <section class="card dashboard-trend" aria-labelledby="dashboard-trend-title">
-          <div class="card-head"><h2 id="dashboard-trend-title">近 7 天任务</h2>${trendDays.length ? `<span class="sub">${trendTotal} 项 · 北京时间</span>` : ''}</div>
-          ${trendDays.length ? dailyChart(trendDays, '近 7 天每日任务数量') : '<div class="empty">任务统计暂时不可用</div>'}
-        </section>
-        <section class="dashboard-scene" aria-labelledby="dashboard-scene-title">
-          <div class="dashboard-scene-head"><div><h2 id="dashboard-scene-title">办公现场</h2><p class="sub-text">实时预览办公区域</p></div><a href="#/office">查看完整场景</a></div>
-          <div id="dashboard-office-preview"></div>
-        </section>
-      </div>
       <div class="two-col dashboard-lists">
         <section class="card">
           <div class="card-head"><h2>待你处理${opsRes ? ` <span class="sub">${pending.length} 条</span>` : ''}</h2><a href="#/approvals">全部审批</a></div>
@@ -713,25 +683,21 @@
             </div>`}
           </div>
         </section>
-      </div>`;
-
-    const guide = root.querySelector('#dash-guide');
-    const guideShow = root.querySelector('#dash-guide-show');
-    const guideHide = root.querySelector('#dash-guide-hide');
-    const setGuideHidden = (hidden) => {
-      if (guide) guide.hidden = hidden;
-      if (guideShow) guideShow.hidden = !hidden;
-      try {
-        if (hidden) localStorage.setItem('safe-office.guide-hidden', '1');
-        else localStorage.removeItem('safe-office.guide-hidden');
-      } catch { /* 隐私模式 */ }
-    };
-    guideHide?.addEventListener('click', () => setGuideHidden(true));
-    guideShow?.addEventListener('click', () => {
-      setGuideHidden(false);
-      guide?.scrollIntoView({ block: 'nearest' });
-    });
-    window.OfficeScene?.mount(root.querySelector('#dashboard-office-preview'));
+      </div>
+      <details class="card dashboard-more">
+        <summary>任务统计与使用指南</summary>
+        <div class="dashboard-insights">
+          <section aria-labelledby="dashboard-trend-title">
+            <div class="card-head"><h2 id="dashboard-trend-title">近 7 天任务</h2>${trendDays.length ? `<span class="sub">${trendTotal} 项 · 北京时间</span>` : ''}</div>
+            ${trendDays.length ? dailyChart(trendDays, '近 7 天每日任务数量') : '<div class="empty">任务统计暂时不可用</div>'}
+          </section>
+          <section aria-labelledby="dashboard-help-title">
+            <div class="card-head"><h2 id="dashboard-help-title">任务怎么走</h2></div>
+            <ol><li>选模板或描述任务，在命令台核对计划。</li><li>涉及外发、打印或设备的操作，按当前模式确认。</li><li>在最近任务中打开回放，查看结果和回执。</li></ol>
+            <div class="btn-row"><a class="btn ghost small" href="#/demo">演示场景</a><a class="btn ghost small" href="#/office">办公现场</a></div>
+          </section>
+        </div>
+      </details>`;
     sizeDailyChart(root);
     const quickText = {
       纪要: '整理周例会纪要并内部归档',
